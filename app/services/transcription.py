@@ -12,6 +12,7 @@ import httpx
 from app.config import get_settings
 from app.models.user import User
 from app.services import storage, system_state, whatsapp
+from app.services.crypto import encrypt_value
 from app.services.messaging import send_outbound
 from app.services.spend import is_under_cap, record_llm_cost
 from app.services.templates import TemplateCall
@@ -58,10 +59,11 @@ async def handle_voice(
         await pool.execute(
             """
             UPDATE messages
-            SET content=$1, media_analysis=$2, processing_state='expired'
-            WHERE id=$3
+            SET content=$1, content_encrypted=$2, media_analysis=$3, processing_state='expired'
+            WHERE id=$4
             """,
             "I can't transcribe right now -- can you send it as text?",
+            encrypt_value("I can't transcribe right now -- can you send it as text?"),
             {"unavailable": "daily_cap"},
             message_id,
         )
@@ -78,7 +80,12 @@ async def handle_voice(
     for attempt in range(2):
         try:
             transcript = await _groq_transcribe(audio_bytes, content_type)
-            await pool.execute("UPDATE messages SET content=$1 WHERE id=$2", transcript, message_id)
+            await pool.execute(
+                "UPDATE messages SET content=$1, content_encrypted=$2 WHERE id=$3",
+                transcript,
+                encrypt_value(transcript),
+                message_id,
+            )
             await record_llm_cost(pool, "transcription", 0.001)
             if should_enqueue:
                 await coalescer.add(user.id, message_id, user, source="media")

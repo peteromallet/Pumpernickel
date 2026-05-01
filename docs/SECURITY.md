@@ -9,9 +9,10 @@ here.
 
 **What this system protects against**
 
-- *Backup or DB-snapshot leakage.* The five highest-sensitivity content
+- *Backup or DB-snapshot leakage.* The highest-sensitivity content
   fields (`out_of_bounds.sensitive_core`, `messages.content`,
-  `memories.content`, `observations.content`, `bot_turns.reasoning`) are
+  `memories.content`, `observations.content`, `bot_turns.prompt_snapshot`,
+  `bot_turns.reasoning`) are
   written with AES-GCM ciphertext into `*_encrypted` columns when
   `DATA_ENCRYPTION_KEY` is configured. A snapshot leaked without the key is
   unreadable for those columns.
@@ -21,6 +22,12 @@ here.
   `service_role` has `BYPASSRLS`.
 - *Anon REST exposure.* Every privacy-relevant table has an explicit
   `deny_anon_*` policy. If the anon key were leaked, no rows are reachable.
+- *Legacy public-schema exposure.* The app data lives in the `mediator`
+  schema, not the Supabase `public` schema. Migration
+  `0011_lock_public_schema.sql` revokes `anon`/`authenticated` grants on
+  legacy `public` tables, enables + forces RLS, and adds deny-all policies so
+  old tables such as `public.conversations` are not reachable through
+  PostgREST.
 - *Single-key compromise.* The encryption key is held only in the
   application environment (Railway), not the database. A snapshot of the
   database alone cannot decrypt the protected columns.
@@ -60,6 +67,8 @@ here.
       `python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"`.
 - [ ] Apply migration `0007_security_hardening.sql` (RLS + FORCE RLS +
       `*_encrypted` columns + pgcrypto + idempotent backfill notice).
+- [ ] Apply migrations through `0011_lock_public_schema.sql` so legacy
+      `public` tables are not anonymously accessible.
 - [ ] Run `python -m scripts.backfill_encryption` once with the key set.
       Re-run is safe; the script only encrypts rows where the encrypted
       column is `NULL`.
@@ -70,6 +79,7 @@ here.
         (SELECT count(*) FROM messages       WHERE content IS NOT NULL        AND content_encrypted        IS NULL) AS msg_pending,
         (SELECT count(*) FROM memories       WHERE content IS NOT NULL        AND content_encrypted        IS NULL) AS mem_pending,
         (SELECT count(*) FROM observations   WHERE content IS NOT NULL        AND content_encrypted        IS NULL) AS obs_pending,
+        (SELECT count(*) FROM bot_turns      WHERE prompt_snapshot IS NOT NULL AND prompt_snapshot_encrypted IS NULL) AS prompt_pending,
         (SELECT count(*) FROM bot_turns      WHERE reasoning IS NOT NULL      AND reasoning_encrypted      IS NULL) AS turn_pending;
       ```
       Every column should be 0.

@@ -25,6 +25,7 @@ from resident_chat_runtime.discord_rest import DISCORD_API_BASE, DiscordRestClie
 
 from app.config import get_settings
 from app.models.user import upsert_user
+from app.services.crypto import encrypt_value
 from app.services.whitelist import is_allowed_phone
 
 logger = logging.getLogger(__name__)
@@ -329,10 +330,12 @@ class DiscordGatewayBot:
             SET edit_history = COALESCE(edit_history, '[]'::jsonb)
                     || jsonb_build_array(jsonb_build_object('content', content, 'at', now())),
                 content = $1,
+                content_encrypted = $2,
                 edited_at = now()
-            WHERE whatsapp_message_id = $2
+            WHERE whatsapp_message_id = $3
             """,
             message.get("content", ""),
+            encrypt_value(message.get("content", "")),
             str(message["id"]),
         )
 

@@ -306,7 +306,9 @@ class FakePool:
                 system_prompt_version,
                 model_version,
                 prompt_snapshot,
+                *encrypted,
             ) = args
+            prompt_snapshot_encrypted = encrypted[0] if encrypted else None
             row = {
                 "id": uuid4(),
                 "triggered_by_message_id": triggered_by_message_id,
@@ -315,10 +317,12 @@ class FakePool:
                 "system_prompt_version": system_prompt_version,
                 "model_version": model_version,
                 "prompt_snapshot": prompt_snapshot,
+                "prompt_snapshot_encrypted": prompt_snapshot_encrypted,
                 "started_at": datetime.now(UTC),
                 "completed_at": None,
                 "failure_reason": None,
                 "reasoning": "",
+                "reasoning_encrypted": None,
                 "final_output_message_id": None,
                 "tool_call_count": 0,
                 "duration_ms": None,
@@ -777,6 +781,8 @@ class FakePool:
             return None
         if compact.startswith("SELECT paused_at FROM system_state WHERE key = 'global_pause'"):
             return self.system_state["global_pause"].get("paused_at")
+        if compact.startswith("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id"):
+            return self.bot_turns[args[0]].get("reasoning") or ""
         raise AssertionError(f"unhandled fetchval SQL: {compact}")
 
     async def fetch(self, sql: str, *args):
@@ -1114,9 +1120,22 @@ class FakePool:
             media_url, message_id = args
             self.messages[message_id].update(media_type="image", media_url=media_url)
             return "UPDATE 1"
+        if compact.startswith("UPDATE messages SET content=$1, content_encrypted=$2 WHERE id"):
+            content, content_encrypted, message_id = args
+            self.messages[message_id]["content"] = content
+            self.messages[message_id]["content_encrypted"] = content_encrypted
+            return "UPDATE 1"
         if compact.startswith("UPDATE messages SET content=$1 WHERE id"):
             content, message_id = args
             self.messages[message_id]["content"] = content
+            return "UPDATE 1"
+        if compact.startswith("UPDATE messages SET content=$1, content_encrypted=$2, media_analysis=$3"):
+            content, content_encrypted, analysis, message_id = args
+            self.messages[message_id]["content"] = content
+            self.messages[message_id]["content_encrypted"] = content_encrypted
+            self.messages[message_id]["media_analysis"] = analysis
+            if "processing_state='expired'" in compact:
+                self.messages[message_id]["processing_state"] = "expired"
             return "UPDATE 1"
         if compact.startswith("UPDATE messages SET content=$1, media_analysis=$2"):
             content, analysis, message_id = args
@@ -1168,11 +1187,15 @@ class FakePool:
                     self.messages[message_id]["processing_state"] = "raw"
             return "UPDATE 1"
         if compact.startswith("UPDATE messages SET edit_history"):
-            new_content, wa_id = args
+            new_content = args[0]
+            content_encrypted = args[1] if len(args) == 3 else None
+            wa_id = args[-1]
             for message in self.messages.values():
                 if message["whatsapp_message_id"] == wa_id:
                     message["edit_history"] = [{"content": message["content"], "at": datetime.now(UTC).isoformat()}]
                     message["content"] = new_content
+                    if content_encrypted is not None:
+                        message["content_encrypted"] = content_encrypted
                     message["edited_at"] = datetime.now(UTC)
             return "UPDATE 1"
         if compact.startswith("UPDATE messages SET deleted_at"):
@@ -1312,9 +1335,12 @@ class FakePool:
                     item["status"] = "expired"
             return "UPDATE 1"
         if compact.startswith("UPDATE messages SET content='[deleted]'"):
+            content_encrypted = args[0] if args else None
             for message in self.messages.values():
                 if message["deleted_at"] is not None and message["content"] != "[deleted]":
                     message["content"] = "[deleted]"
+                    if content_encrypted is not None:
+                        message["content_encrypted"] = content_encrypted
             return "UPDATE 1"
         if compact.startswith("UPDATE bot_turns SET failure_reason='crashed_after_send'"):
             for turn in self.bot_turns.values():
@@ -1326,18 +1352,20 @@ class FakePool:
                     turn["failure_reason"] = "crashed_after_send"
             return "UPDATE 1"
         if compact.startswith("UPDATE bot_turns SET reasoning"):
-            note, turn_id = args
-            self.bot_turns[turn_id]["reasoning"] = (self.bot_turns[turn_id].get("reasoning") or "") + note
+            reasoning, reasoning_encrypted, turn_id = args
+            self.bot_turns[turn_id]["reasoning"] = reasoning
+            self.bot_turns[turn_id]["reasoning_encrypted"] = reasoning_encrypted
             return "UPDATE 1"
         if compact.startswith("UPDATE bot_turns SET final_output_message_id=$1 WHERE id=$2"):
             final_output_message_id, turn_id = args
             self.bot_turns[turn_id]["final_output_message_id"] = final_output_message_id
             return "UPDATE 1"
         if compact.startswith("UPDATE bot_turns SET final_output_message_id"):
-            final_output_message_id, reasoning, duration_ms, tool_call_count, turn_id = args
+            final_output_message_id, reasoning, reasoning_encrypted, duration_ms, tool_call_count, turn_id = args
             self.bot_turns[turn_id].update(
                 final_output_message_id=final_output_message_id,
-                reasoning=(self.bot_turns[turn_id].get("reasoning") or "") + reasoning,
+                reasoning=reasoning,
+                reasoning_encrypted=reasoning_encrypted,
                 completed_at=datetime.now(UTC),
                 duration_ms=duration_ms,
                 tool_call_count=tool_call_count,

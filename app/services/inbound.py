@@ -63,10 +63,12 @@ async def _handle_edit(pool: Any, target_id: str, new_content: str) -> None:
         SET edit_history = COALESCE(edit_history, '[]'::jsonb)
                 || jsonb_build_array(jsonb_build_object('content', content, 'at', now())),
             content = $1,
+            content_encrypted = $2,
             edited_at = now()
-        WHERE whatsapp_message_id = $2
+        WHERE whatsapp_message_id = $3
         """,
         new_content,
+        encrypt_value(new_content),
         target_id,
     )
 

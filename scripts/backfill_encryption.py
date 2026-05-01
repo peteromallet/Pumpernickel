@@ -28,6 +28,7 @@ TARGETS = (
     ("out_of_bounds", "sensitive_core", "sensitive_core_encrypted"),
     ("messages", "content", "content_encrypted"),
     ("memories", "content", "content_encrypted"),
+    ("bot_turns", "prompt_snapshot", "prompt_snapshot_encrypted"),
     ("bot_turns", "reasoning", "reasoning_encrypted"),
     ("observations", "content", "content_encrypted"),
 )

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from app.services.checkins import schedule_checkin_record
 from app.services.crypto import encrypt_value
-from app.services.messaging import send_outbound
+from app.services.messaging import send_outbound, _append_turn_reasoning
 from app.services import scoring
 from app.services.templates import TemplateCall
 from app.services.turn_context import TurnContext
@@ -497,10 +497,10 @@ async def escalate_to_partner(ctx: TurnContext, args: EscalateToPartnerInput) ->
         bot_turn_id=ctx.turn_id,
         protected_owner_ids=[ctx.user.id, ctx.partner.id],
     )
-    await ctx.pool.execute(
-        "UPDATE bot_turns SET reasoning = COALESCE(reasoning, '') || $1 WHERE id = $2",
-        f"\nESCALATION_SENT gate={'crisis' if allowed_by_crisis else 'explicit_partner_alert'} reason={args.reason} outbound_message_id={out_id}",
+    await _append_turn_reasoning(
+        ctx.pool,
         ctx.turn_id,
+        f"ESCALATION_SENT gate={'crisis' if allowed_by_crisis else 'explicit_partner_alert'} reason={args.reason} outbound_message_id={out_id}",
     )
     result = EscalateToPartnerOutput(action="sent", outbound_message_id=out_id, used_template=False, reason_if_deferred=None)
     await _log_tool_call(ctx, "escalate_to_partner", args, started, result)

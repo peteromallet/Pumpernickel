@@ -19,6 +19,7 @@ from app.services.hot_context import build_hot_context, render_hot_context
 from app.services.messaging import send_outbound, sent_contents_for_turn
 from app.services.prompts import render_system_prompt
 from app.services.spend import is_under_cap, record_llm_cost
+from app.services.crypto import encrypt_value
 from app.services.text_safety import clean_user_facing_text
 from app.services.tools.registry import READ_PHASE_TOOLS, WRITE_PHASE_TOOLS, call_tool, to_anthropic_tools
 from app.services.turn_context import BeforePacedSend, TurnContext, partner_of
@@ -349,9 +350,12 @@ def _collect_reasoning(messages: list[dict[str, Any]], final_text: str = "") -> 
 async def _append_reasoning(pool: Any, turn_id: UUID, note: str) -> None:
     if not note:
         return
+    existing = await pool.fetchval("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", turn_id)
+    updated = f"{existing or ''}\n{note}"
     await pool.execute(
-        "UPDATE bot_turns SET reasoning = COALESCE(reasoning, '') || $1 WHERE id = $2",
-        f"\n{note}",
+        "UPDATE bot_turns SET reasoning=$1, reasoning_encrypted=$2 WHERE id=$3",
+        updated,
+        encrypt_value(updated),
         turn_id,
     )
 
@@ -454,9 +458,9 @@ async def _open_turn(
         """
         INSERT INTO bot_turns (
             triggered_by_message_id, triggering_message_ids, user_in_context,
-            system_prompt_version, model_version, prompt_snapshot, started_at
+            system_prompt_version, model_version, prompt_snapshot, prompt_snapshot_encrypted, started_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, now())
         RETURNING id, started_at
         """,
         triggering_message_ids[0] if triggering_message_ids else None,
@@ -465,6 +469,7 @@ async def _open_turn(
         system_prompt_version,
         model_version,
         prompt_snapshot,
+        encrypt_value(prompt_snapshot),
     )
     try:
         started_at = row["started_at"]
@@ -482,18 +487,23 @@ async def _complete_turn(
     reasoning: str,
 ) -> None:
     duration_ms = max(0, int((datetime.now(UTC) - started_at).total_seconds() * 1000))
+    existing = await pool.fetchval("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", turn_id)
+    note = f"\n{reasoning}" if reasoning else ""
+    updated_reasoning = f"{existing or ''}{note}"
     await pool.execute(
         """
         UPDATE bot_turns
         SET final_output_message_id=$1,
-            reasoning=COALESCE(reasoning, '') || $2,
+            reasoning=$2,
+            reasoning_encrypted=$3,
             completed_at=now(),
-            duration_ms=$3,
-            tool_call_count=$4
-        WHERE id=$5
+            duration_ms=$4,
+            tool_call_count=$5
+        WHERE id=$6
         """,
         final_output_message_id,
-        f"\n{reasoning}" if reasoning else "",
+        updated_reasoning,
+        encrypt_value(updated_reasoning),
         duration_ms,
         tool_call_count,
         turn_id,

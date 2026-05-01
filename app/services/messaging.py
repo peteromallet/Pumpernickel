@@ -29,9 +29,12 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
 async def _append_turn_reasoning(pool: Any, bot_turn_id: UUID | None, note: str) -> None:
     if bot_turn_id is None:
         return
+    existing = await pool.fetchval("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", bot_turn_id)
+    updated = f"{existing or ''}\n{note}"
     await pool.execute(
-        "UPDATE bot_turns SET reasoning = COALESCE(reasoning, '') || $1 WHERE id = $2",
-        f"\n{note}",
+        "UPDATE bot_turns SET reasoning=$1, reasoning_encrypted=$2 WHERE id=$3",
+        updated,
+        encrypt_value(updated),
         bot_turn_id,
     )
 
