@@ -206,6 +206,23 @@ class FakePool:
             if row is None or row.get("direction") != "inbound" or row.get("sender_id") != sender_id:
                 return None
             return {"whatsapp_message_id": row.get("whatsapp_message_id")}
+        if compact.startswith("SELECT id, processing_state, whatsapp_message_id, content FROM messages WHERE outbound_part_key"):
+            part_key = args[0]
+            for row in self.messages.values():
+                if row.get("outbound_part_key") == part_key:
+                    return {
+                        "id": row["id"],
+                        "processing_state": row.get("processing_state"),
+                        "whatsapp_message_id": row.get("whatsapp_message_id"),
+                        "content": row.get("content"),
+                    }
+            return None
+        if compact.startswith("SELECT id FROM messages WHERE outbound_part_key"):
+            part_key = args[0]
+            for row in self.messages.values():
+                if row.get("outbound_part_key") == part_key:
+                    return {"id": row["id"]}
+            return None
         if compact.startswith("SELECT processing_state, whatsapp_message_id FROM messages WHERE id=$1 AND direction='outbound'"):
             row = self.messages.get(args[0])
             if row is None or row.get("direction") != "outbound":
@@ -216,8 +233,19 @@ class FakePool:
             }
         if compact.startswith("INSERT INTO messages"):
             if "direction, recipient_id" in compact:
-                # Outbound: (recipient_id, content, content_encrypted, state)
-                recipient_id, content, _content_encrypted, state = args
+                # Outbound: basic form is (recipient_id, content, content_encrypted, state).
+                # Incremental-send form appends (bot_turn_id, outbound_part_key, outbound_part_index).
+                recipient_id, content, _content_encrypted, state, *part_args = args
+                bot_turn_id = part_args[0] if len(part_args) >= 1 else None
+                outbound_part_key = part_args[1] if len(part_args) >= 2 else None
+                outbound_part_index = part_args[2] if len(part_args) >= 3 else None
+                if outbound_part_key is not None:
+                    existing = next(
+                        (row for row in self.messages.values() if row.get("outbound_part_key") == outbound_part_key),
+                        None,
+                    )
+                    if existing is not None:
+                        return None
                 row = {
                     "id": uuid4(),
                     "direction": "outbound",
@@ -235,6 +263,9 @@ class FakePool:
                     "edit_history": None,
                     "edited_at": None,
                     "deleted_at": None,
+                    "bot_turn_id": bot_turn_id,
+                    "outbound_part_key": outbound_part_key,
+                    "outbound_part_index": outbound_part_index,
                 }
                 self.messages[row["id"]] = row
                 return {"id": row["id"]}
@@ -712,6 +743,16 @@ class FakePool:
             return None
         if compact.startswith("SELECT sender_id FROM messages WHERE id"):
             return self.messages[args[0]]["sender_id"]
+        if compact.startswith("SELECT EXISTS ( SELECT 1 FROM messages WHERE direction='inbound'"):
+            user_id, since, triggering_message_ids = args
+            triggering = set(triggering_message_ids or [])
+            return any(
+                row.get("direction") == "inbound"
+                and row.get("sender_id") == user_id
+                and row.get("sent_at") > since
+                and row["id"] not in triggering
+                for row in self.messages.values()
+            )
         if compact.startswith("SELECT m.whatsapp_message_id FROM messages m JOIN users u ON u.id = m.sender_id"):
             phone = args[0]
             rows = [
@@ -877,6 +918,18 @@ class FakePool:
                 for row in self.messages.values()
                 if row["id"] in message_ids
             ]
+        if compact.startswith("SELECT content FROM messages WHERE bot_turn_id"):
+            turn_id = args[0]
+            rows = [
+                row
+                for row in self.messages.values()
+                if row.get("bot_turn_id") == turn_id
+                and row.get("direction") == "outbound"
+                and row.get("processing_state") == "processed"
+                and row.get("outbound_part_index") is not None
+            ]
+            rows.sort(key=lambda row: (row.get("outbound_part_index") or 0, row.get("sent_at")))
+            return [{"content": row.get("content")} for row in rows]
         if "FROM messages" in compact and "direction='inbound'" in compact:
             user_id, since = args
             rows = [

@@ -17,7 +17,7 @@ from app.config import get_settings
 from app.models.user import User, claim_onboarding_welcome
 from app.services import discord, hooks, system_state
 from app.services.hot_context import build_hot_context, render_hot_context
-from app.services.messaging import send_outbound
+from app.services.messaging import send_outbound, sent_contents_for_turn
 from app.services.prompts import render_system_prompt
 from app.services.spend import is_under_cap, record_llm_cost
 from app.services.text_safety import clean_user_facing_text
@@ -589,6 +589,15 @@ async def _run_agentic(
             phase="read",
             trigger_charge=charge,
             explicit_partner_alert_requested=explicit_partner_alert_requested,
+            turn_started_at=started_at,
+            incremental_sending_enabled=(
+                settings.messaging_provider.strip().lower() == "discord"
+                and settings.discord_multi_message_enabled
+            ),
+            protected_owner_ids=[user.id, partner.id],
+            send_typing_indicator=send_typing_indicator,
+            before_paced_send=before_paced_send,
+            sent_message_parts=[],
         )
         pacing_context = hot_context.trigger_metadata.get("pacing")
         pacing_seed = (
@@ -604,7 +613,12 @@ async def _run_agentic(
                     f"ids={triggering_message_ids} charge={charge or 'routine'} "
                     f"context={json.dumps(hot_context.trigger_metadata.get('context', {}), default=str)}."
                     f"{pacing_seed} "
-                    "Phase A: read what you need, then produce only the user-facing reply as plain text. "
+                    "Phase A: read what you need, then produce the user-facing response. "
+                    "On Discord, you may use `send_message_part` during Phase A to send one natural, "
+                    "coherent message part now, see whether it actually sent, and continue from the "
+                    "returned `sent_so_far`. Use it when incremental delivery would feel human; do not "
+                    "stream every thought or send process updates. If `send_message_part` returns "
+                    "`interrupted`, stop sending in this turn. "
                     "If a text reply would be unnecessary and a small acknowledgement is enough, "
                     "you may produce exactly `[react: 👍]`, `[react: ❤️]`, or `[react: 👋]` instead. "
                     "If a reaction would naturally complement a short reply, put one `[react: emoji]` "
@@ -613,8 +627,11 @@ async def _run_agentic(
                 ),
             }
         ]
+        read_phase_tools = set(READ_PHASE_TOOLS)
+        if not ctx.incremental_sending_enabled:
+            read_phase_tools.discard("send_message_part")
         assistant_text, phase_a_messages, phase_a_tool_count = await run_phase(
-            None, ctx, system_prompt, rendered_hot_context, READ_PHASE_TOOLS, phase_a_seed
+            None, ctx, system_prompt, rendered_hot_context, read_phase_tools, phase_a_seed
         )
         if triggering_message_ids:
             await active_pool.execute(
@@ -622,7 +639,9 @@ async def _run_agentic(
                 triggering_message_ids,
             )
 
-        final_output_message_id = None
+        sent_parts = ctx.sent_message_parts or []
+        final_output_message_id = sent_parts[-1]["message_id"] if sent_parts else None
+        phase_a_sent = phase_a_sent or bool(sent_parts)
         reaction_emoji = None
         if assistant_text:
             assistant_text = clean_user_facing_text(assistant_text)
@@ -635,7 +654,8 @@ async def _run_agentic(
             if assistant_text:
                 dyad_owner_ids = [user.id, partner.id]
                 sendable_text = await _resolve_outbound_text(active_pool, turn_id, user, assistant_text, dyad_owner_ids)
-                if sendable_text:
+                already_sent = [part["content"] for part in sent_parts]
+                if sendable_text and sendable_text not in already_sent:
                     final_output_message_id = await send_outbound(
                         active_pool,
                         user,
@@ -653,16 +673,29 @@ async def _run_agentic(
                     await claim_onboarding_welcome(active_pool, user.id)
                     assistant_text = sendable_text
                     phase_a_sent = True
+                elif sendable_text:
+                    assistant_text = sendable_text
         elif charge in {"charged", "crisis"}:
             await _append_reasoning(active_pool, turn_id, "silence; charged trigger but no justification produced")
             logger.warning("charged/crisis trigger produced silence without model justification turn_id=%s", turn_id)
 
         ctx.phase = "write"
         phase_b_seed = list(phase_a_messages)
+        delivered_parts = [part["content"] for part in sent_parts]
+        if not delivered_parts and turn_id is not None:
+            delivered_parts = await sent_contents_for_turn(active_pool, turn_id)
+        if delivered_parts:
+            sent_summary = (
+                f"You actually sent {len(delivered_parts)} message"
+                f"{'' if len(delivered_parts) == 1 else 's'}:\n"
+                + "\n\n".join(f"{idx + 1}. {content}" for idx, content in enumerate(delivered_parts))
+            )
+        else:
+            sent_summary = f"You sent: {f'[reaction {reaction_emoji}]' if reaction_emoji else (assistant_text or '[silence]')}"
         phase_b_seed.append(
             {
                 "role": "user",
-                "content": f"You sent: {f'[reaction {reaction_emoji}]' if reaction_emoji else (assistant_text or '[silence]')}. Now record any state changes (memories, observations, theme updates, watch items) and optionally schedule one follow-up check-in. Do not produce user-facing text.",
+                "content": f"{sent_summary}. Now record any state changes (memories, observations, theme updates, watch items) and optionally schedule one follow-up check-in. Do not produce user-facing text.",
             }
         )
         _, phase_b_messages, phase_b_tool_count = await run_phase(

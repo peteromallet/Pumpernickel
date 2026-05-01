@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from app.services.turn_context import TurnContext
+from app.config import get_settings
+from app.services.messaging import send_outbound_part
 from app.services.oob_check import check_oob_with_policy, summarize_partner_oob
 from app.services.tools.common import (
     add_date_range,
@@ -46,6 +49,8 @@ from tool_schemas import (
     SearchMessagesInput,
     SearchMessagesOutput,
     SelfModel,
+    SendMessagePartInput,
+    SendMessagePartOutput,
     SummarizeOOBTopicsInput,
     SummarizeOOBTopicsOutput,
     ThemeDetail,
@@ -53,6 +58,110 @@ from tool_schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _newer_inbound_exists(ctx: TurnContext) -> bool:
+    if ctx.turn_started_at is None:
+        return False
+    return bool(
+        await ctx.pool.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM messages
+                WHERE direction='inbound'
+                  AND sender_id=$1
+                  AND sent_at > $2
+                  AND NOT (id = ANY($3::uuid[]))
+            )
+            """,
+            ctx.user.id,
+            ctx.turn_started_at,
+            ctx.triggering_message_ids,
+        )
+    )
+
+
+async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> SendMessagePartOutput:
+    logger.info("read tool send_message_part turn_id=%s", ctx.turn_id)
+    settings = get_settings()
+    sent_parts = ctx.sent_message_parts
+    if sent_parts is None:
+        sent_parts = []
+        ctx.sent_message_parts = sent_parts
+    if (
+        not ctx.incremental_sending_enabled
+        or settings.messaging_provider.strip().lower() != "discord"
+        or not settings.discord_multi_message_enabled
+    ):
+        return SendMessagePartOutput(
+            status="not_enabled",
+            client_part_key=args.client_part_key,
+            visible_to_user=False,
+            sent_so_far=[part["content"] for part in sent_parts],
+            reason="incremental message parts are not enabled for this turn",
+        )
+    if len(sent_parts) >= settings.discord_multi_message_max_parts:
+        return SendMessagePartOutput(
+            status="withheld",
+            client_part_key=args.client_part_key,
+            visible_to_user=False,
+            sent_so_far=[part["content"] for part in sent_parts],
+            reason="maximum message parts reached for this turn",
+        )
+    if await _newer_inbound_exists(ctx):
+        return SendMessagePartOutput(
+            status="interrupted",
+            client_part_key=args.client_part_key,
+            visible_to_user=False,
+            sent_so_far=[part["content"] for part in sent_parts],
+            reason="a newer inbound message arrived while this turn was running",
+        )
+
+    content = args.content.strip()
+    part_index = len(sent_parts) + 1
+    part_key = f"{ctx.turn_id}:{part_index}"
+    if sent_parts and settings.discord_multi_message_delay_s > 0:
+        await asyncio.sleep(settings.discord_multi_message_delay_s)
+        if await _newer_inbound_exists(ctx):
+            return SendMessagePartOutput(
+                status="interrupted",
+                client_part_key=args.client_part_key,
+                visible_to_user=False,
+                sent_so_far=[part["content"] for part in sent_parts],
+                reason="a newer inbound message arrived before the next message part",
+            )
+    before_provider_send = None
+    if ctx.before_paced_send is not None and not ctx.send_typing_indicator:
+        before_provider_send = lambda text=content: ctx.before_paced_send(text)
+    result = await send_outbound_part(
+        ctx.pool,
+        ctx.user,
+        content,
+        bot_turn_id=ctx.turn_id,
+        part_key=part_key,
+        part_index=part_index,
+        client_part_key=args.client_part_key,
+        protected_owner_ids=ctx.protected_owner_ids,
+        send_typing_indicator=ctx.send_typing_indicator,
+        before_provider_send=before_provider_send,
+    )
+    output = SendMessagePartOutput.model_validate(result)
+    if output.visible_to_user and output.message_id is not None and output.delivered_content:
+        sent_parts.append(
+            {
+                "message_id": output.message_id,
+                "provider_message_id": output.provider_message_id,
+                "content": output.delivered_content,
+                "part_key": output.part_key,
+            }
+        )
+        await ctx.pool.execute(
+            "UPDATE bot_turns SET final_output_message_id=$1 WHERE id=$2",
+            output.message_id,
+            ctx.turn_id,
+        )
+    return output
 
 
 async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> SearchMessagesOutput:

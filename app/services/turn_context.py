@@ -1,8 +1,10 @@
 """Per-turn context shared by the agentic loop and tool implementations."""
 
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from uuid import UUID
+from datetime import datetime
 
 from app.models.user import User
 
@@ -17,6 +19,12 @@ class TurnContext:
     phase: Literal["read", "write"] = "read"
     trigger_charge: str | None = None
     explicit_partner_alert_requested: bool = False
+    turn_started_at: datetime | None = None
+    incremental_sending_enabled: bool = False
+    protected_owner_ids: list[UUID] | None = None
+    send_typing_indicator: bool = True
+    before_paced_send: Callable[[str], Awaitable[None]] | None = None
+    sent_message_parts: list[dict[str, Any]] | None = None
 
 
 async def partner_of(pool: Any, user: User) -> User:

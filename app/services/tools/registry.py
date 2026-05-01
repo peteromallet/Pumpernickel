@@ -30,6 +30,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "check_oob": "Check proposed outbound text before sending against active OOB for protected owners; rewrite suggestions are advisory and must be sent only through normal outbound flow.",
     "get_self_model": "Read the assistant's compact model of one user; avoid when you need exact source rows.",
     "get_bot_actions": "Audit what the assistant did or why; avoid relying on memory for action history.",
+    "send_message_part": "Send one coherent user-visible Discord message part now when that is conversationally useful. The result is the authority for what actually reached the user.",
     "update_user_style_notes": "Replace a user's style notes when a stable communication preference changes; avoid for one-off moods.",
     "add_memory": "Add a durable fact after searching existing memories; avoid for repeated or uncertain impressions.",
     "update_memory": "Update an existing memory when the same fact changed or needs theme links; avoid creating duplicates.",
@@ -64,6 +65,7 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "check_oob": read_tools.check_oob,
     "get_self_model": read_tools.get_self_model,
     "get_bot_actions": read_tools.get_bot_actions,
+    "send_message_part": read_tools.send_message_part,
     "update_user_style_notes": write_tools.update_user_style_notes,
     "add_memory": write_tools.add_memory,
     "update_memory": write_tools.update_memory,
@@ -97,6 +99,7 @@ READ_PHASE_TOOLS = {
     "check_oob",
     "get_self_model",
     "get_bot_actions",
+    "send_message_part",
 }
 
 WRITE_PHASE_TOOLS = {

@@ -714,6 +714,50 @@ class LogFeedbackOutput(WriteCreated):
     pass
 
 
+# --- incremental outbound delivery ---
+
+
+class SendMessagePartInput(BaseModel):
+    content: str = Field(
+        min_length=1,
+        max_length=2000,
+        description=(
+            "One coherent user-visible message part to attempt now. Do not include "
+            "scratch notes, tool decisions, hidden reasoning, or a bundle of future parts."
+        ),
+    )
+    metadata: dict[str, str] | None = Field(
+        default=None,
+        description="Optional observability hints such as kind, tone, sequence_role, or reason_for_sending_now.",
+    )
+    client_part_key: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Optional semantic hint from the model. The runtime generates the authoritative idempotency key.",
+    )
+
+
+class SendMessagePartOutput(BaseModel):
+    status: Literal[
+        "sent",
+        "duplicate",
+        "blocked",
+        "withheld",
+        "interrupted",
+        "provider_failed",
+        "not_enabled",
+    ]
+    part_key: str | None = None
+    client_part_key: str | None = None
+    message_id: UUID | None = None
+    provider_message_id: str | None = None
+    delivered_content: str | None = None
+    visible_to_user: bool = False
+    sent_so_far: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    suggested_rewrite: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
@@ -736,6 +780,7 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "check_oob": (CheckOOBInput, CheckOOBOutput),
     "get_self_model": (GetSelfModelInput, GetSelfModelOutput),
     "get_bot_actions": (GetBotActionsInput, GetBotActionsOutput),
+    "send_message_part": (SendMessagePartInput, SendMessagePartOutput),
     # write
     "update_user_style_notes": (UpdateUserStyleNotesInput, UpdateUserStyleNotesOutput),
     "add_memory": (AddMemoryInput, AddMemoryOutput),

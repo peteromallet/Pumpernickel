@@ -6,7 +6,9 @@ from uuid import uuid4
 import pytest
 
 from app.models.user import User
+from app.config import get_settings
 from app.services import agentic
+from app.services.tools.registry import call_tool
 from app.services.pacer import PacingDecision
 
 pytestmark = pytest.mark.anyio
@@ -281,6 +283,98 @@ async def test_run_agentic_records_outbound_before_phase_b(fake_pool, app_env, m
     agentic.set_pool(fake_pool)
 
     await agentic.run_agentic_turn([message_id], user)
+
+
+async def test_run_agentic_send_message_part_is_visible_to_phase_b(fake_pool, app_env, monkeypatch):
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    monkeypatch.setenv("DISCORD_MULTI_MESSAGE_DELAY_S", "0")
+    get_settings.cache_clear()
+    user = User(uuid4(), "Maya", "456", "UTC")
+    partner = User(uuid4(), "Ben", "789", "UTC")
+    fake_pool.users[user.id] = {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "timezone": user.timezone,
+        "onboarding_state": "pending",
+    }
+    fake_pool.users[partner.id] = {
+        "id": partner.id,
+        "name": partner.name,
+        "phone": partner.phone,
+        "timezone": partner.timezone,
+        "onboarding_state": "pending",
+    }
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "I don't know",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "charged",
+        "deleted_at": None,
+        "whatsapp_message_id": "discord-in-3",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    sent = []
+    phase_b_seed = []
+
+    async def fake_discord_send(to, body, *, send_typing_indicator=True):
+        sent.append((to, body, send_typing_indicator))
+        return {"messages": [{"id": f"discord-out-{len(sent)}"}]}
+
+    async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
+        if ctx.phase == "read":
+            assert "send_message_part" in allowed_tools
+            first = await call_tool(
+                "send_message_part",
+                {"content": "That sounds bleak."},
+                ctx,
+            )
+            assert first["status"] == "sent"
+            assert first["sent_so_far"] == ["That sounds bleak."]
+            second = await call_tool(
+                "send_message_part",
+                {"content": "What feels most impossible about it tonight?"},
+                ctx,
+            )
+            assert second["status"] == "sent"
+            assert second["sent_so_far"] == [
+                "That sounds bleak.",
+                "What feels most impossible about it tonight?",
+            ]
+            return "", [{"role": "assistant", "content": "used incremental sends"}], 2
+        phase_b_seed.append(seed_messages[-1]["content"])
+        return "", [], 0
+
+    monkeypatch.setattr(agentic, "run_phase", fake_run_phase)
+    monkeypatch.setattr("app.services.discord.send_text", fake_discord_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user)
+
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert sent == [
+        ("456", "That sounds bleak.", True),
+        ("456", "What feels most impossible about it tonight?", True),
+    ]
+    assert turn["final_output_message_id"] is not None
+    assert fake_pool.messages[turn["final_output_message_id"]]["content"] == (
+        "What feels most impossible about it tonight?"
+    )
+    assert "You actually sent 2 messages" in phase_b_seed[0]
+    assert "1. That sounds bleak." in phase_b_seed[0]
+    assert "2. What feels most impossible about it tonight?" in phase_b_seed[0]
+    assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
+    get_settings.cache_clear()
 
 
 async def test_run_agentic_can_react_instead_of_replying(fake_pool, app_env, monkeypatch):

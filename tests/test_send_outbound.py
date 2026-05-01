@@ -5,7 +5,7 @@ import pytest
 
 from app.models.user import User
 from app.services import hooks, system_state
-from app.services.messaging import send_outbound
+from app.services.messaging import send_outbound, send_outbound_part
 from app.services.templates import TemplateCall, render_template
 from app.services import whatsapp
 
@@ -407,3 +407,53 @@ async def test_send_outbound_passes_protected_owner_ids_and_withholds_current_us
     assert sent == []
     assert oob_calls == [(fake_pool, "current-user protected detail", user.id, protected_owner_ids)]
     assert fake_pool.messages[row_id]["processing_state"] == "withheld"
+
+
+async def test_send_outbound_part_uses_runtime_part_key_for_idempotency(fake_pool, app_env, monkeypatch) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    user = _user(fake_pool)
+    fake_pool.users[user.id]["onboarding_state"] = "pending"
+    turn_id = uuid4()
+    fake_pool.bot_turns[turn_id] = {
+        "id": turn_id,
+        "reasoning": "",
+        "completed_at": None,
+        "failure_reason": None,
+        "triggering_message_ids": [],
+        "final_output_message_id": None,
+    }
+    sent = []
+
+    async def send_text(to, body, *, send_typing_indicator=True):
+        sent.append(body)
+        return {"messages": [{"id": f"discord-{len(sent)}"}]}
+
+    monkeypatch.setattr("app.services.discord.send_text", send_text)
+
+    first = await send_outbound_part(
+        fake_pool,
+        user,
+        "first part",
+        bot_turn_id=turn_id,
+        part_key=f"{turn_id}:1",
+        part_index=1,
+    )
+    second = await send_outbound_part(
+        fake_pool,
+        user,
+        "first part",
+        bot_turn_id=turn_id,
+        part_key=f"{turn_id}:1",
+        part_index=1,
+    )
+
+    assert first["status"] == "sent"
+    assert second["status"] == "duplicate"
+    assert first["message_id"] == second["message_id"]
+    assert sent == ["first part"]
+    assert second["sent_so_far"] == ["first part"]
+    assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
+    get_settings.cache_clear()

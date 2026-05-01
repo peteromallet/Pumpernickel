@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     discord_pacing_typing_pulse_min_gap_s: float = Field(default=11.0, ge=1.0, le=30.0)
     discord_pacing_typing_visible_s: float = Field(default=8.0, ge=1.0, le=10.0)
     discord_pacing_typing_off_gap_s: float = Field(default=3.0, ge=0.0, le=10.0)
+    discord_multi_message_enabled: bool = True
+    discord_multi_message_min_chars: int = Field(default=520, ge=120, le=4000)
+    discord_multi_message_max_parts: int = Field(default=3, ge=1, le=5)
+    discord_multi_message_delay_s: float = Field(default=1.1, ge=0.0, le=10.0)
     discord_pacing_reactions_enabled: bool = True
     discord_pacing_reaction_cooldown_s: float = Field(default=180.0, ge=0.0, le=3600.0)
     discord_pacing_reaction_daily_limit: int = Field(default=12, ge=0, le=100)

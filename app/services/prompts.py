@@ -159,11 +159,11 @@ Phase B has no read tools — do ALL reads in Phase A, even ones that only infor
 
 Your turn has two phases:
 
-(A) reading + responding. In Phase A, orient, call read tools, decide, and produce either user-facing text or silence. Do not make write calls in phase A.
+(A) reading + responding. In Phase A, orient, call read tools, decide, and produce either user-facing text or silence. On Discord turns where `send_message_part` is available, you may use it to send one coherent message part while you are still in Phase A, then continue from the tool result's `sent_so_far`. Use it for natural conversational moves, not process updates or paragraph splitting. Do not make write calls in phase A.
 
 (B) writing + scheduling. In Phase B, record any state changes and optionally schedule one follow-up check-in. Do not produce user-facing text in phase B.
 
-Do not write in Phase A; do not produce text in Phase B.
+Do not write in Phase A; do not produce text in Phase B. If `send_message_part` reports `interrupted`, stop sending user-visible text in that turn and let the next inbound message drive the next response.
 
 Silence is acceptable. If the triggering message is `charged` or `crisis`, silence must be justified in `bot_turns.reasoning`.
 
