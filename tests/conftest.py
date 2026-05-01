@@ -106,6 +106,7 @@ class FakePool:
         self.observations = {}
         self.out_of_bounds = {}
         self.withheld_outbound_reviews = {}
+        self.pacing_events = {}
         self.scheduled_jobs = {}
         self.eval_runs = {}
         self.eval_results = {}
@@ -126,11 +127,43 @@ class FakePool:
             if existing is not None:
                 existing["name"] = name
                 return existing
-            row = {"id": uuid4(), "name": name, "phone": phone, "timezone": timezone, "onboarding_state": "pending"}
+            row = {
+                "id": uuid4(),
+                "name": name,
+                "phone": phone,
+                "timezone": timezone,
+                "onboarding_state": "pending",
+                "pacing_preferences": {},
+            }
             self.users[row["id"]] = row
             return row
-        if compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id") or compact.startswith("SELECT id, name, phone, timezone, onboarding_state FROM users WHERE id"):
+        if (
+            compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id")
+            or compact.startswith("SELECT id, name, phone, timezone, onboarding_state FROM users WHERE id")
+            or compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences FROM users WHERE id")
+        ):
             return self.users[args[0]]
+        if compact.startswith("SELECT pacing_preferences FROM users WHERE id"):
+            user = self.users.get(args[0])
+            if user is None:
+                return None
+            return {"pacing_preferences": user.get("pacing_preferences", {})}
+        if compact.startswith("UPDATE users SET pacing_preferences"):
+            user_id, preferences_json = args
+            preferences = json.loads(preferences_json)
+            self.users.setdefault(
+                user_id,
+                {
+                    "id": user_id,
+                    "name": "User",
+                    "phone": "1",
+                    "timezone": "UTC",
+                    "onboarding_state": "pending",
+                    "pacing_preferences": {},
+                },
+            )
+            self.users[user_id]["pacing_preferences"] = preferences
+            return {"pacing_preferences": preferences}
         if compact.startswith("UPDATE users SET onboarding_state='welcomed'"):
             user_id = args[0]
             user = self.users.get(user_id)
@@ -166,6 +199,20 @@ class FakePool:
                 "inbound_count": sum(1 for row in messages if row.get("direction") == "inbound"),
                 "outbound_count": sum(1 for row in messages if row.get("direction") == "outbound"),
                 "total_count": len(messages),
+            }
+        if compact.startswith("SELECT whatsapp_message_id FROM messages WHERE id=$1 AND direction='inbound'"):
+            message_id, sender_id = args
+            row = self.messages.get(message_id)
+            if row is None or row.get("direction") != "inbound" or row.get("sender_id") != sender_id:
+                return None
+            return {"whatsapp_message_id": row.get("whatsapp_message_id")}
+        if compact.startswith("SELECT processing_state, whatsapp_message_id FROM messages WHERE id=$1 AND direction='outbound'"):
+            row = self.messages.get(args[0])
+            if row is None or row.get("direction") != "outbound":
+                return None
+            return {
+                "processing_state": row.get("processing_state"),
+                "whatsapp_message_id": row.get("whatsapp_message_id"),
             }
         if compact.startswith("INSERT INTO messages"):
             if "direction, recipient_id" in compact:
@@ -610,6 +657,35 @@ class FakePool:
             }
             self.withheld_outbound_reviews[row["id"]] = row
             return {"id": row["id"]}
+        if compact.startswith("INSERT INTO pacing_events"):
+            (
+                user_id,
+                message_ids,
+                source,
+                decision,
+                reason,
+                signal_snapshot,
+                preference_snapshot,
+                wait_ms,
+                reaction,
+                llm_judgement,
+            ) = args
+            row = {
+                "id": uuid4(),
+                "user_id": user_id,
+                "message_ids": list(message_ids or []),
+                "source": source,
+                "decision": decision,
+                "reason": reason,
+                "signal_snapshot": json.loads(signal_snapshot),
+                "preference_snapshot": json.loads(preference_snapshot),
+                "wait_ms": wait_ms,
+                "reaction": reaction,
+                "llm_judgement": json.loads(llm_judgement) if llm_judgement is not None else None,
+                "created_at": datetime.now(UTC),
+            }
+            self.pacing_events[row["id"]] = row
+            return {"id": row["id"]}
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):
@@ -664,6 +740,18 @@ class FakePool:
 
     async def fetch(self, sql: str, *args):
         compact = " ".join(sql.split())
+        if compact.startswith("SELECT id FROM messages WHERE id = ANY"):
+            wanted = set(args[0])
+            return [{"id": row["id"]} for row in self.messages.values() if row["id"] in wanted]
+        if compact.startswith("SELECT id FROM themes WHERE id = ANY"):
+            wanted = set(args[0])
+            return [{"id": row["id"]} for row in self.themes.values() if row["id"] in wanted]
+        if compact.startswith("SELECT id FROM observations WHERE id = ANY"):
+            wanted = set(args[0])
+            return [{"id": row["id"]} for row in self.observations.values() if row["id"] in wanted]
+        if compact.startswith("SELECT id FROM memories WHERE id = ANY"):
+            wanted = set(args[0])
+            return [{"id": row["id"]} for row in self.memories.values() if row["id"] in wanted]
         if compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id <>"):
             return [row for user_id, row in self.users.items() if user_id != args[0]]
         if compact.startswith("SELECT id, name, phone, timezone, weekly_summary_enabled") and "WHERE weekly_summary_enabled = true" in compact:
@@ -783,6 +871,8 @@ class FakePool:
                     "charge": row.get("charge") or "routine",
                     "sent_at": row["sent_at"],
                     "content": row.get("content"),
+                    "media_type": row.get("media_type"),
+                    "media_analysis": row.get("media_analysis"),
                 }
                 for row in self.messages.values()
                 if row["id"] in message_ids
@@ -935,6 +1025,18 @@ class FakePool:
             else:
                 self.llm_spend_log[provider] = current + Decimal(dollars)
             return "INSERT 0 1"
+        if compact.startswith("UPDATE observations SET related_theme_ids ="):
+            theme_id, observation_ids = args
+            for observation_id in observation_ids:
+                row = self.observations[observation_id]
+                row["related_theme_ids"] = list({*row.get("related_theme_ids", []), theme_id})
+            return f"UPDATE {len(observation_ids)}"
+        if compact.startswith("UPDATE memories SET related_theme_ids ="):
+            theme_id, memory_ids = args
+            for memory_id in memory_ids:
+                row = self.memories[memory_id]
+                row["related_theme_ids"] = list({*row.get("related_theme_ids", []), theme_id})
+            return f"UPDATE {len(memory_ids)}"
         if compact.startswith("UPDATE llm_spend_log SET warned_80_at"):
             provider = args[0]
             current = self.llm_spend_log.get(provider, Decimal("0"))

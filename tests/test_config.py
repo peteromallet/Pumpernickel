@@ -28,6 +28,23 @@ def test_config_loads(monkeypatch) -> None:
         "SCHEDULER_ENABLED": "true",
         "SCHEDULER_POLL_INTERVAL_S": "5.5",
         "SCHEDULER_BATCH_SIZE": "7",
+        "DISCORD_PACING_ENABLED": "true",
+        "DISCORD_PACING_BURST_WINDOW_S": "3.25",
+        "DISCORD_PACING_MIN_WAIT_S": "1.25",
+        "DISCORD_PACING_MAX_WAIT_S": "14",
+        "DISCORD_PACING_TYPING_GRACE_S": "5",
+        "DISCORD_PACING_TYPING_EXTEND_S": "2.5",
+        "DISCORD_PACING_MAX_TYPING_WAIT_S": "24",
+        "DISCORD_PACING_ANSWER_TYPING_MIN_S": "1.5",
+        "DISCORD_PACING_ANSWER_TYPING_MAX_S": "9",
+        "DISCORD_PACING_ANSWER_CHARS_PER_S": "20",
+        "DISCORD_PACING_REACTIONS_ENABLED": "true",
+        "DISCORD_PACING_REACTION_COOLDOWN_S": "240",
+        "DISCORD_PACING_REACTION_DAILY_LIMIT": "8",
+        "DISCORD_PACING_SILENCE_COOLDOWN_S": "420",
+        "DISCORD_PACING_LLM_JUDGEMENT_ENABLED": "true",
+        "DISCORD_PACING_LLM_MIN_AMBIGUITY": "0.5",
+        "DISCORD_PACING_EVENT_RETENTION_DAYS": "45",
         "WEEKLY_SUMMARY_DEFAULT_DAY": "2",
         "WEEKLY_SUMMARY_DEFAULT_TIME": "09:00",
         "HEARTBEAT_INTERVAL_HOURS": "12",
@@ -68,6 +85,23 @@ def test_config_loads(monkeypatch) -> None:
     assert settings.scheduler_enabled is True
     assert settings.scheduler_poll_interval_s == 5.5
     assert settings.scheduler_batch_size == 7
+    assert settings.discord_pacing_enabled is True
+    assert settings.discord_pacing_burst_window_s == 3.25
+    assert settings.discord_pacing_min_wait_s == 1.25
+    assert settings.discord_pacing_max_wait_s == 14
+    assert settings.discord_pacing_typing_grace_s == 5
+    assert settings.discord_pacing_typing_extend_s == 2.5
+    assert settings.discord_pacing_max_typing_wait_s == 24
+    assert settings.discord_pacing_answer_typing_min_s == 1.5
+    assert settings.discord_pacing_answer_typing_max_s == 9
+    assert settings.discord_pacing_answer_chars_per_s == 20
+    assert settings.discord_pacing_reactions_enabled is True
+    assert settings.discord_pacing_reaction_cooldown_s == 240
+    assert settings.discord_pacing_reaction_daily_limit == 8
+    assert settings.discord_pacing_silence_cooldown_s == 420
+    assert settings.discord_pacing_llm_judgement_enabled is True
+    assert settings.discord_pacing_llm_min_ambiguity == 0.5
+    assert settings.discord_pacing_event_retention_days == 45
     assert settings.weekly_summary_default_day == 2
     assert settings.weekly_summary_default_time == "09:00"
     assert settings.heartbeat_interval_hours == 12

@@ -4,15 +4,21 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from typing import Any
+from uuid import UUID
 
 from fastapi import FastAPI
+from resident_chat_runtime.diagnostics import build_startup_diagnostics
+from resident_chat_runtime.env import EnvSetting, read_env_settings
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import db_lifespan
+from app.models.user import User
 from app.routers import admin, health, whatsapp as whatsapp_router
 from app.services import agentic, discord, hooks, whatsapp
-from app.services.agentic import run_agentic_turn
+from app.services.agentic import run_agentic_turn, run_agentic_turn_with_metadata
 from app.services.debouncer import BurstCoalescer
+from app.services.pacer import DiscordPacer, PacingDecision
 from app.services.recovery import recover_on_startup, run_recovery_forever
 from app.services.scheduled_job_handlers import ScheduledJobHandlers, seed_weekly_summaries
 from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
@@ -20,10 +26,125 @@ from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
 logger = logging.getLogger(__name__)
 
 
+def _log_startup_diagnostics() -> None:
+    _, env_statuses = read_env_settings(
+        [
+            EnvSetting("MESSAGING_PROVIDER", default="whatsapp"),
+            EnvSetting("DISCORD_BOT_TOKEN", secret=True),
+            EnvSetting("DISCORD_PARTNER_USER_ID_A"),
+            EnvSetting("DISCORD_PARTNER_USER_ID_B"),
+        ]
+    )
+    for item in build_startup_diagnostics(env=env_statuses):
+        logger.info("startup diagnostic %s=%s", item.name, item.detail)
+
+
+def _discord_provider_enabled(settings: Settings) -> bool:
+    return settings.messaging_provider.strip().lower() == "discord"
+
+
+async def _run_paced_agentic_turn(
+    message_ids: list[UUID],
+    user: User,
+    decision: PacingDecision,
+    *,
+    pacer: DiscordPacer | None = None,
+) -> None:
+    before_paced_send = None
+    thinking_typing_stop: asyncio.Event | None = None
+    thinking_typing_task: asyncio.Task[None] | None = None
+    channel_id: str | None = None
+
+    async def stop_thinking_typing() -> None:
+        if thinking_typing_stop is None or thinking_typing_task is None:
+            return
+        thinking_typing_stop.set()
+        try:
+            await thinking_typing_task
+        except Exception:
+            logger.warning("paced thinking typing task failed", exc_info=True)
+
+    if pacer is not None and decision.signal_snapshot.get("source") == "live":
+        try:
+            channel_id = await discord.get_dm_channel_id(user.phone)
+            thinking_typing_stop = asyncio.Event()
+            thinking_typing_task = asyncio.create_task(
+                pacer.perform_thinking_typing_until_stopped(user, channel_id, thinking_typing_stop)
+            )
+            await asyncio.sleep(0)
+        except Exception:
+            logger.warning("failed to start paced thinking typing", exc_info=True)
+
+        async def before_paced_send(answer_text: str) -> None:
+            nonlocal channel_id
+            await stop_thinking_typing()
+            if channel_id is None:
+                channel_id = await discord.get_dm_channel_id(user.phone)
+            await pacer.perform_answer_typing(user, channel_id, answer_text)
+
+    try:
+        await run_agentic_turn_with_metadata(
+            message_ids,
+            user,
+            pacing_context=decision,
+            before_paced_send=before_paced_send,
+        )
+    finally:
+        await stop_thinking_typing()
+
+
+async def _send_paced_reaction(pool: Any, message_ids: list[UUID], user: User, decision: PacingDecision) -> None:
+    if not message_ids or not decision.reaction:
+        return
+    row = await pool.fetchrow(
+        """
+        SELECT whatsapp_message_id
+        FROM messages
+        WHERE id=$1 AND direction='inbound' AND sender_id=$2
+        """,
+        message_ids[-1],
+        user.id,
+    )
+    if row is None or not row.get("whatsapp_message_id"):
+        return
+    await discord.add_reaction(user.phone, row["whatsapp_message_id"], decision.reaction)
+
+
+def _build_coalescer(pool: Any, settings: Settings) -> tuple[BurstCoalescer, DiscordPacer | None]:
+    if _discord_provider_enabled(settings) and settings.discord_pacing_enabled:
+        pacer = DiscordPacer(pool, settings=settings, send_typing=discord.send_typing)
+
+        async def on_paced_reaction(message_ids: list[UUID], user: User, decision: PacingDecision) -> None:
+            await _send_paced_reaction(pool, message_ids, user, decision)
+
+        return (
+            BurstCoalescer(
+                on_burst_complete=run_agentic_turn,
+                pacer=pacer,
+                on_paced_answer=lambda message_ids, user, decision: _run_paced_agentic_turn(
+                    message_ids,
+                    user,
+                    decision,
+                    pacer=pacer,
+                ),
+                on_paced_reaction=on_paced_reaction,
+            ),
+            pacer,
+        )
+    return BurstCoalescer(on_burst_complete=run_agentic_turn), None
+
+
+def _configure_coalescer(app: FastAPI, pool: Any, settings: Settings) -> None:
+    coalescer, pacer = _build_coalescer(pool, settings)
+    app.state.coalescer = coalescer
+    app.state.discord_pacer = pacer
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with db_lifespan(app):
         settings = get_settings()
+        _log_startup_diagnostics()
         pool = app.state.pool
         if settings.messaging_provider.strip().lower() == "discord":
             await discord.init_client()
@@ -32,7 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await whatsapp.init_client()
         agentic.set_pool(pool)
         hooks.set_pool(pool)
-        app.state.coalescer = BurstCoalescer(on_burst_complete=run_agentic_turn)
+        _configure_coalescer(app, pool, settings)
         app.state.background_tasks: set[asyncio.Task] = set()
         await recover_on_startup(pool, app.state.coalescer)
         recovery_task = asyncio.create_task(run_recovery_forever(pool, app.state.coalescer))

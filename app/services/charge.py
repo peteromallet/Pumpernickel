@@ -10,7 +10,7 @@ from typing import Any, Literal, NamedTuple
 import anthropic
 
 from app.config import get_settings
-from app.services.spend import is_under_cap, record_llm_cost
+from app.services.spend import is_under_cap, record_anthropic_haiku_text_response_cost
 
 logger = logging.getLogger(__name__)
 
@@ -45,27 +45,6 @@ def _attr(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
-
-
-def _usage_tokens(usage: Any, field: str) -> int:
-    return int(_attr(usage, field, 0) or 0)
-
-
-async def _record_response_cost(pool: Any, usage: Any) -> None:
-    settings = get_settings()
-    input_tokens = _usage_tokens(usage, "input_tokens")
-    cache_create = _usage_tokens(usage, "cache_creation_input_tokens")
-    cache_read = _usage_tokens(usage, "cache_read_input_tokens")
-    output_tokens = _usage_tokens(usage, "output_tokens")
-    regular_input_tokens = max(0, input_tokens - cache_create - cache_read)
-    dollars = (
-        regular_input_tokens * settings.anthropic_haiku_input_usd_per_mtok
-        + cache_create * settings.anthropic_haiku_input_usd_per_mtok * 1.25
-        + cache_read * settings.anthropic_haiku_input_usd_per_mtok * 0.10
-        + output_tokens * settings.anthropic_haiku_output_usd_per_mtok
-    ) / 1_000_000
-    if dollars > 0:
-        await record_llm_cost(pool, "text", dollars)
 
 
 def _response_text(response: Any) -> str:
@@ -176,7 +155,7 @@ async def classify_charge(
                 system=[{"type": "text", "text": _CHARGE_INSTRUCTIONS, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": json.dumps({"message": content})}],
             )
-        await _record_response_cost(pool, _attr(response, "usage", {}))
+        await record_anthropic_haiku_text_response_cost(pool, _attr(response, "usage", {}))
         label, reason = _parse_charge(_response_text(response))
     except Exception as exc:
         logger.warning("charge classification failed: %s", exc)

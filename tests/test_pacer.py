@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+
+from app.models.user import User
+from app.services.pacer import DiscordPacer
+
+
+pytestmark = pytest.mark.anyio
+
+
+def _seed_user(fake_pool, *, preferences: dict | None = None) -> User:
+    user = User(
+        id=uuid4(),
+        name="Maya",
+        phone="15555550100",
+        timezone="UTC",
+        pacing_preferences=preferences or {},
+    )
+    fake_pool.users[user.id] = {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "timezone": user.timezone,
+        "onboarding_state": "welcomed",
+        "pacing_preferences": preferences or {},
+    }
+    return user
+
+
+def _seed_message(
+    fake_pool,
+    user: User,
+    *,
+    content: str = "hello",
+    charge: str = "routine",
+    sent_at: datetime,
+    media_type: str | None = None,
+):
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": content,
+        "processing_state": "raw",
+        "sent_at": sent_at,
+        "charge": charge,
+        "whatsapp_message_id": f"wa-{message_id}",
+        "media_type": media_type,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+        "deleted_at": None,
+    }
+    return message_id
+
+
+class _FakeMessagesClient:
+    def __init__(self, text: str, *, usage=None) -> None:
+        self.text = text
+        self.usage = usage or SimpleNamespace(input_tokens=1000, output_tokens=1000)
+        self.calls = []
+        self.messages = self
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=self.text)],
+            usage=self.usage,
+        )
+
+
+async def test_pacer_waits_while_user_is_typing_and_records_event(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    message_id = _seed_message(fake_pool, user, content="one more thought", sent_at=now - timedelta(seconds=10))
+    pacer = DiscordPacer(fake_pool, now=lambda: now)
+    pacer.mark_user_typing(user.id, channel_id="channel-1", at=now)
+
+    decision = await pacer.decide_and_record(user, [message_id], source="live")
+
+    assert decision.action == "wait"
+    assert decision.wait_s == 2.0
+    assert "actively composing" in decision.reason
+    event = next(iter(fake_pool.pacing_events.values()))
+    assert event["decision"] == "wait"
+    assert event["wait_ms"] == 2000
+    assert event["signal_snapshot"]["typing_active"] is True
+
+
+async def test_pacer_waits_to_coalesce_recent_live_burst(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    message_id = _seed_message(fake_pool, user, content="first line", sent_at=now - timedelta(seconds=1))
+    pacer = DiscordPacer(fake_pool, now=lambda: now)
+
+    decision = await pacer.decide(user, [message_id], source="live")
+
+    assert decision.action == "wait"
+    assert decision.wait_s >= decision.preference_snapshot["min_wait_s"]
+    assert "burst" in decision.reason
+
+
+@pytest.mark.parametrize(
+    ("source", "charge", "media_type", "reason_fragment"),
+    [
+        ("live", "crisis", None, "crisis"),
+        ("live", "charged", None, "charged"),
+        ("media", "routine", "voice", "media"),
+        ("catch_up", "routine", None, "stale/offline"),
+        ("recovery", "routine", None, "stale/offline"),
+    ],
+)
+async def test_pacer_answer_gates_for_safety_media_and_stale_sources(
+    fake_pool,
+    source: str,
+    charge: str,
+    media_type: str | None,
+    reason_fragment: str,
+) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    message_id = _seed_message(
+        fake_pool,
+        user,
+        content="thanks",
+        charge=charge,
+        media_type=media_type,
+        sent_at=now - timedelta(seconds=10),
+    )
+    pacer = DiscordPacer(fake_pool, now=lambda: now)
+
+    decision = await pacer.decide(user, [message_id], source=source)
+
+    assert decision.action == "answer"
+    assert reason_fragment in decision.reason
+
+
+async def test_pacer_reacts_sparingly_then_silences_ack_during_cooldown(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    first_id = _seed_message(fake_pool, user, content="thanks", sent_at=now - timedelta(seconds=10))
+    second_id = _seed_message(fake_pool, user, content="ok", sent_at=now - timedelta(seconds=9))
+    pacer = DiscordPacer(fake_pool, now=lambda: now)
+
+    first = await pacer.decide_and_record(user, [first_id], source="live")
+    second = await pacer.decide_and_record(user, [second_id], source="live")
+
+    assert first.action == "react"
+    assert first.reaction == "👍"
+    assert second.action == "silence"
+    assert [event["decision"] for event in fake_pool.pacing_events.values()] == ["react", "silence"]
+
+
+async def test_answer_typing_suppresses_indicator_while_user_is_typing(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    typing_sent_at = []
+
+    def current_time() -> datetime:
+        return now
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        now += timedelta(seconds=seconds)
+
+    async def send_typing(channel_id: str) -> None:
+        typing_sent_at.append((channel_id, now))
+
+    pacer = DiscordPacer(fake_pool, send_typing=send_typing, sleep=sleep, now=current_time)
+    pacer.mark_user_typing(user.id, channel_id="channel-1", at=now)
+
+    waited_s = await pacer.perform_answer_typing(user, "channel-1", "x" * 200)
+
+    assert waited_s > 0
+    assert len(typing_sent_at) >= 2
+    assert typing_sent_at[0][1] > datetime(2026, 5, 1, 12, 0, tzinfo=UTC) + timedelta(seconds=4)
+    decisions = [event["decision"] for event in fake_pool.pacing_events.values()]
+    assert "typing_wait" in decisions
+    assert "typing_start" in decisions
+    assert "typing_stop" in decisions
+
+
+async def test_llm_judgement_can_silence_ambiguous_live_burst_and_records_cost(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    ids = [
+        _seed_message(fake_pool, user, content="I guess", sent_at=now - timedelta(seconds=10)),
+        _seed_message(fake_pool, user, content="maybe just leave it", sent_at=now - timedelta(seconds=9)),
+    ]
+    client = _FakeMessagesClient('{"action":"silence","reason":"user is closing the loop","wait_s":0,"reaction":null}')
+    pacer = DiscordPacer(fake_pool, llm_client=client, now=lambda: now)
+
+    decision = await pacer.decide_and_record(user, ids, source="live")
+
+    assert decision.action == "silence"
+    assert decision.llm_judgement["action"] == "silence"
+    assert len(client.calls) == 1
+    assert fake_pool.llm_spend_log["text"] > 0
+    event = next(iter(fake_pool.pacing_events.values()))
+    assert event["decision"] == "silence"
+    assert event["llm_judgement"]["action"] == "silence"
+
+
+async def test_llm_judgement_spend_cap_falls_back_without_model_call(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    ids = [
+        _seed_message(fake_pool, user, content="I guess", sent_at=now - timedelta(seconds=10)),
+        _seed_message(fake_pool, user, content="maybe just leave it", sent_at=now - timedelta(seconds=9)),
+    ]
+    fake_pool.llm_spend_log["text"] = Decimal("999")
+    client = _FakeMessagesClient('{"action":"silence","reason":"unused","wait_s":0,"reaction":null}')
+    pacer = DiscordPacer(fake_pool, llm_client=client, now=lambda: now)
+
+    decision = await pacer.decide(user, ids, source="live")
+
+    assert decision.action == "answer"
+    assert len(client.calls) == 0
+    event = next(iter(fake_pool.pacing_events.values()))
+    assert event["decision"] == "fallback"
+    assert "spend cap" in event["llm_judgement"]["error"]
+
+
+async def test_llm_judgement_invalid_json_records_fallback(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    ids = [
+        _seed_message(fake_pool, user, content="I guess", sent_at=now - timedelta(seconds=10)),
+        _seed_message(fake_pool, user, content="maybe just leave it", sent_at=now - timedelta(seconds=9)),
+    ]
+    pacer = DiscordPacer(fake_pool, llm_client=_FakeMessagesClient("not json"), now=lambda: now)
+
+    decision = await pacer.decide(user, ids, source="live")
+
+    assert decision.action == "answer"
+    event = next(iter(fake_pool.pacing_events.values()))
+    assert event["decision"] == "fallback"
+    assert "Expecting value" in event["llm_judgement"]["error"]
+
+
+async def test_llm_judgement_is_not_called_for_deterministic_crisis_gate(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool)
+    message_id = _seed_message(
+        fake_pool,
+        user,
+        content="I might hurt myself tonight",
+        charge="crisis",
+        sent_at=now - timedelta(seconds=10),
+    )
+    client = _FakeMessagesClient('{"action":"silence","reason":"unsafe","wait_s":0,"reaction":null}')
+    pacer = DiscordPacer(fake_pool, llm_client=client, now=lambda: now)
+
+    decision = await pacer.decide(user, [message_id], source="live")
+
+    assert decision.action == "answer"
+    assert len(client.calls) == 0

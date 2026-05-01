@@ -29,7 +29,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["app*", "evals*"]
+include = ["app*", "evals*", "resident_chat_runtime*"]
 
 [tool.setuptools]
 py-modules = ["tool_schemas"]

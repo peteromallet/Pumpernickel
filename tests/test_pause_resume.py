@@ -15,8 +15,8 @@ class RecordingCoalescer:
     def __init__(self) -> None:
         self.calls = []
 
-    async def add(self, *args) -> None:
-        self.calls.append(args)
+    async def add(self, *args, source: str = "live") -> None:
+        self.calls.append((*args, source))
 
 
 def _seed_user(pool, *, name: str, phone: str):

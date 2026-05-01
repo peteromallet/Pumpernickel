@@ -17,8 +17,8 @@ class CoalescerRecorder:
         self.add_calls = []
         self.add_burst_calls = []
 
-    async def add(self, user_id, message_id, user):
-        self.add_calls.append((user_id, message_id, user))
+    async def add(self, user_id, message_id, user, *, source: str = "live"):
+        self.add_calls.append((user_id, message_id, user, source))
 
     async def add_burst(self, user_id, message_ids, user):
         self.add_burst_calls.append((user_id, message_ids, user))
@@ -65,7 +65,7 @@ async def test_orphan_raw_message_readded_once(fake_pool) -> None:
 
     await recover_on_startup(fake_pool, coalescer)
 
-    assert coalescer.add_calls == [(user.id, message_id, user)]
+    assert coalescer.add_calls == [(user.id, message_id, user, "recovery")]
 
 
 async def test_crashed_turn_marks_failed_and_requeues_full_burst(fake_pool) -> None:
@@ -139,4 +139,4 @@ async def test_recovery_loop_rechecks_orphan_raw_messages(fake_pool, monkeypatch
     with pytest.raises(asyncio.CancelledError):
         await recovery.run_recovery_forever(fake_pool, coalescer, interval_seconds=0)
 
-    assert coalescer.add_calls == [(user.id, message_id, user)]
+    assert coalescer.add_calls == [(user.id, message_id, user, "recovery")]

@@ -85,3 +85,32 @@ async def is_under_cap(pool: Any, provider: str) -> bool:
         provider,
     )
     return Decimal(str(total or 0)) < _cap_for(provider)
+
+
+def _attr(obj: Any, name: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _usage_tokens(usage: Any, field: str) -> int:
+    return int(_attr(usage, field, 0) or 0)
+
+
+async def record_anthropic_haiku_text_response_cost(pool: Any, usage: Any) -> None:
+    settings = get_settings()
+    input_tokens = _usage_tokens(usage, "input_tokens")
+    cache_create = _usage_tokens(usage, "cache_creation_input_tokens")
+    cache_read = _usage_tokens(usage, "cache_read_input_tokens")
+    output_tokens = _usage_tokens(usage, "output_tokens")
+    regular_input_tokens = max(0, input_tokens - cache_create - cache_read)
+    input_rate = Decimal(str(settings.anthropic_haiku_input_usd_per_mtok))
+    output_rate = Decimal(str(settings.anthropic_haiku_output_usd_per_mtok))
+    dollars = (
+        regular_input_tokens * input_rate
+        + cache_create * input_rate * Decimal("1.25")
+        + cache_read * input_rate * Decimal("0.10")
+        + output_tokens * output_rate
+    ) / Decimal("1000000")
+    if dollars > 0:
+        await record_llm_cost(pool, "text", dollars)

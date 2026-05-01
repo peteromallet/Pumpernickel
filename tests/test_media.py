@@ -22,8 +22,8 @@ class Recorder:
     def __init__(self) -> None:
         self.calls = []
 
-    async def add(self, user_id, message_id, user):
-        self.calls.append((user_id, message_id, user))
+    async def add(self, user_id, message_id, user, *, source: str = "live"):
+        self.calls.append((user_id, message_id, user, source))
 
 
 def _user_and_message(fake_pool):
@@ -81,7 +81,32 @@ async def test_voice_success_persists_transcript_and_keeps_raw(fake_pool, monkey
     assert message["media_url"].endswith(f"voice/{message_id}")
     assert message["media_duration_seconds"] == 42
     assert message["processing_state"] == "raw"
-    assert recorder.calls
+    assert recorder.calls == [(user.id, message_id, user, "media")]
+
+
+async def test_image_success_persists_analysis_and_enqueues_as_media(fake_pool, monkeypatch) -> None:
+    user, message_id = _user_and_message(fake_pool)
+    recorder = Recorder()
+
+    async def fetch_media(media_id):
+        return b"image", "image/jpeg"
+
+    async def upload_media(bucket, object_path, content, content_type):
+        return f"{bucket}/{object_path}"
+
+    async def analyze(image_bytes, content_type):
+        return "image description"
+
+    monkeypatch.setattr("app.services.whatsapp.fetch_media", fetch_media)
+    monkeypatch.setattr("app.services.storage.upload_media", upload_media)
+    monkeypatch.setattr("app.services.vision._openai_analyze", analyze)
+
+    await handle_image(fake_pool, message_id, "media-image", user, recorder)
+    message = fake_pool.messages[message_id]
+
+    assert message["media_analysis"] == {"description": "image description"}
+    assert message["media_url"].endswith(f"image/{message_id}")
+    assert recorder.calls == [(user.id, message_id, user, "media")]
 
 
 async def test_voice_double_failure_expires_with_audio_retained(fake_pool, monkeypatch) -> None:

@@ -50,6 +50,7 @@ Mirror these variables in local `.env` and Railway environment variables:
 - `DISCORD_BOT_TOKEN` when using `MESSAGING_PROVIDER=discord`
 - `DISCORD_PARTNER_USER_ID_A` and `DISCORD_PARTNER_USER_ID_B` when using `MESSAGING_PROVIDER=discord`
 - `DISCORD_PARTNER_NAME_A` and `DISCORD_PARTNER_NAME_B` when using `MESSAGING_PROVIDER=discord`
+- `DISCORD_PACING_*` variables when using Discord conversation pacing
 - `ADMIN_PASSWORD`
 - `PARTNER_PHONE_A`
 - `PARTNER_PHONE_B`
@@ -78,7 +79,7 @@ AES-GCM ciphertext.
 Apply the forward migrations with `psql`:
 
 ```sh
-for file in migrations/0001_init.sql migrations/0002_plan2.sql migrations/0003_plan4_oob_reviews.sql migrations/0004_plan5_scheduled_jobs.sql migrations/0005_plan6_ops.sql migrations/0006_plan7_eval_results.sql migrations/0007_security_hardening.sql; do
+for file in migrations/0001_init.sql migrations/0002_plan2.sql migrations/0003_plan4_oob_reviews.sql migrations/0004_plan5_scheduled_jobs.sql migrations/0005_plan6_ops.sql migrations/0006_plan7_eval_results.sql migrations/0007_security_hardening.sql migrations/0008_discord_pacing.sql; do
   psql "$DATABASE_URL" -f "$file"
 done
 ```
@@ -86,9 +87,9 @@ done
 The migrations use guarded DDL where practical so accidental re-runs are safer,
 but they are forward migrations rather than a general migration manager.
 
-It creates 11 spec tables plus the operational `llm_spend_log` table. It enables
-only `pgcrypto`; it must not create pgvector, embedding columns, or vector
-storage.
+It creates 11 spec tables plus the operational `llm_spend_log` and
+`pacing_events` tables. It enables only `pgcrypto`; it must not create pgvector,
+embedding columns, or vector storage.
 
 After applying the migration to Supabase or a scratch Postgres database, verify
 the foundation schema before deploying:
@@ -102,8 +103,8 @@ psql "$DATABASE_URL"
 \d users
 ```
 
-The table list should show 12 tables: the 11 spec tables plus
-`llm_spend_log`. Confirm the spec partial indexes and GIN array indexes are
+The table list should show 13 tables: the 11 spec tables plus `llm_spend_log`
+and `pacing_events`. Confirm the spec partial indexes and GIN array indexes are
 present, and that `users` reports row security enabled. Then verify anon access
 is denied for application tables and the service role can still read through
 Supabase's RLS bypass.
@@ -150,6 +151,11 @@ DISCORD_PARTNER_NAME_B=Partner B
 
 In Discord mode, inbound messages are ignored unless the author ID matches one
 of those two Discord user IDs.
+
+Discord conversation pacing is documented in
+[`docs/discord-pacing.md`](docs/discord-pacing.md), including typing behavior,
+pre-turn wait/react/silence/answer decisions, source handling, observability,
+global tuning variables, and per-user preference keys.
 
 ## Run Tests
 
@@ -233,6 +239,16 @@ intentionally short and conversational, but it must be approved or edited before
 launch. The assistant name remains configurable through `ASSISTANT_NAME`; the
 co-designer-vs-recipient product decision is out of technical scope.
 
+To send a one-off operator-specified welcome to an allowlisted user:
+
+```sh
+uv run python scripts/send_welcome.py --recipient 15555550100 --name Maya --message "Hi Maya..."
+```
+
+The command exits non-zero unless the outbound row reaches `processed` with a
+provider message id. Only a successful provider send marks onboarding as
+`welcomed`.
+
 Weekly-summary timing is configurable with `WEEKLY_SUMMARY_DEFAULT_DAY`,
 `WEEKLY_SUMMARY_DEFAULT_TIME`, and per-user schedule fields.
 
@@ -243,8 +259,8 @@ Weekly-summary timing is configurable with `WEEKLY_SUMMARY_DEFAULT_DAY`,
 3. Confirm the start command is
    `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
 4. Add every variable from the environment checklist above.
-5. Apply `migrations/0005_plan6_ops.sql` to staging/production before deploying
-   this version.
+5. Apply all forward migrations through `migrations/0008_discord_pacing.sql` to
+   staging/production before deploying this version.
 6. Deploy and confirm Railway reports `/health` as healthy.
 7. Smoke test `/admin`, `/admin/turns`, `/admin/spend`, and `/health/deep` with
    real credentials.

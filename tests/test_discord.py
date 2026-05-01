@@ -7,11 +7,14 @@ import pytest
 from app.config import get_settings
 from app.services.discord import (
     DiscordGatewayBot,
+    add_reaction,
     catch_up_recent_messages,
     is_allowed_discord_user,
     message_to_meta_payload,
     seed_partner_users,
+    send_text,
 )
+from app.services.pacer import DiscordPacer
 
 
 def test_discord_message_to_meta_payload() -> None:
@@ -115,8 +118,39 @@ async def test_discord_gateway_accepts_partner(fake_pool, monkeypatch: pytest.Mo
         )
     await asyncio.sleep(0)
 
-    assert {"typing": "channel-1"} in calls
+    assert {"typing": "channel-1"} not in calls
     assert any("entry" in call for call in calls)
+    get_settings.cache_clear()
+
+
+async def test_discord_gateway_typing_start_marks_pacer_through_raw_event(
+    fake_pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    monkeypatch.setenv("DISCORD_PARTNER_USER_ID_A", "456")
+    monkeypatch.setenv("DISCORD_PARTNER_NAME_A", "Partner A")
+    get_settings.cache_clear()
+    pacer = DiscordPacer(fake_pool)
+
+    class Coalescer:
+        def __init__(self) -> None:
+            self.pacer = pacer
+
+    bot = DiscordGatewayBot(fake_pool, Coalescer())
+    await bot._gateway_loop.dispatch_payload(
+        {
+            "op": 0,
+            "t": "TYPING_START",
+            "d": {"user_id": "456", "channel_id": "channel-1", "timestamp": 12345},
+        }
+    )
+
+    user_row = next(row for row in fake_pool.users.values() if row["phone"] == "456")
+    typing_state = pacer.typing_state(user_row["id"])
+    assert typing_state is not None
+    assert typing_state.channel_id == "channel-1"
+    assert user_row["name"] == "Partner A"
     get_settings.cache_clear()
 
 
@@ -132,6 +166,70 @@ async def test_seed_partner_users_upserts_configured_discord_ids(fake_pool, monk
     users = {row["phone"]: row["name"] for row in fake_pool.users.values()}
     assert users == {"456": "Partner A", "789": "Partner B"}
     get_settings.cache_clear()
+
+
+async def test_add_reaction_calls_discord_reaction_endpoint(app_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def get_dm_channel_id(user_id):
+        assert user_id == "456"
+        return "channel-1"
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def put(self, path, headers=None):
+            calls.append((path, headers))
+            return Response()
+
+    async def get_client():
+        return Client()
+
+    monkeypatch.setattr("app.services.discord.get_dm_channel_id", get_dm_channel_id)
+    monkeypatch.setattr("app.services.discord._get_client", get_client)
+
+    await add_reaction("discord:456", "message-1", "👋")
+
+    assert calls[0][0] == "/channels/channel-1/messages/message-1/reactions/%F0%9F%91%8B/@me"
+
+
+async def test_discord_send_text_can_suppress_typing_indicator(app_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    typing_calls = []
+    message_calls = []
+
+    async def get_dm_channel_id(user_id):
+        assert user_id == "456"
+        return "channel-1"
+
+    async def send_typing(channel_id):
+        typing_calls.append(channel_id)
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id": "discord-message-1"}
+
+    class Rest:
+        async def send_message(self, channel_id, *, content):
+            message_calls.append((channel_id, content))
+            return Response()
+
+    async def rest_client():
+        return Rest()
+
+    monkeypatch.setattr("app.services.discord.get_dm_channel_id", get_dm_channel_id)
+    monkeypatch.setattr("app.services.discord.send_typing", send_typing)
+    monkeypatch.setattr("app.services.discord._rest_client", rest_client)
+
+    await send_text("discord:456", "quiet", send_typing_indicator=False)
+    await send_text("discord:456", "default")
+
+    assert typing_calls == ["channel-1"]
+    assert message_calls == [("channel-1", "quiet"), ("channel-1", "default")]
 
 
 async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,7 +266,16 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
 
     monkeypatch.setattr("app.services.discord._get_client", get_client)
 
-    count = await catch_up_recent_messages(fake_pool, None)
+    class Coalescer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def add(self, user_id, message_id, user, *, source: str = "live") -> None:
+            self.calls.append((user_id, message_id, user, source))
+
+    coalescer = Coalescer()
+
+    count = await catch_up_recent_messages(fake_pool, coalescer)
 
     assert count == 2
     assert calls == [("/channels/channel-1/messages", {"limit": 50})]
@@ -178,6 +285,7 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
         if row["direction"] == "inbound"
     }
     assert inbound_ids == {"m1", "m2"}
+    assert [call[3] for call in coalescer.calls] == ["catch_up", "catch_up"]
     get_settings.cache_clear()
 
 

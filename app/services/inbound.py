@@ -176,7 +176,13 @@ async def _insert_message(
     )
 
 
-async def process_inbound(pool: Any, payload: dict[str, Any], coalescer: Any | None = None) -> None:
+async def process_inbound(
+    pool: Any,
+    payload: dict[str, Any],
+    coalescer: Any | None = None,
+    *,
+    coalescer_source: str = "live",
+) -> None:
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
@@ -226,7 +232,7 @@ async def process_inbound(pool: Any, payload: dict[str, Any], coalescer: Any | N
                     if row is not None and await system_state.is_paused(pool):
                         continue
                     if row is not None and coalescer is not None and not await system_state.is_paused(pool):
-                        await coalescer.add(user.id, row["id"], user)
+                        await coalescer.add(user.id, row["id"], user, source=coalescer_source)
                     continue
 
                 if wa_type == "audio":
@@ -262,7 +268,7 @@ async def process_inbound(pool: Any, payload: dict[str, Any], coalescer: Any | N
                 if row is not None and await claim_onboarding_welcome(pool, user.id):
                     await send_outbound(pool, user, WELCOME_MESSAGE)
                 if row is not None and coalescer is not None and not await system_state.is_paused(pool):
-                    await coalescer.add(user.id, row["id"], user)
+                    await coalescer.add(user.id, row["id"], user, source=coalescer_source)
 
 
 def twilio_form_to_meta_payload(form: dict[str, str]) -> dict[str, Any]:

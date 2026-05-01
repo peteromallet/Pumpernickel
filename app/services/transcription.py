@@ -81,7 +81,7 @@ async def handle_voice(
             await pool.execute("UPDATE messages SET content=$1 WHERE id=$2", transcript, message_id)
             await record_llm_cost(pool, "transcription", 0.001)
             if should_enqueue:
-                await coalescer.add(user.id, message_id, user)
+                await coalescer.add(user.id, message_id, user, source="media")
             return
         except Exception as exc:
             last_error = exc

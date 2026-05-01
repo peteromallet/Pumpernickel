@@ -43,6 +43,18 @@ Counters are keyed by calendar day, so no daily reset job is required for the
 foundation plan. Keep historical rows for audit and cost review unless a later
 retention policy says otherwise.
 
+## Discord Pacing Audit
+
+Discord conversation pacing records every pre-turn wait, react, silence, or
+answer decision in `pacing_events`. Use those rows when debugging why the bot
+paused, reacted, stayed quiet, or ran a full turn. The row includes source
+metadata, message IDs, signal and preference snapshots, wait duration, reaction,
+and any optional LLM judgement or fallback reason.
+
+See [`discord-pacing.md`](discord-pacing.md) for operator tuning variables,
+per-user `users.pacing_preferences` keys, typing behavior, source handling, and
+the manual Discord smoke-test expectations.
+
 Operational secret rotation is handled outside the app:
 
 - Rotate Supabase service-role keys and API keys in Railway environment

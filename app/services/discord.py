@@ -7,6 +7,7 @@ import logging
 import random
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 TYPING_DELAY_MIN_S = 0.2
 TYPING_DELAY_MAX_S = 1.5
@@ -19,6 +20,8 @@ async def _send_typing_after_delay(channel_id: str) -> None:
 
 import httpx
 import websockets
+from resident_chat_runtime.discord_gateway import DiscordGatewayLoop, GatewayCallbacks
+from resident_chat_runtime.discord_rest import DISCORD_API_BASE, DiscordRestClient
 
 from app.config import get_settings
 from app.models.user import upsert_user
@@ -27,6 +30,19 @@ from app.services.whitelist import is_allowed_phone
 logger = logging.getLogger(__name__)
 
 _client: httpx.AsyncClient | None = None
+
+
+class _DiscordSessionAdapter:
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self._client = client
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        path = url.removeprefix(DISCORD_API_BASE)
+        request = getattr(self._client, "request", None)
+        if request is not None:
+            return await request(method, path, **kwargs)
+        method_func = getattr(self._client, method.lower())
+        return await method_func(path, **kwargs)
 
 
 def _token() -> str:
@@ -38,6 +54,14 @@ def _token() -> str:
 
 def _headers() -> dict[str, str]:
     return {"Authorization": f"Bot {_token()}"}
+
+
+async def _rest_client() -> DiscordRestClient:
+    return DiscordRestClient(
+        token=_token(),
+        session=_DiscordSessionAdapter(await _get_client()),
+        user_agent="veas",
+    )
 
 
 def _discord_user_id(value: str) -> str:
@@ -76,25 +100,33 @@ async def _get_client() -> httpx.AsyncClient:
     return _client
 
 
-async def send_text(to: str, body: str) -> dict[str, Any]:
+async def send_text(to: str, body: str, *, send_typing_indicator: bool = True) -> dict[str, Any]:
     """Send a Discord DM and return the existing message-id shaped response."""
-    client = await _get_client()
+    rest = await _rest_client()
     channel_id = await get_dm_channel_id(_discord_user_id(to))
-    await send_typing(channel_id)
-    message_response = await client.post(
-        f"/channels/{channel_id}/messages",
-        headers=_headers(),
-        json={"content": body},
-    )
+    if send_typing_indicator:
+        await send_typing(channel_id)
+    message_response = await rest.send_message(channel_id, content=body)
     message_response.raise_for_status()
     return {"messages": [{"id": message_response.json()["id"]}]}
 
 
+async def add_reaction(to: str, message_id: str, emoji: str) -> None:
+    """Add the bot's reaction to a Discord DM message."""
+    rest = await _rest_client()
+    channel_id = await get_dm_channel_id(_discord_user_id(to))
+    response = await rest.request(
+        "PUT",
+        f"/channels/{channel_id}/messages/{message_id}/reactions/{quote(emoji, safe='')}/@me",
+    )
+    response.raise_for_status()
+
+
 async def get_dm_channel_id(user_id: str) -> str:
-    client = await _get_client()
-    channel_response = await client.post(
+    rest = await _rest_client()
+    channel_response = await rest.request(
+        "POST",
         "/users/@me/channels",
-        headers=_headers(),
         json={"recipient_id": user_id},
     )
     channel_response.raise_for_status()
@@ -102,17 +134,26 @@ async def get_dm_channel_id(user_id: str) -> str:
 
 
 async def send_typing(channel_id: str) -> None:
-    client = await _get_client()
-    response = await client.post(f"/channels/{channel_id}/typing", headers=_headers())
+    rest = await _rest_client()
+    response = await rest.send_typing(channel_id)
     response.raise_for_status()
 
 
-async def send_template(to: str, template_payload: dict[str, Any]) -> dict[str, Any]:
+async def send_template(
+    to: str,
+    template_payload: dict[str, Any],
+    *,
+    send_typing_indicator: bool = True,
+) -> dict[str, Any]:
     params = []
     for component in template_payload.get("components", []):
         for parameter in component.get("parameters", []):
             params.append(str(parameter.get("text", "")))
-    return await send_text(to, " ".join(params) or str(template_payload.get("name", "message")))
+    return await send_text(
+        to,
+        " ".join(params) or str(template_payload.get("name", "message")),
+        send_typing_indicator=send_typing_indicator,
+    )
 
 
 async def seed_partner_users(pool: Any) -> None:
@@ -187,6 +228,15 @@ class DiscordGatewayBot:
         self.coalescer = coalescer
         self._closed = asyncio.Event()
         self._heartbeat_task: asyncio.Task | None = None
+        self._gateway_loop = DiscordGatewayLoop(
+            GatewayCallbacks(
+                on_message_create=self._handle_message,
+                on_message_update=self._handle_message_update,
+                on_message_delete=self._handle_message_delete,
+                on_reaction_add=self._handle_reaction_add,
+                on_event=self._handle_gateway_event,
+            )
+        )
 
     async def close(self) -> None:
         self._closed.set()
@@ -216,7 +266,7 @@ class DiscordGatewayBot:
                         "op": 2,
                         "d": {
                             "token": _token(),
-                            "intents": (1 << 12) | (1 << 15),
+                            "intents": (1 << 12) | (1 << 14) | (1 << 15),
                             "properties": {"os": "macos", "browser": "veas", "device": "veas"},
                         },
                     }
@@ -224,14 +274,8 @@ class DiscordGatewayBot:
             )
             async for raw in ws:
                 event = json.loads(raw)
-                if event.get("op") == 0 and event.get("t") == "MESSAGE_CREATE":
-                    await self._handle_message(event["d"])
-                if event.get("op") == 0 and event.get("t") == "MESSAGE_UPDATE":
-                    await self._handle_message_update(event["d"])
-                if event.get("op") == 0 and event.get("t") == "MESSAGE_DELETE":
-                    await self._handle_message_delete(event["d"])
-                if event.get("op") == 0 and event.get("t") == "MESSAGE_REACTION_ADD":
-                    await self._handle_reaction_add(event["d"])
+                if event.get("op") == 0:
+                    await self._gateway_loop.dispatch_payload(event)
                 if self._closed.is_set():
                     break
 
@@ -239,6 +283,26 @@ class DiscordGatewayBot:
         while not self._closed.is_set():
             await asyncio.sleep(interval)
             await ws.send(json.dumps({"op": 1, "d": None}))
+
+    async def _handle_gateway_event(self, payload: dict[str, Any]) -> None:
+        if payload.get("t") != "TYPING_START" or self.coalescer is None:
+            return
+        pacer = getattr(self.coalescer, "pacer", None)
+        if pacer is None:
+            return
+        data = payload.get("d")
+        if not isinstance(data, dict):
+            return
+        user_id = str(data.get("user_id", ""))
+        if not user_id or not is_allowed_discord_user(user_id):
+            return
+        typing_user = await upsert_user(
+            self.pool,
+            _configured_partner_name(user_id) or user_id,
+            _discord_user_id(user_id),
+            get_settings().default_user_timezone,
+        )
+        pacer.mark_user_typing(typing_user.id, channel_id=str(data.get("channel_id") or ""))
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         from app.services.inbound import process_inbound
@@ -251,7 +315,6 @@ class DiscordGatewayBot:
             return
         if not message.get("content"):
             return
-        asyncio.create_task(_send_typing_after_delay(str(message["channel_id"])))
         await process_inbound(self.pool, message_to_meta_payload(message), self.coalescer)
 
     async def _handle_message_update(self, message: dict[str, Any]) -> None:
@@ -321,7 +384,7 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, limit: i
         if value
     ]
     processed = 0
-    client = await _get_client()
+    rest = await _rest_client()
     for partner_id in partner_ids:
         user_id = _discord_user_id(partner_id)
         channel_id = await get_dm_channel_id(user_id)
@@ -338,17 +401,19 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, limit: i
             """,
             user_id,
         )
-        params: dict[str, str | int] = {"limit": limit}
-        if last_seen_id:
-            params["after"] = last_seen_id
-        response = await client.get(f"/channels/{channel_id}/messages", headers=_headers(), params=params)
+        response = await rest.fetch_channel_messages(channel_id, limit=limit, after=last_seen_id)
         response.raise_for_status()
         for message in reversed(response.json()):
             if str(message.get("author", {}).get("id", "")) != user_id:
                 continue
             if message.get("author", {}).get("bot") or not message.get("content"):
                 continue
-            await process_inbound(pool, message_to_meta_payload(message), coalescer)
+            await process_inbound(
+                pool,
+                message_to_meta_payload(message),
+                coalescer,
+                coalescer_source="catch_up",
+            )
             processed += 1
     if processed:
         logger.info("discord catch-up ingested %s recent message(s)", processed)

@@ -3,10 +3,11 @@
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
 
-from app.models.user import User
+from app.models.user import User, claim_onboarding_welcome
 from app.config import get_settings
 from app.services import discord, hooks, system_state, whatsapp
 from app.services.crypto import encrypt_value
@@ -91,6 +92,8 @@ async def send_outbound(
     bot_turn_id: UUID | None = None,
     ignore_pause: bool = False,
     protected_owner_ids: list[UUID] | None = None,
+    send_typing_indicator: bool = True,
+    before_provider_send: Callable[[], Awaitable[None]] | None = None,
 ) -> UUID:
     if not ignore_pause and (await system_state.is_paused(pool) or await hooks.paused_for_user(user.id)):
         return await _insert_outbound(pool, user, content, "withheld")
@@ -145,11 +148,14 @@ async def send_outbound(
     if not within_window:
         template_payload = render_template(template_fallback)
 
+    if before_provider_send is not None:
+        await before_provider_send()
+
     row_id = await _insert_outbound(pool, user, content)
 
     async def send_call() -> dict[str, Any]:
         if provider == "discord":
-            return await discord.send_text(user.phone, content)
+            return await discord.send_text(user.phone, content, send_typing_indicator=send_typing_indicator)
         if within_window:
             return await whatsapp.send_text(user.phone, content)
         return await whatsapp.send_template(user.phone, template_payload)
@@ -168,4 +174,5 @@ async def send_outbound(
         wa_id,
         row_id,
     )
+    await claim_onboarding_welcome(pool, user.id)
     return row_id

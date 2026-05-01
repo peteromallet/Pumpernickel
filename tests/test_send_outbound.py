@@ -64,6 +64,26 @@ async def test_free_form_path_sends_text_and_updates_row(fake_pool, monkeypatch)
     assert sent == [(user.phone, "hello")]
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "wamid.out"
     assert fake_pool.messages[row_id]["processing_state"] == "processed"
+    assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
+
+
+async def test_successful_bot_initiated_outbound_marks_onboarding_welcomed(fake_pool, monkeypatch) -> None:
+    user = _user(fake_pool)
+
+    async def send_template(to, payload):
+        return {"messages": [{"id": "wamid.template"}]}
+
+    monkeypatch.setattr("app.services.whatsapp.send_template", send_template)
+
+    row_id = await send_outbound(
+        fake_pool,
+        user,
+        "first contact",
+        template_fallback=TemplateCall("checkin_nudge", [user.name]),
+    )
+
+    assert fake_pool.messages[row_id]["processing_state"] == "processed"
+    assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
 
 
 async def test_template_path_and_param_validation(fake_pool, monkeypatch) -> None:
@@ -175,15 +195,37 @@ async def test_discord_provider_sends_without_whatsapp_window(fake_pool, monkeyp
     user = _user(fake_pool)
     sent = []
 
-    async def send_text(to, body):
-        sent.append((to, body))
+    async def send_text(to, body, *, send_typing_indicator=True):
+        sent.append((to, body, send_typing_indicator))
         return {"messages": [{"id": "discord-message"}]}
 
     monkeypatch.setattr("app.services.discord.send_text", send_text)
 
     row_id = await send_outbound(fake_pool, user, "hello discord")
 
-    assert sent == [(user.phone, "hello discord")]
+    assert sent == [(user.phone, "hello discord", True)]
+    assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message"
+    assert fake_pool.messages[row_id]["processing_state"] == "processed"
+    get_settings.cache_clear()
+
+
+async def test_discord_provider_can_suppress_low_level_typing(fake_pool, monkeypatch) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    user = _user(fake_pool)
+    sent = []
+
+    async def send_text(to, body, *, send_typing_indicator=True):
+        sent.append((to, body, send_typing_indicator))
+        return {"messages": [{"id": "discord-message"}]}
+
+    monkeypatch.setattr("app.services.discord.send_text", send_text)
+
+    row_id = await send_outbound(fake_pool, user, "hello discord", send_typing_indicator=False)
+
+    assert sent == [(user.phone, "hello discord", False)]
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message"
     assert fake_pool.messages[row_id]["processing_state"] == "processed"
     get_settings.cache_clear()
@@ -224,6 +266,7 @@ async def test_defer_without_template_appends_reasoning(fake_pool) -> None:
 
     assert fake_pool.messages[row_id]["processing_state"] == "withheld"
     assert "outside WhatsApp 24h window" in fake_pool.bot_turns[turn_id]["reasoning"]
+    assert fake_pool.users[user.id].get("onboarding_state", "pending") == "pending"
 
 
 async def test_retry_success_and_exhaustion(fake_pool, monkeypatch) -> None:
@@ -251,6 +294,7 @@ async def test_retry_success_and_exhaustion(fake_pool, monkeypatch) -> None:
 
     attempts = 0
     sleeps.clear()
+    fake_pool.users[user.id]["onboarding_state"] = "pending"
 
     async def always_fails(to, body):
         nonlocal attempts
@@ -262,6 +306,7 @@ async def test_retry_success_and_exhaustion(fake_pool, monkeypatch) -> None:
     assert attempts == 3
     assert sleeps == [1, 2]
     assert fake_pool.messages[row_id]["processing_state"] == "expired"
+    assert fake_pool.users[user.id]["onboarding_state"] == "pending"
 
 
 async def test_pause_and_oob_hooks(fake_pool, monkeypatch) -> None:

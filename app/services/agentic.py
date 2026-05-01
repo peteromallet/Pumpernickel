@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from datetime import timedelta
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, Mapping
 from uuid import UUID
 
 import anthropic
 
 from app.config import get_settings
 from app.models.user import User, claim_onboarding_welcome
-from app.services import hooks, system_state
+from app.services import discord, hooks, system_state
 from app.services.hot_context import build_hot_context, render_hot_context
 from app.services.messaging import send_outbound
 from app.services.prompts import render_system_prompt
@@ -39,10 +41,130 @@ class LLMPhaseError(Exception):
     failure_reason = "llm_timeout"
 
 
+REACTION_DIRECTIVE_RE = re.compile(r"^\s*\[react:\s*(?P<emoji>[^\]\s]+)\s*\]\s*$", re.IGNORECASE)
+PACING_CONTEXT_KEYS = (
+    "action",
+    "reason",
+    "wait_s",
+    "wait_ms",
+    "reaction",
+    "source",
+    "message_count",
+    "typing_active",
+    "latest_message_age_s",
+    "contains_question",
+    "contains_ack",
+    "contains_closure",
+    "has_media",
+    "charge",
+    "charges",
+)
+PACING_SIGNAL_KEYS = (
+    "source",
+    "message_count",
+    "typing_active",
+    "latest_message_age_s",
+    "contains_question",
+    "contains_ack",
+    "contains_closure",
+    "has_media",
+    "charge",
+    "charges",
+)
+
+
 def _attr(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(name, default)
     return getattr(obj, name, default)
+
+
+def _compact_json_value(value: Any, *, text_limit: int = 180) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, str):
+        return value if len(value) <= text_limit else value[: text_limit - 3] + "..."
+    if isinstance(value, Mapping):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            if item is None:
+                continue
+            compact[str(key)] = _compact_json_value(item, text_limit=text_limit)
+        return compact
+    if isinstance(value, (list, tuple, set)):
+        return [_compact_json_value(item, text_limit=text_limit) for item in list(value)[:8]]
+    return str(value)
+
+
+def _compact_pacing_context(pacing_context: Any) -> dict[str, Any] | None:
+    if pacing_context is None:
+        return None
+
+    compact: dict[str, Any] = {}
+    for key in PACING_CONTEXT_KEYS:
+        value = _attr(pacing_context, key)
+        if value is not None:
+            compact[key] = _compact_json_value(value)
+
+    signal_snapshot = _attr(pacing_context, "signal_snapshot")
+    if isinstance(signal_snapshot, Mapping):
+        signal_compact = {
+            key: _compact_json_value(signal_snapshot[key])
+            for key in PACING_SIGNAL_KEYS
+            if key in signal_snapshot and signal_snapshot[key] is not None
+        }
+        if signal_compact:
+            compact["signals"] = signal_compact
+
+    preference_snapshot = _attr(pacing_context, "preference_snapshot")
+    if isinstance(preference_snapshot, Mapping):
+        preference_keys = ("conversation_pace", "allow_reactions", "min_wait_s", "max_wait_s")
+        preferences = {
+            key: _compact_json_value(preference_snapshot[key])
+            for key in preference_keys
+            if key in preference_snapshot and preference_snapshot[key] is not None
+        }
+        if preferences:
+            compact["preferences"] = preferences
+
+    llm_judgement = _attr(pacing_context, "llm_judgement")
+    if isinstance(llm_judgement, Mapping):
+        judgement_keys = ("action", "reason", "wait_s", "reaction", "fallback")
+        judgement = {
+            key: _compact_json_value(llm_judgement[key])
+            for key in judgement_keys
+            if key in llm_judgement and llm_judgement[key] is not None
+        }
+        if judgement:
+            compact["llm"] = judgement
+
+    if not compact and isinstance(pacing_context, Mapping):
+        compact = {
+            str(key): _compact_json_value(value)
+            for key, value in pacing_context.items()
+            if key in PACING_CONTEXT_KEYS and value is not None
+        }
+
+    return compact or None
+
+
+def _trigger_metadata_with_pacing(
+    trigger_metadata: Mapping[str, Any] | None,
+    pacing_context: Any,
+) -> dict[str, Any] | None:
+    compact_pacing = _compact_pacing_context(pacing_context)
+    if compact_pacing is None:
+        return dict(trigger_metadata) if trigger_metadata is not None else None
+
+    metadata = dict(trigger_metadata or {})
+    context = dict(metadata.get("context") or {})
+    context["pacing"] = compact_pacing
+    metadata["context"] = context
+    metadata["pacing"] = compact_pacing
+    metadata.setdefault("kind", "inbound")
+    return metadata
 
 
 def _block_to_dict(block: Any) -> dict[str, Any]:
@@ -231,6 +353,37 @@ async def _append_reasoning(pool: Any, turn_id: UUID, note: str) -> None:
     )
 
 
+def _extract_reaction_directive(text: str) -> tuple[str | None, str]:
+    emoji: str | None = None
+    kept_lines: list[str] = []
+    for raw_line in text.splitlines():
+        match = REACTION_DIRECTIVE_RE.match(raw_line)
+        if match and emoji is None:
+            emoji = match.group("emoji").strip()
+            continue
+        kept_lines.append(raw_line)
+    return emoji, "\n".join(kept_lines).strip()
+
+
+async def _react_to_triggering_message(pool: Any, user: User, triggering_message_ids: list[UUID], emoji: str) -> bool:
+    settings = get_settings()
+    if settings.messaging_provider.strip().lower() != "discord" or not triggering_message_ids:
+        return False
+    row = await pool.fetchrow(
+        """
+        SELECT whatsapp_message_id
+        FROM messages
+        WHERE id=$1 AND direction='inbound' AND sender_id=$2
+        """,
+        triggering_message_ids[-1],
+        user.id,
+    )
+    if row is None or not row.get("whatsapp_message_id"):
+        return False
+    await discord.add_reaction(user.phone, row["whatsapp_message_id"], emoji)
+    return True
+
+
 async def _check_outbound_oob(
     pool: Any,
     content: str,
@@ -392,6 +545,7 @@ async def _run_agentic(
     trigger_metadata: dict[str, Any] | None = None,
     pool: Any | None = None,
     prompt_version: str | None = None,
+    before_paced_send: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     active_pool = pool or _pool
     if active_pool is not None and await system_state.is_paused(active_pool):
@@ -401,6 +555,7 @@ async def _run_agentic(
 
     settings = get_settings()
     selected_prompt_version = prompt_version or settings.system_prompt_version
+    send_typing_indicator = not bool(trigger_metadata and trigger_metadata.get("pacing"))
     turn_id: UUID | None = None
     started_at = datetime.now(UTC)
     phase_a_sent = False
@@ -435,14 +590,25 @@ async def _run_agentic(
             trigger_charge=charge,
             explicit_partner_alert_requested=explicit_partner_alert_requested,
         )
+        pacing_context = hot_context.trigger_metadata.get("pacing")
+        pacing_seed = (
+            f" pacing={json.dumps(pacing_context, default=str)}."
+            if pacing_context is not None
+            else ""
+        )
         phase_a_seed = [
             {
                 "role": "user",
                 "content": (
                     f"Trigger: kind={hot_context.trigger_metadata.get('kind', 'inbound')} "
                     f"ids={triggering_message_ids} charge={charge or 'routine'} "
-                    f"context={json.dumps(hot_context.trigger_metadata.get('context', {}), default=str)}. "
+                    f"context={json.dumps(hot_context.trigger_metadata.get('context', {}), default=str)}."
+                    f"{pacing_seed} "
                     "Phase A: read what you need, then produce only the user-facing reply as plain text. "
+                    "If a text reply would be unnecessary and a small acknowledgement is enough, "
+                    "you may produce exactly `[react: 👍]`, `[react: ❤️]`, or `[react: 👋]` instead. "
+                    "If a reaction would naturally complement a short reply, put one `[react: emoji]` "
+                    "directive on its own line before or after the reply; the directive will not be shown to the user. "
                     "Do not include scratch notes, analysis of the message, tool/read decisions, or separators."
                 ),
             }
@@ -457,22 +623,36 @@ async def _run_agentic(
             )
 
         final_output_message_id = None
+        reaction_emoji = None
         if assistant_text:
             assistant_text = clean_user_facing_text(assistant_text)
-            dyad_owner_ids = [user.id, partner.id]
-            sendable_text = await _resolve_outbound_text(active_pool, turn_id, user, assistant_text, dyad_owner_ids)
-            if sendable_text:
-                final_output_message_id = await send_outbound(
-                    active_pool,
-                    user,
-                    sendable_text,
-                    bot_turn_id=turn_id,
-                    protected_owner_ids=dyad_owner_ids,
-                )
-                await _record_turn_final_output(active_pool, turn_id, final_output_message_id)
-                await claim_onboarding_welcome(active_pool, user.id)
-                assistant_text = sendable_text
-                phase_a_sent = True
+            reaction_emoji, assistant_text = _extract_reaction_directive(assistant_text)
+            if reaction_emoji is not None:
+                if await _react_to_triggering_message(active_pool, user, triggering_message_ids, reaction_emoji):
+                    await _append_reasoning(active_pool, turn_id, f"Reacted to triggering message with {reaction_emoji}.")
+                    await claim_onboarding_welcome(active_pool, user.id)
+                    phase_a_sent = True
+            if assistant_text:
+                dyad_owner_ids = [user.id, partner.id]
+                sendable_text = await _resolve_outbound_text(active_pool, turn_id, user, assistant_text, dyad_owner_ids)
+                if sendable_text:
+                    final_output_message_id = await send_outbound(
+                        active_pool,
+                        user,
+                        sendable_text,
+                        bot_turn_id=turn_id,
+                        protected_owner_ids=dyad_owner_ids,
+                        send_typing_indicator=send_typing_indicator,
+                        before_provider_send=(
+                            (lambda text=sendable_text: before_paced_send(text))
+                            if before_paced_send is not None and not send_typing_indicator
+                            else None
+                        ),
+                    )
+                    await _record_turn_final_output(active_pool, turn_id, final_output_message_id)
+                    await claim_onboarding_welcome(active_pool, user.id)
+                    assistant_text = sendable_text
+                    phase_a_sent = True
         elif charge in {"charged", "crisis"}:
             await _append_reasoning(active_pool, turn_id, "silence; charged trigger but no justification produced")
             logger.warning("charged/crisis trigger produced silence without model justification turn_id=%s", turn_id)
@@ -482,7 +662,7 @@ async def _run_agentic(
         phase_b_seed.append(
             {
                 "role": "user",
-                "content": f"You sent: {assistant_text or '[silence]'}. Now record any state changes (memories, observations, theme updates, watch items) and optionally schedule one follow-up check-in. Do not produce user-facing text.",
+                "content": f"You sent: {f'[reaction {reaction_emoji}]' if reaction_emoji else (assistant_text or '[silence]')}. Now record any state changes (memories, observations, theme updates, watch items) and optionally schedule one follow-up check-in. Do not produce user-facing text.",
             }
         )
         _, phase_b_messages, phase_b_tool_count = await run_phase(
@@ -514,6 +694,12 @@ async def _run_agentic(
                     user,
                     "I'm running into limits today, will catch up tomorrow.",
                     bot_turn_id=turn_id,
+                    send_typing_indicator=send_typing_indicator,
+                    before_provider_send=(
+                        (lambda: before_paced_send("I'm running into limits today, will catch up tomorrow."))
+                        if before_paced_send is not None and not send_typing_indicator
+                        else None
+                    ),
                 )
             await _complete_turn(
                 active_pool,
@@ -539,6 +725,25 @@ async def run_agentic_turn(triggering_message_ids: list[UUID], user: User) -> No
         logger.warning("run_agentic_turn called without triggering messages for user_id=%s", user.id)
         return
     await _run_agentic(triggering_message_ids, user)
+
+
+async def run_agentic_turn_with_metadata(
+    triggering_message_ids: list[UUID],
+    user: User,
+    *,
+    pacing_context: Any | None = None,
+    trigger_metadata: Mapping[str, Any] | None = None,
+    before_paced_send: Callable[[str], Awaitable[None]] | None = None,
+) -> None:
+    if not triggering_message_ids:
+        logger.warning("run_agentic_turn_with_metadata called without triggering messages for user_id=%s", user.id)
+        return
+    await _run_agentic(
+        triggering_message_ids,
+        user,
+        trigger_metadata=_trigger_metadata_with_pacing(trigger_metadata, pacing_context),
+        before_paced_send=before_paced_send,
+    )
 
 
 async def run_agentic_job(user: User, trigger_metadata: dict[str, Any]) -> None:

@@ -51,7 +51,7 @@ class _CollectingCoalescer:
     def __init__(self) -> None:
         self.message_ids: list[UUID] = []
 
-    async def add(self, user_id: UUID, message_id: UUID, user: User) -> None:
+    async def add(self, user_id: UUID, message_id: UUID, user: User, *, source: str = "live") -> None:
         self.message_ids.append(message_id)
 
 

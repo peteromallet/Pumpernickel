@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,6 +53,23 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_poll_interval_s: float = 10.0
     scheduler_batch_size: int = 10
+    discord_pacing_enabled: bool = True
+    discord_pacing_burst_window_s: float = Field(default=2.75, ge=0.25, le=15.0)
+    discord_pacing_min_wait_s: float = Field(default=0.8, ge=0.0, le=10.0)
+    discord_pacing_max_wait_s: float = Field(default=12.0, ge=1.0, le=60.0)
+    discord_pacing_typing_grace_s: float = Field(default=4.0, ge=0.5, le=30.0)
+    discord_pacing_typing_extend_s: float = Field(default=2.0, ge=0.0, le=15.0)
+    discord_pacing_max_typing_wait_s: float = Field(default=20.0, ge=1.0, le=90.0)
+    discord_pacing_answer_typing_min_s: float = Field(default=1.0, ge=0.0, le=20.0)
+    discord_pacing_answer_typing_max_s: float = Field(default=10.0, ge=0.5, le=45.0)
+    discord_pacing_answer_chars_per_s: float = Field(default=18.0, ge=4.0, le=80.0)
+    discord_pacing_reactions_enabled: bool = True
+    discord_pacing_reaction_cooldown_s: float = Field(default=180.0, ge=0.0, le=3600.0)
+    discord_pacing_reaction_daily_limit: int = Field(default=12, ge=0, le=100)
+    discord_pacing_silence_cooldown_s: float = Field(default=300.0, ge=0.0, le=7200.0)
+    discord_pacing_llm_judgement_enabled: bool = True
+    discord_pacing_llm_min_ambiguity: float = Field(default=0.45, ge=0.0, le=1.0)
+    discord_pacing_event_retention_days: int = Field(default=30, ge=1, le=365)
     weekly_summary_default_day: int = 1  # Monday, matching Postgres EXTRACT(DOW) convention where Sunday is 0.
     weekly_summary_default_time: str = "09:00"
     heartbeat_interval_hours: int = 24

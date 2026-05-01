@@ -109,7 +109,7 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
     )
     for row in raw_messages:
         user = await fetch_user_by_id(pool, row["sender_id"])
-        await coalescer.add(user.id, row["id"], user)
+        await coalescer.add(user.id, row["id"], user, source="recovery")
 
 
 async def run_recovery_forever(pool: Any, coalescer: Any, *, interval_seconds: float = 30.0) -> None:

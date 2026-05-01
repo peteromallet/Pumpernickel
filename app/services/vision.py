@@ -92,4 +92,4 @@ async def handle_image(
         await pool.execute("UPDATE messages SET media_analysis=$1 WHERE id=$2", {"description": description}, message_id)
         await record_llm_cost(pool, "vision", 0.001)
         if should_enqueue:
-            await coalescer.add(user.id, message_id, user)
+            await coalescer.add(user.id, message_id, user, source="media")

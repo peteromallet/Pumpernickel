@@ -7,6 +7,7 @@ import pytest
 
 from app.models.user import User
 from app.services import agentic
+from app.services.pacer import PacingDecision
 
 pytestmark = pytest.mark.anyio
 
@@ -142,6 +143,92 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
     assert "write note" in turn["reasoning"]
 
 
+async def test_run_agentic_turn_with_metadata_seeds_compact_pacing_context(fake_pool, app_env, monkeypatch):
+    user = User(uuid4(), "Maya", "15555550100", "UTC")
+    partner = User(uuid4(), "Ben", "15555550101", "UTC")
+    fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
+    fake_pool.users[partner.id] = {
+        "id": partner.id,
+        "name": partner.name,
+        "phone": partner.phone,
+        "timezone": partner.timezone,
+    }
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "That was a lot, but I think I am done now",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "wa-pace",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    decision = PacingDecision(
+        action="answer",
+        reason="burst settled after short wait",
+        signal_snapshot={
+            "source": "live",
+            "message_count": 3,
+            "typing_active": False,
+            "latest_message_age_s": 2.1,
+            "contains_question": False,
+            "irrelevant_large_blob": "x" * 400,
+        },
+        preference_snapshot={"conversation_pace": "standard", "allow_reactions": True, "ignored": "value"},
+    )
+    read_seed_contents = []
+
+    async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
+        if ctx.phase == "read":
+            read_seed_contents.append(seed_messages[-1]["content"])
+            assert "pacing" in hot_context_rendered
+            assert "burst settled after short wait" in hot_context_rendered
+            return "I hear the whole thought.", [], 0
+        return "", [], 0
+
+    async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        assert kwargs["protected_owner_ids"] == [user.id, partner.id]
+        assert kwargs["send_typing_indicator"] is False
+        out_id = uuid4()
+        pool.messages[out_id] = {
+            "id": out_id,
+            "direction": "outbound",
+            "sender_id": None,
+            "recipient_id": recipient.id,
+            "content": content,
+            "processing_state": "processed",
+            "sent_at": datetime.now(UTC),
+            "charge": None,
+            "deleted_at": None,
+        }
+        return out_id
+
+    monkeypatch.setattr(agentic, "run_phase", fake_run_phase)
+    monkeypatch.setattr(agentic, "send_outbound", fake_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn_with_metadata([message_id], user, pacing_context=decision)
+
+    assert read_seed_contents
+    assert '"pacing"' in read_seed_contents[0]
+    assert '"action": "answer"' in read_seed_contents[0]
+    assert '"source": "live"' in read_seed_contents[0]
+    assert "irrelevant_large_blob" not in read_seed_contents[0]
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert "pacing" in turn["prompt_snapshot"]
+    assert "I hear the whole thought." == fake_pool.messages[turn["final_output_message_id"]]["content"]
+    assert fake_pool.messages[message_id]["processing_state"] == "processed"
+
+
 async def test_run_agentic_records_outbound_before_phase_b(fake_pool, app_env, monkeypatch):
     user = User(uuid4(), "Maya", "15555550100", "UTC")
     partner = User(uuid4(), "Ben", "15555550101", "UTC")
@@ -194,6 +281,131 @@ async def test_run_agentic_records_outbound_before_phase_b(fake_pool, app_env, m
     agentic.set_pool(fake_pool)
 
     await agentic.run_agentic_turn([message_id], user)
+
+
+async def test_run_agentic_can_react_instead_of_replying(fake_pool, app_env, monkeypatch):
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    user = User(uuid4(), "Maya", "456", "UTC")
+    partner = User(uuid4(), "Ben", "789", "UTC")
+    fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
+    fake_pool.users[partner.id] = {"id": partner.id, "name": partner.name, "phone": partner.phone, "timezone": partner.timezone}
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "Goodnight",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "discord-in-1",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    reactions = []
+
+    async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
+        if ctx.phase == "read":
+            assert "[react: 👋]" in seed_messages[-1]["content"]
+            return "[react: 👋]", [{"role": "assistant", "content": "[react: 👋]"}], 0
+        assert "[reaction 👋]" in seed_messages[-1]["content"]
+        return "", [], 0
+
+    async def fake_add_reaction(phone, discord_message_id, emoji):
+        reactions.append((phone, discord_message_id, emoji))
+
+    monkeypatch.setattr(agentic, "run_phase", fake_run_phase)
+    monkeypatch.setattr(agentic.discord, "add_reaction", fake_add_reaction)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user)
+
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert reactions == [("456", "discord-in-1", "👋")]
+    assert turn["final_output_message_id"] is None
+    assert "Reacted to triggering message with 👋" in turn["reasoning"]
+    assert fake_pool.messages[message_id]["processing_state"] == "processed"
+    get_settings.cache_clear()
+
+
+async def test_run_agentic_can_react_alongside_reply(fake_pool, app_env, monkeypatch):
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    user = User(uuid4(), "Maya", "456", "UTC")
+    partner = User(uuid4(), "Ben", "789", "UTC")
+    fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
+    fake_pool.users[partner.id] = {"id": partner.id, "name": partner.name, "phone": partner.phone, "timezone": partner.timezone}
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "I did it",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "discord-in-2",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    reactions = []
+    sent = []
+
+    async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
+        if ctx.phase == "read":
+            return "[react: ❤️]\nThat matters. Let it land for a bit.", [], 0
+        assert "That matters. Let it land for a bit." in seed_messages[-1]["content"]
+        return "", [], 0
+
+    async def fake_add_reaction(phone, discord_message_id, emoji):
+        reactions.append((phone, discord_message_id, emoji))
+
+    async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        out_id = uuid4()
+        sent.append(content)
+        pool.messages[out_id] = {
+            "id": out_id,
+            "direction": "outbound",
+            "sender_id": None,
+            "recipient_id": recipient.id,
+            "content": content,
+            "processing_state": "processed",
+            "sent_at": datetime.now(UTC),
+            "charge": None,
+            "deleted_at": None,
+        }
+        return out_id
+
+    monkeypatch.setattr(agentic, "run_phase", fake_run_phase)
+    monkeypatch.setattr(agentic.discord, "add_reaction", fake_add_reaction)
+    monkeypatch.setattr(agentic, "send_outbound", fake_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user)
+
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert reactions == [("456", "discord-in-2", "❤️")]
+    assert sent == ["That matters. Let it land for a bit."]
+    assert turn["final_output_message_id"] is not None
+    assert "[react:" not in fake_pool.messages[turn["final_output_message_id"]]["content"]
+    get_settings.cache_clear()
 
 
 async def test_text_cap_defers_original_messages_and_sends_notice_once(fake_pool, app_env, monkeypatch):
