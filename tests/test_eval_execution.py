@@ -107,7 +107,10 @@ def test_prompt_closes_low_energy_conversations() -> None:
 
     assert "# Conversation Closure" in rendered
     assert "naturally losing energy" in rendered
-    assert "Prefer a closing sentence over another question" in rendered
+    assert "Prefer a closing sentence over another probing question" in rendered
+    assert "Always leave the door open when closing" in rendered
+    assert "unless you want to keep going" in rendered
+    assert "Silence is also acceptable" in rendered
     assert "Goodnight" in rendered
     assert "schedule one in Phase B rather than keeping the live chat open" in rendered
 
