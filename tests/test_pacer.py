@@ -6,11 +6,21 @@ from uuid import uuid4
 
 import pytest
 
+from app.config import get_settings
 from app.models.user import User
 from app.services.pacer import DiscordPacer
 
 
 pytestmark = pytest.mark.anyio
+
+
+def test_typing_defaults_start_quickly(app_env) -> None:
+    settings = get_settings()
+
+    assert settings.discord_pacing_initial_typing_min_s == 0.2
+    assert settings.discord_pacing_initial_typing_max_s == 1.2
+    assert settings.discord_pacing_thinking_typing_start_s == 0.4
+    assert settings.discord_pacing_answer_typing_min_s == 0.4
 
 
 def _seed_user(fake_pool, *, preferences: dict | None = None) -> User:
@@ -162,7 +172,7 @@ async def test_pacer_reacts_sparingly_then_silences_ack_during_cooldown(fake_poo
 
 async def test_answer_typing_suppresses_indicator_while_user_is_typing(fake_pool) -> None:
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
-    user = _seed_user(fake_pool)
+    user = _seed_user(fake_pool, preferences={"answer_typing_max_s": 10})
     typing_sent_at = []
 
     def current_time() -> datetime:

@@ -415,7 +415,7 @@ class DiscordPacer:
             return
 
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+            await asyncio.wait_for(stop_event.wait(), timeout=self.settings.discord_pacing_thinking_typing_start_s)
             return
         except TimeoutError:
             pass
