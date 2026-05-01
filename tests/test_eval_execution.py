@@ -92,6 +92,15 @@ def test_prompt_treats_garbled_voice_text_as_transcription_artifact() -> None:
     assert "Do not over-interpret garbled wording" in rendered
 
 
+def test_prompt_centers_revealing_followup_in_multi_message_bursts() -> None:
+    rendered = render_system_prompt("Mediator", "Maya", "Ben", prompt_version="v1")
+
+    assert "# Multi-Message Handling" in rendered
+    assert "Let the follow-up become the center of gravity" in rendered
+    assert "rather than a second mini-essay" in rendered
+    assert "Avoid stacked responses" in rendered
+
+
 def test_prompt_pushes_real_world_conversation_and_action() -> None:
     rendered = render_system_prompt("Mediator", "Maya", "Ben", prompt_version="v1")
 
