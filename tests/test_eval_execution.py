@@ -107,6 +107,9 @@ def test_prompt_closes_low_energy_conversations() -> None:
 
     assert "# Conversation Closure" in rendered
     assert "naturally losing energy" in rendered
+    assert "close with one small helpful action" in rendered
+    assert "Do not turn every ending into homework" in rendered
+    assert "Keep action nudges small enough to do today or soon" in rendered
     assert "Prefer a closing sentence over another probing question" in rendered
     assert "Always leave the door open when closing" in rendered
     assert "unless you want to keep going" in rendered
