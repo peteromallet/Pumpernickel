@@ -334,6 +334,7 @@ async def test_run_agentic_send_message_part_is_visible_to_phase_b(fake_pool, ap
     async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
         if ctx.phase == "read":
             assert "send_message_part" in allowed_tools
+            assert "explicit multi-message requests" in seed_messages[-1]["content"]
             first = await call_tool(
                 "send_message_part",
                 {"content": "That sounds bleak."},
@@ -410,6 +411,7 @@ async def test_run_agentic_can_react_instead_of_replying(fake_pool, app_env, mon
     async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
         if ctx.phase == "read":
             assert "[react: 👋]" in seed_messages[-1]["content"]
+            assert "do not claim Discord reactions are unavailable" in seed_messages[-1]["content"]
             return "[react: 👋]", [{"role": "assistant", "content": "[react: 👋]"}], 0
         assert "[reaction 👋]" in seed_messages[-1]["content"]
         return "", [], 0
