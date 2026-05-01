@@ -38,6 +38,9 @@ def test_config_loads(monkeypatch) -> None:
         "DISCORD_PACING_ANSWER_TYPING_MIN_S": "1.5",
         "DISCORD_PACING_ANSWER_TYPING_MAX_S": "9",
         "DISCORD_PACING_ANSWER_CHARS_PER_S": "20",
+        "DISCORD_PACING_TYPING_PULSE_MIN_GAP_S": "12",
+        "DISCORD_PACING_TYPING_VISIBLE_S": "7",
+        "DISCORD_PACING_TYPING_OFF_GAP_S": "4",
         "DISCORD_PACING_REACTIONS_ENABLED": "true",
         "DISCORD_PACING_REACTION_COOLDOWN_S": "240",
         "DISCORD_PACING_REACTION_DAILY_LIMIT": "8",
@@ -95,6 +98,9 @@ def test_config_loads(monkeypatch) -> None:
     assert settings.discord_pacing_answer_typing_min_s == 1.5
     assert settings.discord_pacing_answer_typing_max_s == 9
     assert settings.discord_pacing_answer_chars_per_s == 20
+    assert settings.discord_pacing_typing_pulse_min_gap_s == 12
+    assert settings.discord_pacing_typing_visible_s == 7
+    assert settings.discord_pacing_typing_off_gap_s == 4
     assert settings.discord_pacing_reactions_enabled is True
     assert settings.discord_pacing_reaction_cooldown_s == 240
     assert settings.discord_pacing_reaction_daily_limit == 8

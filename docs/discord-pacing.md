@@ -90,6 +90,9 @@ audit stream.
 | `DISCORD_PACING_ANSWER_TYPING_MIN_S` | `1` | Minimum pre-answer typing pulse duration. |
 | `DISCORD_PACING_ANSWER_TYPING_MAX_S` | `10` | Maximum pre-answer typing pulse duration. |
 | `DISCORD_PACING_ANSWER_CHARS_PER_S` | `18` | Approximate answer typing speed used to size pulses. |
+| `DISCORD_PACING_TYPING_PULSE_MIN_GAP_S` | `11` | Minimum gap between bot typing API calls, so Discord can visibly drop the indicator before another pulse. |
+| `DISCORD_PACING_TYPING_VISIBLE_S` | `8` | Assumed useful visible duration of one Discord typing pulse. |
+| `DISCORD_PACING_TYPING_OFF_GAP_S` | `3` | Extra off-gap before a follow-up pulse when a long turn needs multiple pulses. |
 | `DISCORD_PACING_REACTIONS_ENABLED` | `true` | Enables sparse reaction-only decisions. |
 | `DISCORD_PACING_REACTION_COOLDOWN_S` | `180` | Minimum gap between reaction-only decisions for a user. |
 | `DISCORD_PACING_REACTION_DAILY_LIMIT` | `12` | Per-user daily cap for reaction-only decisions. |

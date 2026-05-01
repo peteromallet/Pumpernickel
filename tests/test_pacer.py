@@ -182,12 +182,35 @@ async def test_answer_typing_suppresses_indicator_while_user_is_typing(fake_pool
     waited_s = await pacer.perform_answer_typing(user, "channel-1", "x" * 200)
 
     assert waited_s > 0
-    assert len(typing_sent_at) >= 2
+    assert len(typing_sent_at) == 1
     assert typing_sent_at[0][1] > datetime(2026, 5, 1, 12, 0, tzinfo=UTC) + timedelta(seconds=4)
     decisions = [event["decision"] for event in fake_pool.pacing_events.values()]
     assert "typing_wait" in decisions
     assert "typing_start" in decisions
     assert "typing_stop" in decisions
+
+
+async def test_bot_typing_pulses_leave_visible_gaps(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(fake_pool, preferences={"answer_typing_max_s": 25, "answer_chars_per_s": 10})
+    typing_sent_at = []
+
+    def current_time() -> datetime:
+        return now
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        now += timedelta(seconds=seconds)
+
+    async def send_typing(channel_id: str) -> None:
+        typing_sent_at.append((channel_id, now))
+
+    pacer = DiscordPacer(fake_pool, send_typing=send_typing, sleep=sleep, now=current_time)
+    await pacer.perform_answer_typing(user, "channel-1", "x" * 1000)
+
+    assert len(typing_sent_at) == 3
+    assert typing_sent_at[1][1] - typing_sent_at[0][1] >= timedelta(seconds=11)
+    assert typing_sent_at[2][1] - typing_sent_at[1][1] >= timedelta(seconds=11)
 
 
 async def test_llm_judgement_can_silence_ambiguous_live_burst_and_records_cost(fake_pool) -> None:

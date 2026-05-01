@@ -123,6 +123,7 @@ class DiscordPacer:
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(UTC))
         self._typing: dict[UUID, TypingState] = {}
+        self._last_bot_typing_at: dict[UUID, datetime] = {}
         self._last_reaction_at: dict[UUID, datetime] = {}
         self._reaction_counts: dict[tuple[UUID, datetime.date], int] = {}
 
@@ -297,6 +298,39 @@ class DiscordPacer:
             float(preferences["answer_typing_max_s"]),
         )
 
+    def _typing_gap_remaining_s(self, user_id: UUID) -> float:
+        last = self._last_bot_typing_at.get(user_id)
+        if last is None:
+            return 0.0
+        elapsed_s = (self._now() - last).total_seconds()
+        return max(0.0, self.settings.discord_pacing_typing_pulse_min_gap_s - elapsed_s)
+
+    async def _send_bot_typing_pulse(
+        self,
+        user: User,
+        channel_id: str,
+        *,
+        reason: str,
+        pulse_s: float,
+        preferences: Mapping[str, Any],
+    ) -> bool:
+        if self._send_typing is None or self._typing_gap_remaining_s(user.id) > 0:
+            return False
+        await self._send_typing(channel_id)
+        self._last_bot_typing_at[user.id] = self._now()
+        await record_pacing_event(
+            self.pool,
+            user_id=user.id,
+            message_ids=[],
+            source="live",
+            decision="typing_start",
+            reason=reason,
+            signal_snapshot={"channel_id": channel_id, "pulse_s": pulse_s},
+            preference_snapshot=preferences,
+            wait_ms=int(round(pulse_s * 1000)),
+        )
+        return True
+
     async def perform_answer_typing(self, user: User, channel_id: str, answer_text: str) -> float:
         """Emit human-feeling typing pulses, suppressing them while the user types."""
         preferences = await fetch_user_pacing_preferences(self.pool, user.id)
@@ -328,25 +362,31 @@ class DiscordPacer:
 
         delay_s = self.answer_typing_delay_s(answer_text, preferences)
         remaining_s = delay_s
+        visible_s = float(self.settings.discord_pacing_typing_visible_s)
+        off_gap_s = float(self.settings.discord_pacing_typing_off_gap_s)
         while remaining_s > 0:
-            await self._send_typing(channel_id)
-            pulse_s = min(remaining_s, 7.0)
-            await record_pacing_event(
-                self.pool,
-                user_id=user.id,
-                message_ids=[],
-                source="live",
-                decision="typing_start",
+            gap_remaining_s = self._typing_gap_remaining_s(user.id)
+            if gap_remaining_s > 0:
+                wait_s = min(gap_remaining_s, remaining_s)
+                await self._sleep(wait_s)
+                waited_s += wait_s
+                remaining_s -= wait_s
+                if remaining_s <= 0:
+                    break
+
+            pulse_s = min(remaining_s, visible_s)
+            sent = await self._send_bot_typing_pulse(
+                user,
+                channel_id,
                 reason="started paced answer typing indicator",
-                signal_snapshot={"channel_id": channel_id, "pulse_s": pulse_s},
-                preference_snapshot=preferences,
-                wait_ms=int(round(pulse_s * 1000)),
+                pulse_s=pulse_s,
+                preferences=preferences,
             )
             await self._sleep(pulse_s)
             waited_s += pulse_s
             remaining_s -= pulse_s
-            if remaining_s > 0:
-                pause_s = min(0.5, remaining_s)
+            if sent and remaining_s > 0 and off_gap_s > 0:
+                pause_s = min(off_gap_s, remaining_s)
                 await record_pacing_event(
                     self.pool,
                     user_id=user.id,
@@ -380,20 +420,16 @@ class DiscordPacer:
         except TimeoutError:
             pass
 
-        pulse_interval_s = 6.5
+        pulse_interval_s = self.settings.discord_pacing_typing_pulse_min_gap_s + self.settings.discord_pacing_typing_off_gap_s
+        visible_s = self.settings.discord_pacing_typing_visible_s
         while not stop_event.is_set():
             if self.typing_state(user.id, preferences) is None:
-                await self._send_typing(channel_id)
-                await record_pacing_event(
-                    self.pool,
-                    user_id=user.id,
-                    message_ids=[],
-                    source="live",
-                    decision="typing_start",
+                await self._send_bot_typing_pulse(
+                    user,
+                    channel_id,
                     reason="started paced thinking typing indicator",
-                    signal_snapshot={"channel_id": channel_id, "pulse_s": pulse_interval_s},
-                    preference_snapshot=preferences,
-                    wait_ms=int(round(pulse_interval_s * 1000)),
+                    pulse_s=visible_s,
+                    preferences=preferences,
                 )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=pulse_interval_s)
@@ -419,20 +455,16 @@ class DiscordPacer:
         except TimeoutError:
             pass
 
-        pulse_interval_s = 6.5
+        pulse_interval_s = self.settings.discord_pacing_typing_pulse_min_gap_s + self.settings.discord_pacing_typing_off_gap_s
+        visible_s = self.settings.discord_pacing_typing_visible_s
         while not stop_event.is_set():
             if self.typing_state(user.id, preferences) is None:
-                await self._send_typing(channel_id)
-                await record_pacing_event(
-                    self.pool,
-                    user_id=user.id,
-                    message_ids=[],
-                    source="live",
-                    decision="typing_start",
+                await self._send_bot_typing_pulse(
+                    user,
+                    channel_id,
                     reason="started paced initial typing indicator",
-                    signal_snapshot={"channel_id": channel_id, "pulse_s": pulse_interval_s},
-                    preference_snapshot=preferences,
-                    wait_ms=int(round(pulse_interval_s * 1000)),
+                    pulse_s=visible_s,
+                    preferences=preferences,
                 )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=pulse_interval_s)
