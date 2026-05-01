@@ -474,6 +474,10 @@ class DiscordPacer:
             await self._sleep(rhythm_s)
             waited_s += rhythm_s
 
+        waited_s += await self._wait_while_user_typing(user, channel_id, preferences)
+        if self.typing_state(user.id, preferences) is not None:
+            return waited_s
+
         min_gap_s = float(self.settings.discord_pacing_incremental_typing_pulse_min_gap_s)
         if self._typing_gap_remaining_s(user.id, min_gap_s=min_gap_s) > 0:
             return waited_s

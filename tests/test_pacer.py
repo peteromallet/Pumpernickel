@@ -251,6 +251,36 @@ async def test_incremental_followup_typing_uses_short_gap(fake_pool) -> None:
     assert events[-1]["signal_snapshot"]["send_kind"] == "incremental_next"
 
 
+async def test_incremental_followup_rechecks_user_typing_after_rhythm(fake_pool) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _seed_user(
+        fake_pool,
+        preferences={"answer_typing_min_s": 0.4, "max_typing_wait_s": 5, "typing_grace_s": 10},
+    )
+    typing_sent_at = []
+    sleep_calls = []
+
+    def current_time() -> datetime:
+        return now
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        sleep_calls.append(seconds)
+        now += timedelta(seconds=seconds)
+        if len(sleep_calls) == 1:
+            pacer.mark_user_typing(user.id, channel_id="channel-1", at=now)
+
+    async def send_typing(channel_id: str) -> None:
+        typing_sent_at.append((channel_id, now))
+
+    pacer = DiscordPacer(fake_pool, send_typing=send_typing, sleep=sleep, now=current_time)
+    waited_s = await pacer.perform_send_typing(user, "channel-1", "Seven.", send_kind="incremental_next", part_index=2)
+
+    assert waited_s >= 5
+    assert typing_sent_at == []
+    assert "typing_wait" in [event["decision"] for event in fake_pool.pacing_events.values()]
+
+
 async def test_llm_judgement_can_silence_ambiguous_live_burst_and_records_cost(fake_pool) -> None:
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     user = _seed_user(fake_pool)
