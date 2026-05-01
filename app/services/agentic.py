@@ -36,6 +36,10 @@ class SpendCapExceeded(Exception):
     failure_reason = "spend_cap"
 
 
+class NewerInboundBeforeFinalSend(Exception):
+    pass
+
+
 class LLMPhaseError(Exception):
     failure_reason = "llm_timeout"
 
@@ -537,6 +541,33 @@ async def _defer_for_text_cap(pool: Any, user: User, message_ids: list[UUID]) ->
     return row is not None
 
 
+async def _newer_inbound_exists(
+    pool: Any,
+    user: User,
+    turn_started_at: datetime | None,
+    triggering_message_ids: list[UUID],
+) -> bool:
+    if turn_started_at is None:
+        return False
+    return bool(
+        await pool.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM messages
+                WHERE direction='inbound'
+                  AND sender_id=$1
+                  AND sent_at > $2
+                  AND NOT (id = ANY($3::uuid[]))
+            )
+            """,
+            user.id,
+            turn_started_at,
+            triggering_message_ids,
+        )
+    )
+
+
 async def _run_agentic(
     triggering_message_ids: list[UUID],
     user: User,
@@ -658,23 +689,47 @@ async def _run_agentic(
                 sendable_text = await _resolve_outbound_text(active_pool, turn_id, user, assistant_text, dyad_owner_ids)
                 already_sent = [part["content"] for part in sent_parts]
                 if sendable_text and sendable_text not in already_sent:
-                    final_output_message_id = await send_outbound(
-                        active_pool,
-                        user,
-                        sendable_text,
-                        bot_turn_id=turn_id,
-                        protected_owner_ids=dyad_owner_ids,
-                        send_typing_indicator=send_typing_indicator,
-                        before_provider_send=(
-                            (lambda text=sendable_text: before_paced_send(text, send_kind="final", part_index=None))
-                            if before_paced_send is not None and not send_typing_indicator
-                            else None
-                        ),
-                    )
-                    await _record_turn_final_output(active_pool, turn_id, final_output_message_id)
-                    await claim_onboarding_welcome(active_pool, user.id)
-                    assistant_text = sendable_text
-                    phase_a_sent = True
+                    if await _newer_inbound_exists(active_pool, user, started_at, triggering_message_ids):
+                        await _append_reasoning(
+                            active_pool,
+                            turn_id,
+                            "Final outbound skipped because a newer inbound message arrived before send.",
+                        )
+                        assistant_text = ""
+                    else:
+
+                        async def before_final_provider_send(text: str = sendable_text) -> None:
+                            if before_paced_send is not None and not send_typing_indicator:
+                                await before_paced_send(text, send_kind="final", part_index=None)
+                            if await _newer_inbound_exists(active_pool, user, started_at, triggering_message_ids):
+                                raise NewerInboundBeforeFinalSend()
+
+                        try:
+                            final_output_message_id = await send_outbound(
+                                active_pool,
+                                user,
+                                sendable_text,
+                                bot_turn_id=turn_id,
+                                protected_owner_ids=dyad_owner_ids,
+                                send_typing_indicator=send_typing_indicator,
+                                before_provider_send=(
+                                    before_final_provider_send
+                                    if before_paced_send is not None and not send_typing_indicator
+                                    else None
+                                ),
+                            )
+                        except NewerInboundBeforeFinalSend:
+                            await _append_reasoning(
+                                active_pool,
+                                turn_id,
+                                "Final outbound skipped because a newer inbound message arrived during paced send.",
+                            )
+                            assistant_text = ""
+                        else:
+                            await _record_turn_final_output(active_pool, turn_id, final_output_message_id)
+                            await claim_onboarding_welcome(active_pool, user.id)
+                            assistant_text = sendable_text
+                            phase_a_sent = True
                 elif sendable_text:
                     assistant_text = sendable_text
         elif charge in {"charged", "crisis"}:

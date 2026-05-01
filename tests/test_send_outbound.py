@@ -67,6 +67,22 @@ async def test_free_form_path_sends_text_and_updates_row(fake_pool, monkeypatch)
     assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
 
 
+async def test_free_form_path_records_bot_turn_id(fake_pool, monkeypatch) -> None:
+    user = _user(fake_pool)
+    turn_id = uuid4()
+    _inbound(fake_pool, user, datetime.now(UTC) - timedelta(minutes=5))
+
+    async def send_text(to, body):
+        return {"messages": [{"id": "wamid.out"}]}
+
+    monkeypatch.setattr("app.services.whatsapp.send_text", send_text)
+
+    row_id = await send_outbound(fake_pool, user, "hello", bot_turn_id=turn_id)
+
+    assert fake_pool.messages[row_id]["bot_turn_id"] == turn_id
+    assert fake_pool.messages[row_id]["whatsapp_message_id"] == "wamid.out"
+
+
 async def test_successful_bot_initiated_outbound_marks_onboarding_welcomed(fake_pool, monkeypatch) -> None:
     user = _user(fake_pool)
 

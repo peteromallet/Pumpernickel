@@ -38,6 +38,8 @@ _INTERNAL_OUTPUT_PATTERNS = (
     "key updates to record",
     "need to be retried",
     "needs to be retried",
+    "pick up from peter's next message",
+    "pick up from the next message",
     "safety escalation",
     "should be addressed",
     "should be updated",
@@ -51,6 +53,8 @@ _PROCESS_OPENERS = (
     "this message is",
     "the user is",
     "the user has",
+    "interrupted —",
+    "interrupted -",
     "he's naming",
     "she's naming",
 )

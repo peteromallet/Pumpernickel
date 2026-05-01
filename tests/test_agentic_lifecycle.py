@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -67,6 +67,12 @@ def test_clean_user_facing_text_removes_write_tools_phase_gate_leak():
         "theme to reflect tonight's session depth. These will need to be retried "
         "when the phase gate resolves."
     )
+
+    assert agentic.clean_user_facing_text(text) == ""
+
+
+def test_clean_user_facing_text_removes_interrupted_process_leak():
+    text = "Interrupted — I'll pick up from Peter's next message."
 
     assert agentic.clean_user_facing_text(text) == ""
 
@@ -283,6 +289,73 @@ async def test_run_agentic_records_outbound_before_phase_b(fake_pool, app_env, m
     agentic.set_pool(fake_pool)
 
     await agentic.run_agentic_turn([message_id], user)
+
+
+async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives(fake_pool, app_env, monkeypatch):
+    user = User(uuid4(), "Maya", "15555550100", "UTC")
+    partner = User(uuid4(), "Ben", "15555550101", "UTC")
+    fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
+    fake_pool.users[partner.id] = {"id": partner.id, "name": partner.name, "phone": partner.phone, "timezone": partner.timezone}
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "First part",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "wa-1",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    sent = []
+
+    async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
+        if ctx.phase == "read":
+            newer_id = uuid4()
+            fake_pool.messages[newer_id] = {
+                "id": newer_id,
+                "direction": "inbound",
+                "sender_id": user.id,
+                "recipient_id": None,
+                "content": "Second part",
+                "processing_state": "raw",
+                "sent_at": ctx.turn_started_at + timedelta(milliseconds=1),
+                "charge": "routine",
+                "deleted_at": None,
+                "whatsapp_message_id": "wa-2",
+                "media_type": None,
+                "media_url": None,
+                "media_duration_seconds": None,
+                "media_analysis": None,
+                "edit_history": None,
+                "edited_at": None,
+            }
+            return "I was mid-reply.", [], 0
+        assert seed_messages[-1]["content"] == "You sent: [silence]. Now record any state changes (memories, observations, theme updates, watch items) and optionally schedule one follow-up check-in. Do not produce user-facing text."
+        return "", [], 0
+
+    async def fake_send(*args, **kwargs):
+        sent.append(args)
+        return uuid4()
+
+    monkeypatch.setattr(agentic, "run_phase", fake_run_phase)
+    monkeypatch.setattr(agentic, "send_outbound", fake_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user)
+
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert sent == []
+    assert turn["final_output_message_id"] is None
+    assert "Final outbound skipped because a newer inbound message arrived before send." in turn["reasoning"]
 
 
 async def test_run_agentic_send_message_part_is_visible_to_phase_b(fake_pool, app_env, monkeypatch):

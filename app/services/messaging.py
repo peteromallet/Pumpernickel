@@ -330,12 +330,12 @@ async def send_outbound(
     before_provider_send: Callable[[], Awaitable[None]] | None = None,
 ) -> UUID:
     if not ignore_pause and (await system_state.is_paused(pool) or await hooks.paused_for_user(user.id)):
-        return await _insert_outbound(pool, user, content, "withheld")
+        return await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id)
 
     verdict = await _call_oob_hook(pool, content, user.id, protected_owner_ids)
     if verdict["verdict"] == "block":
         await _append_turn_reasoning(pool, bot_turn_id, f"Outbound blocked by OOB hook: {verdict['reason']}")
-        row_id = await _insert_outbound(pool, user, content, "withheld")
+        row_id = await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id)
         await record_withheld_outbound_review(
             pool,
             recipient_id=user.id,
@@ -349,7 +349,7 @@ async def send_outbound(
         return row_id
     if verdict["verdict"] == "rewrite":
         await _append_turn_reasoning(pool, bot_turn_id, f"Outbound withheld for OOB rewrite review: {verdict['reason']}")
-        row_id = await _insert_outbound(pool, user, content, "withheld")
+        row_id = await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id)
         await record_withheld_outbound_review(
             pool,
             recipient_id=user.id,
@@ -376,7 +376,7 @@ async def send_outbound(
 
     if not within_window and template_fallback is None:
         await _append_turn_reasoning(pool, bot_turn_id, "Outbound deferred: outside WhatsApp 24h window with no template")
-        return await _insert_outbound(pool, user, content, "withheld")
+        return await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id)
 
     template_payload = None
     if not within_window:
@@ -385,7 +385,7 @@ async def send_outbound(
     if before_provider_send is not None:
         await before_provider_send()
 
-    row_id = await _insert_outbound(pool, user, content)
+    row_id = await _insert_outbound(pool, user, content, bot_turn_id=bot_turn_id)
 
     async def send_call() -> dict[str, Any]:
         if provider == "discord":
