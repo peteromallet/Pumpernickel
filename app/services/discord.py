@@ -123,6 +123,22 @@ async def add_reaction(to: str, message_id: str, emoji: str) -> None:
     response.raise_for_status()
 
 
+async def edit_text(to: str, message_id: str, body: str) -> None:
+    """Edit one of the bot's previously sent Discord DM messages."""
+    rest = await _rest_client()
+    channel_id = await get_dm_channel_id(_discord_user_id(to))
+    response = await rest.edit_message(channel_id, message_id, content=body)
+    response.raise_for_status()
+
+
+async def delete_text(to: str, message_id: str) -> None:
+    """Delete one of the bot's previously sent Discord DM messages."""
+    rest = await _rest_client()
+    channel_id = await get_dm_channel_id(_discord_user_id(to))
+    response = await rest.delete_message(channel_id, message_id)
+    response.raise_for_status()
+
+
 async def get_dm_channel_id(user_id: str) -> str:
     rest = await _rest_client()
     channel_response = await rest.request(

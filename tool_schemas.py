@@ -160,6 +160,32 @@ class SearchMessagesOutput(BaseModel):
     truncated: bool
 
 
+# --- search_emojis ---
+
+
+class SearchEmojisInput(BaseModel):
+    query: str = Field(
+        min_length=1,
+        max_length=120,
+        description="Meaning, feeling, metaphor, or plain-language idea to search for, e.g. 'fragile peace', 'reluctant leaving', 'steady support'.",
+    )
+    limit: int = Field(default=12, ge=1, le=50)
+
+
+class EmojiSearchHit(BaseModel):
+    emoji: str
+    name: str
+    aliases: list[str] = []
+    keywords: list[str] = []
+    score: int = Field(ge=0)
+
+
+class SearchEmojisOutput(BaseModel):
+    query: str
+    hits: list[EmojiSearchHit]
+    used_full_dataset: bool
+
+
 # --- recent_activity ---
 
 
@@ -698,6 +724,57 @@ class EscalateToPartnerOutput(BaseModel):
     reason_if_deferred: str | None
 
 
+# --- outbound message controls ---
+
+
+class EditOutboundMessageInput(BaseModel):
+    message_id: UUID = Field(description="Internal id of an outbound bot message to edit.")
+    content: str = Field(
+        min_length=1,
+        max_length=2000,
+        description="Replacement user-visible text. Must be safe to show to the original recipient.",
+    )
+    reason: str = Field(description="Why editing the already-sent message is better than sending a follow-up.")
+
+
+class EditOutboundMessageOutput(BaseModel):
+    action: Literal["edited", "blocked", "unsupported", "not_found"]
+    message_id: UUID
+    provider_message_id: str | None = None
+    reason: str | None = None
+    suggested_rewrite: str | None = None
+
+
+class DeleteOutboundMessageInput(BaseModel):
+    message_id: UUID = Field(description="Internal id of an outbound bot message to delete.")
+    reason: str = Field(description="Why deleting the already-sent message is appropriate.")
+
+
+class DeleteOutboundMessageOutput(BaseModel):
+    action: Literal["deleted", "unsupported", "not_found"]
+    message_id: UUID
+    provider_message_id: str | None = None
+    reason: str | None = None
+
+
+class ReactToMessageInput(BaseModel):
+    message_id: UUID = Field(description="Internal id of the message to react to.")
+    emoji: str = Field(
+        min_length=1,
+        max_length=32,
+        description="A single Unicode emoji reaction. Prefer precise, emotionally apt, non-obvious choices over generic defaults.",
+    )
+    reason: str = Field(description="Why this emoji precisely fits the meaning of the message.")
+
+
+class ReactToMessageOutput(BaseModel):
+    action: Literal["reacted", "unsupported", "not_found"]
+    message_id: UUID
+    provider_message_id: str | None = None
+    emoji: str
+    reason: str | None = None
+
+
 # --- feedback ---
 
 
@@ -769,6 +846,7 @@ class SendMessagePartOutput(BaseModel):
 TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     # read
     "search_messages": (SearchMessagesInput, SearchMessagesOutput),
+    "search_emojis": (SearchEmojisInput, SearchEmojisOutput),
     "recent_activity": (RecentActivityInput, RecentActivityOutput),
     "list_themes": (ListThemesInput, ListThemesOutput),
     "get_theme": (GetThemeInput, GetThemeOutput),
@@ -799,5 +877,8 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "schedule_checkin": (ScheduleCheckinInput, ScheduleCheckinOutput),
     "cancel_scheduled_checkin": (CancelScheduledCheckinInput, CancelScheduledCheckinOutput),
     "escalate_to_partner": (EscalateToPartnerInput, EscalateToPartnerOutput),
+    "edit_outbound_message": (EditOutboundMessageInput, EditOutboundMessageOutput),
+    "delete_outbound_message": (DeleteOutboundMessageInput, DeleteOutboundMessageOutput),
+    "react_to_message": (ReactToMessageInput, ReactToMessageOutput),
     "log_feedback": (LogFeedbackInput, LogFeedbackOutput),
 }

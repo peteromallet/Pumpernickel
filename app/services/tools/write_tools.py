@@ -11,8 +11,9 @@ from pydantic import BaseModel
 
 from app.services.checkins import schedule_checkin_record
 from app.services.crypto import encrypt_value
-from app.services.messaging import send_outbound, _append_turn_reasoning
-from app.services import scoring
+from app.config import get_settings
+from app.services.messaging import send_outbound, _append_turn_reasoning, _call_oob_hook
+from app.services import discord, scoring
 from app.services.templates import TemplateCall
 from app.services.turn_context import TurnContext
 from tool_schemas import (
@@ -28,6 +29,10 @@ from tool_schemas import (
     CancelScheduledCheckinOutput,
     CreateThemeInput,
     CreateThemeOutput,
+    DeleteOutboundMessageInput,
+    DeleteOutboundMessageOutput,
+    EditOutboundMessageInput,
+    EditOutboundMessageOutput,
     EscalateToPartnerInput,
     EscalateToPartnerOutput,
     LiftOOBInput,
@@ -36,6 +41,8 @@ from tool_schemas import (
     LogFeedbackOutput,
     LogObservationInput,
     LogObservationOutput,
+    ReactToMessageInput,
+    ReactToMessageOutput,
     ScheduleCheckinInput,
     ScheduleCheckinOutput,
     SupersedeMemoryInput,
@@ -504,6 +511,174 @@ async def escalate_to_partner(ctx: TurnContext, args: EscalateToPartnerInput) ->
     )
     result = EscalateToPartnerOutput(action="sent", outbound_message_id=out_id, used_template=False, reason_if_deferred=None)
     await _log_tool_call(ctx, "escalate_to_partner", args, started, result)
+    return result
+
+
+async def _fetch_dyad_message(ctx: TurnContext, message_id: Any) -> Any | None:
+    return await ctx.pool.fetchrow(
+        """
+        SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at
+        FROM messages
+        WHERE id=$1
+          AND (
+            sender_id = ANY($2::uuid[])
+            OR recipient_id = ANY($2::uuid[])
+          )
+        """,
+        message_id,
+        [ctx.user.id, ctx.partner.id],
+    )
+
+
+async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput) -> EditOutboundMessageOutput:
+    started = _start()
+    row = await _fetch_dyad_message(ctx, args.message_id)
+    if (
+        row is None
+        or row["direction"] != "outbound"
+        or row["recipient_id"] not in {ctx.user.id, ctx.partner.id}
+        or row["whatsapp_message_id"] is None
+        or row["deleted_at"] is not None
+    ):
+        result = EditOutboundMessageOutput(
+            action="not_found",
+            message_id=args.message_id,
+            reason="message is not an editable, delivered bot outbound in this conversation",
+        )
+        await _log_tool_call(ctx, "edit_outbound_message", args, started, result)
+        return result
+
+    if get_settings().messaging_provider.strip().lower() != "discord":
+        result = EditOutboundMessageOutput(
+            action="unsupported",
+            message_id=args.message_id,
+            provider_message_id=row["whatsapp_message_id"],
+            reason="editing already-sent bot messages is currently implemented only for Discord",
+        )
+        await _log_tool_call(ctx, "edit_outbound_message", args, started, result)
+        return result
+
+    verdict = await _call_oob_hook(ctx.pool, args.content, row["recipient_id"], [ctx.user.id, ctx.partner.id])
+    if verdict["verdict"] != "ok":
+        result = EditOutboundMessageOutput(
+            action="blocked",
+            message_id=args.message_id,
+            provider_message_id=row["whatsapp_message_id"],
+            reason=verdict["reason"],
+            suggested_rewrite=verdict.get("suggested_rewrite"),
+        )
+        await _log_tool_call(ctx, "edit_outbound_message", args, started, result)
+        return result
+
+    recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+    await discord.edit_text(recipient_phone, row["whatsapp_message_id"], args.content)
+    await ctx.pool.execute(
+        """
+        UPDATE messages
+        SET edit_history = COALESCE(edit_history, '[]'::jsonb)
+                || jsonb_build_array(jsonb_build_object('content', content, 'at', now(), 'reason', $1)),
+            content = $2,
+            content_encrypted = $3,
+            edited_at = now()
+        WHERE id = $4
+        """,
+        args.reason,
+        args.content,
+        encrypt_value(args.content),
+        args.message_id,
+    )
+    result = EditOutboundMessageOutput(
+        action="edited",
+        message_id=args.message_id,
+        provider_message_id=row["whatsapp_message_id"],
+        reason=args.reason,
+    )
+    await _log_tool_call(ctx, "edit_outbound_message", args, started, result)
+    return result
+
+
+async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageInput) -> DeleteOutboundMessageOutput:
+    started = _start()
+    row = await _fetch_dyad_message(ctx, args.message_id)
+    if (
+        row is None
+        or row["direction"] != "outbound"
+        or row["recipient_id"] not in {ctx.user.id, ctx.partner.id}
+        or row["whatsapp_message_id"] is None
+        or row["deleted_at"] is not None
+    ):
+        result = DeleteOutboundMessageOutput(
+            action="not_found",
+            message_id=args.message_id,
+            reason="message is not a deletable, delivered bot outbound in this conversation",
+        )
+        await _log_tool_call(ctx, "delete_outbound_message", args, started, result)
+        return result
+
+    if get_settings().messaging_provider.strip().lower() != "discord":
+        result = DeleteOutboundMessageOutput(
+            action="unsupported",
+            message_id=args.message_id,
+            provider_message_id=row["whatsapp_message_id"],
+            reason="deleting already-sent bot messages is currently implemented only for Discord",
+        )
+        await _log_tool_call(ctx, "delete_outbound_message", args, started, result)
+        return result
+
+    recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+    await discord.delete_text(recipient_phone, row["whatsapp_message_id"])
+    await ctx.pool.execute(
+        "UPDATE messages SET deleted_at = now(), processing_state='expired' WHERE id=$1",
+        args.message_id,
+    )
+    result = DeleteOutboundMessageOutput(
+        action="deleted",
+        message_id=args.message_id,
+        provider_message_id=row["whatsapp_message_id"],
+        reason=args.reason,
+    )
+    await _log_tool_call(ctx, "delete_outbound_message", args, started, result)
+    return result
+
+
+async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> ReactToMessageOutput:
+    started = _start()
+    row = await _fetch_dyad_message(ctx, args.message_id)
+    if row is None or row["whatsapp_message_id"] is None or row["deleted_at"] is not None:
+        result = ReactToMessageOutput(
+            action="not_found",
+            message_id=args.message_id,
+            provider_message_id=row["whatsapp_message_id"] if row is not None else None,
+            emoji=args.emoji,
+            reason="message is not a delivered, visible message in this conversation",
+        )
+        await _log_tool_call(ctx, "react_to_message", args, started, result)
+        return result
+
+    if get_settings().messaging_provider.strip().lower() != "discord":
+        result = ReactToMessageOutput(
+            action="unsupported",
+            message_id=args.message_id,
+            provider_message_id=row["whatsapp_message_id"],
+            emoji=args.emoji,
+            reason="bot reactions are currently implemented only for Discord",
+        )
+        await _log_tool_call(ctx, "react_to_message", args, started, result)
+        return result
+
+    if row["direction"] == "inbound":
+        target_phone = ctx.user.phone if row["sender_id"] == ctx.user.id else ctx.partner.phone
+    else:
+        target_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+    await discord.add_reaction(target_phone, row["whatsapp_message_id"], args.emoji)
+    result = ReactToMessageOutput(
+        action="reacted",
+        message_id=args.message_id,
+        provider_message_id=row["whatsapp_message_id"],
+        emoji=args.emoji,
+        reason=args.reason,
+    )
+    await _log_tool_call(ctx, "react_to_message", args, started, result)
     return result
 
 

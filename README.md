@@ -3,7 +3,7 @@
 Implementation for the mediator bot described in
 [`mediator-bot-spec.md`](mediator-bot-spec.md): WhatsApp ingestion, the
 agentic mediation loop, read/write tools, scheduler, admin debugging views,
-spend caps, staging replay, and operating scripts.
+spend tracking, staging replay, and operating scripts.
 
 `tool_schemas.py` lives at the repository root by design and must not be moved,
 copied, renamed, or deleted. Packaging exposes it as the top-level
@@ -199,7 +199,7 @@ External alerting is intentionally outside the repo. Configure:
 - An uptime monitor for `/health` every 1-5 minutes.
 - A deploy smoke check for `/health/deep`.
 - A cron-ping alert tied to the scheduled heartbeat log/job cadence.
-- Log alerting for `LLM spend ... crossed 80% of daily cap`.
+- Log alerting for `LLM spend ... crossed 80% of daily warning threshold`.
 
 ## Staging Replay
 

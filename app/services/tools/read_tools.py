@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -46,8 +47,11 @@ from tool_schemas import (
     OOBVerdict,
     RecentActivityInput,
     RecentActivityOutput,
+    EmojiSearchHit,
     SearchMessagesInput,
     SearchMessagesOutput,
+    SearchEmojisInput,
+    SearchEmojisOutput,
     SelfModel,
     SendMessagePartInput,
     SendMessagePartOutput,
@@ -58,6 +62,58 @@ from tool_schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EMOJI_FALLBACK = {
+    "🫶": ("heart hands", ["care", "support", "tender", "warmth"]),
+    "🕯️": ("candle", ["gentle", "grief", "quiet", "holding space"]),
+    "🪷": ("lotus", ["calm", "patience", "growth", "softness"]),
+    "🧭": ("compass", ["direction", "orientation", "finding way"]),
+    "🪨": ("rock", ["steady", "grounded", "solid", "weight"]),
+    "🌿": ("herb", ["gentle", "repair", "fresh", "peace"]),
+    "🧵": ("thread", ["connection", "follow", "story", "continuity"]),
+    "🪞": ("mirror", ["reflection", "seeing", "self-awareness"]),
+    "🌫️": ("fog", ["unclear", "confusing", "blurred"]),
+    "🛟": ("ring buoy", ["help", "support", "rescue"]),
+    "🧩": ("puzzle piece", ["missing piece", "complex", "fit"]),
+    "🤲": ("palms up together", ["offering", "gentle", "receiving"]),
+}
+
+_EMOJI_QUERY_EXPANSIONS = {
+    "support": {"help", "hand", "hands", "holding", "hug", "care", "heart", "buoy"},
+    "quiet": {"silence", "muted", "hushed", "candle", "fog", "night", "peace"},
+    "fragile": {"crack", "cracked", "egg", "glass", "feather", "wilted"},
+    "repair": {"mending", "thread", "needle", "tool", "wrench", "seedling", "bridge"},
+    "stuck": {"knot", "puzzle", "maze", "lock", "anchor"},
+    "steady": {"rock", "anchor", "mountain", "compass"},
+    "soft": {"feather", "cloud", "lotus", "herb", "palms"},
+    "sad": {"rain", "cloud", "wilted", "candle", "blue"},
+    "progress": {"seedling", "sprout", "step", "sunrise", "chart"},
+    "bridge": {"bridge", "thread", "link", "handshake", "compass"},
+    "confusing": {"fog", "maze", "question", "mirror", "puzzle"},
+}
+
+
+def _emoji_terms(value: str) -> set[str]:
+    terms = {token for token in re.split(r"[^a-z0-9]+", value.lower()) if token}
+    expanded = set(terms)
+    for term in terms:
+        expanded.update(_EMOJI_QUERY_EXPANSIONS.get(term, set()))
+    return expanded
+
+
+def _emoji_score(query_terms: set[str], name: str, aliases: list[str], keywords: list[str]) -> int:
+    haystacks = [name, *aliases, *keywords]
+    score = 0
+    for term in query_terms:
+        for idx, haystack in enumerate(haystacks):
+            normalized = haystack.lower().replace("_", " ").replace("-", " ")
+            if term == normalized:
+                score += 12 if idx == 0 else 8
+            elif term in _emoji_terms(normalized):
+                score += 6 if idx == 0 else 4
+            elif term in normalized:
+                score += 2
+    return score
 
 
 class NewerInboundDuringPacedSend(Exception):
@@ -215,6 +271,52 @@ async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> Search
         *params,
     )
     return SearchMessagesOutput(hits=[message_hit(row) for row in rows], truncated=len(rows) == args.limit)
+
+
+async def search_emojis(ctx: TurnContext, args: SearchEmojisInput) -> SearchEmojisOutput:
+    logger.info("read tool search_emojis turn_id=%s", ctx.turn_id)
+    query_terms = _emoji_terms(args.query)
+    candidates: list[EmojiSearchHit] = []
+    used_full_dataset = False
+
+    try:
+        import emoji as emoji_pkg  # type: ignore
+
+        used_full_dataset = True
+        for symbol, data in emoji_pkg.EMOJI_DATA.items():
+            raw_name = str(data.get("en") or "").strip(":").replace("_", " ")
+            aliases = [str(item).strip(":").replace("_", " ") for item in data.get("alias", []) or []]
+            keywords = [str(item).replace("_", " ") for item in data.get("variant", []) or []]
+            if symbol in _EMOJI_FALLBACK:
+                fallback_name, fallback_keywords = _EMOJI_FALLBACK[symbol]
+                aliases.append(fallback_name)
+                keywords.extend(fallback_keywords)
+            score = _emoji_score(query_terms, raw_name, aliases, keywords)
+            if score > 0:
+                candidates.append(
+                    EmojiSearchHit(
+                        emoji=symbol,
+                        name=raw_name,
+                        aliases=aliases,
+                        keywords=keywords,
+                        score=score,
+                    )
+                )
+    except Exception:
+        for symbol, (name, keywords) in _EMOJI_FALLBACK.items():
+            score = _emoji_score(query_terms, name, [], keywords)
+            if score > 0:
+                candidates.append(
+                    EmojiSearchHit(
+                        emoji=symbol,
+                        name=name,
+                        keywords=keywords,
+                        score=score,
+                    )
+                )
+
+    candidates.sort(key=lambda hit: (-hit.score, len(hit.name), hit.name, hit.emoji))
+    return SearchEmojisOutput(query=args.query, hits=candidates[: args.limit], used_full_dataset=used_full_dataset)
 
 
 async def recent_activity(ctx: TurnContext, args: RecentActivityInput) -> RecentActivityOutput:

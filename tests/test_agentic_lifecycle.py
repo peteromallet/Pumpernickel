@@ -554,7 +554,8 @@ async def test_run_agentic_can_react_instead_of_replying(fake_pool, app_env, mon
 
     async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
         if ctx.phase == "read":
-            assert "[react: 👋]" in seed_messages[-1]["content"]
+            assert "search_emojis" in seed_messages[-1]["content"]
+            assert "[react: emoji]" in seed_messages[-1]["content"]
             assert "do not claim Discord reactions are unavailable" in seed_messages[-1]["content"]
             return "[react: 👋]", [{"role": "assistant", "content": "[react: 👋]"}], 0
         assert "[reaction 👋]" in seed_messages[-1]["content"]

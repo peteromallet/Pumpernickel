@@ -1,6 +1,5 @@
 import json
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -148,11 +147,10 @@ async def test_voice_double_failure_expires_with_audio_retained(fake_pool, monke
     assert sent[0][2].name == "media_failure"
 
 
-async def test_voice_cap_hit_skips_transcription_and_keeps_raw(fake_pool, monkeypatch) -> None:
+async def test_voice_spend_over_threshold_still_transcribes(fake_pool, monkeypatch) -> None:
     user, message_id = _user_and_message(fake_pool)
-    fake_pool.llm_spend_log["transcription"] = Decimal("3")
+    fake_pool.llm_spend_log["transcription"] = 3
     recorder = Recorder()
-    sent = []
 
     async def fetch_media(media_id):
         return b"audio", "audio/ogg"
@@ -160,32 +158,25 @@ async def test_voice_cap_hit_skips_transcription_and_keeps_raw(fake_pool, monkey
     async def upload_media(bucket, object_path, content, content_type):
         return f"{bucket}/{object_path}"
 
-    async def should_not_run(audio_bytes, content_type):
-        raise AssertionError("transcription should be skipped")
-
-    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False):
-        sent.append((recipient, content, template_fallback))
-        return uuid4()
+    async def transcribe(audio_bytes, content_type):
+        return "still transcribed"
 
     monkeypatch.setattr("app.services.whatsapp.fetch_media", fetch_media)
     monkeypatch.setattr("app.services.storage.upload_media", upload_media)
-    monkeypatch.setattr("app.services.transcription._groq_transcribe", should_not_run)
-    monkeypatch.setattr("app.services.transcription.send_outbound", fake_send)
+    monkeypatch.setattr("app.services.transcription._groq_transcribe", transcribe)
 
     await handle_voice(fake_pool, message_id, "media-audio", user, recorder)
     message = fake_pool.messages[message_id]
 
-    assert message["content"] == "I can't transcribe right now -- can you send it as text?"
-    assert message["media_analysis"] == {"unavailable": "daily_cap"}
-    assert message["processing_state"] == "expired"
-    assert recorder.calls == []
-    assert sent[0][2].name == "media_failure"
+    assert message["content"] == "still transcribed"
+    assert message["processing_state"] == "raw"
+    assert recorder.calls == [(user.id, message_id, user, "media")]
 
 
-async def test_image_cap_hit_retains_media_and_skips_vision(fake_pool, monkeypatch) -> None:
+async def test_image_spend_over_threshold_still_runs_vision(fake_pool, monkeypatch) -> None:
     user, message_id = _user_and_message(fake_pool)
-    fake_pool.llm_spend_log["vision"] = Decimal("3")
-    sent = []
+    fake_pool.llm_spend_log["vision"] = 3
+    recorder = Recorder()
 
     async def fetch_media(media_id):
         return b"image", "image/jpeg"
@@ -193,25 +184,20 @@ async def test_image_cap_hit_retains_media_and_skips_vision(fake_pool, monkeypat
     async def upload_media(bucket, object_path, content, content_type):
         return f"{bucket}/{object_path}"
 
-    async def should_not_run(image_bytes, content_type):
-        raise AssertionError("vision should be skipped")
-
-    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False):
-        sent.append((recipient, content, template_fallback))
-        return uuid4()
+    async def analyze(image_bytes, content_type):
+        return "still analyzed"
 
     monkeypatch.setattr("app.services.whatsapp.fetch_media", fetch_media)
     monkeypatch.setattr("app.services.storage.upload_media", upload_media)
-    monkeypatch.setattr("app.services.vision._openai_analyze", should_not_run)
-    monkeypatch.setattr("app.services.vision.send_outbound", fake_send)
+    monkeypatch.setattr("app.services.vision._openai_analyze", analyze)
 
-    await handle_image(fake_pool, message_id, "media-image", user)
+    await handle_image(fake_pool, message_id, "media-image", user, recorder)
     message = fake_pool.messages[message_id]
 
     assert message["media_url"].endswith(f"image/{message_id}")
-    assert message["media_analysis"] == {"unavailable": "daily_cap"}
-    assert message["processing_state"] == "expired"
-    assert sent[0][2].name == "media_failure"
+    assert message["media_analysis"] == {"description": "still analyzed"}
+    assert message["processing_state"] == "raw"
+    assert recorder.calls == [(user.id, message_id, user, "media")]
 
 
 async def test_image_vision_failure_retains_media_and_keeps_raw(fake_pool, monkeypatch) -> None:

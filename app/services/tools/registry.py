@@ -19,6 +19,7 @@ ToolFn = Callable[[TurnContext, BaseModel], Awaitable[BaseModel]]
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
     "search_messages": "Search prior message text or dates when exact conversation history matters; avoid for broad summaries.",
+    "search_emojis": "Search the Unicode emoji dataset by meaning/name before choosing a precise or unusual reaction.",
     "recent_activity": "Summarize recent thread activity by sender; avoid when a precise quote or row is needed.",
     "list_themes": "List known active or archived themes; avoid when one theme's full detail is needed.",
     "get_theme": "Fetch one theme's full detail; avoid when you do not already have a theme id.",
@@ -48,12 +49,16 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "schedule_checkin": "Schedule one follow-up check-in for this user; avoid stacking multiple pending check-ins.",
     "cancel_scheduled_checkin": "Cancel a pending check-in for this user; avoid when the check-in should be rescheduled.",
     "escalate_to_partner": "Send partner escalation only for crisis or explicit request; avoid for ordinary relays.",
+    "edit_outbound_message": "Edit one already-sent bot outbound message when correcting wording is better than sending a follow-up; only works for delivered bot messages.",
+    "delete_outbound_message": "Delete one already-sent bot outbound message when leaving it visible would be harmful or clearly wrong; only works for delivered bot messages.",
+    "react_to_message": "Add one precise Unicode emoji reaction to a visible Discord message; prefer emotionally exact, non-obvious emoji over generic defaults.",
     "log_feedback": "Record user feedback about a message, turn, or general behavior; avoid for inferred preferences.",
 }
 
 
 TOOL_DISPATCH: dict[str, ToolFn] = {
     "search_messages": read_tools.search_messages,
+    "search_emojis": read_tools.search_emojis,
     "recent_activity": read_tools.recent_activity,
     "list_themes": read_tools.list_themes,
     "get_theme": read_tools.get_theme,
@@ -83,11 +88,15 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "schedule_checkin": write_tools.schedule_checkin,
     "cancel_scheduled_checkin": write_tools.cancel_scheduled_checkin,
     "escalate_to_partner": write_tools.escalate_to_partner,
+    "edit_outbound_message": write_tools.edit_outbound_message,
+    "delete_outbound_message": write_tools.delete_outbound_message,
+    "react_to_message": write_tools.react_to_message,
     "log_feedback": write_tools.log_feedback,
 }
 
 READ_PHASE_TOOLS = {
     "search_messages",
+    "search_emojis",
     "recent_activity",
     "list_themes",
     "get_theme",
@@ -120,6 +129,9 @@ WRITE_PHASE_TOOLS = {
     "schedule_checkin",
     "cancel_scheduled_checkin",
     "escalate_to_partner",
+    "edit_outbound_message",
+    "delete_outbound_message",
+    "react_to_message",
     "log_feedback",
 }
 

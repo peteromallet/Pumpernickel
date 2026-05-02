@@ -34,8 +34,9 @@ helpers are:
 - `transcription`
 
 Rows are updated by `record_llm_cost()` using an UPSERT that increments
-`total_usd`. `is_under_cap()` reads today's row and compares it to the matching
-settings cap.
+`total_usd`. Hard spend caps are currently disabled: `is_under_cap()` validates
+the provider name and returns true. The configured daily values are warning
+thresholds for cost visibility.
 
 ## Rotation Expectation
 

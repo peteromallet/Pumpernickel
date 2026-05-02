@@ -19,6 +19,7 @@ dependencies = [
     "python-multipart",
     "websockets",
     "PyYAML",
+    "emoji>=2.14",
 ]
 
 [project.optional-dependencies]

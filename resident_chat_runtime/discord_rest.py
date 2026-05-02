@@ -80,6 +80,9 @@ class DiscordRestClient:
     async def edit_message(self, channel_id: int | str, message_id: int | str, **payload: Any) -> Any:
         return await self.request("PATCH", f"/channels/{channel_id}/messages/{message_id}", json=payload)
 
+    async def delete_message(self, channel_id: int | str, message_id: int | str) -> Any:
+        return await self.request("DELETE", f"/channels/{channel_id}/messages/{message_id}")
+
     async def fetch_channel_messages(
         self,
         channel_id: int | str,

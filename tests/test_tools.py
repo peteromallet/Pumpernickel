@@ -28,6 +28,7 @@ from tool_schemas import (
     OOBSeverity,
     RecentActivityInput,
     ScheduleCheckinInput,
+    SearchEmojisInput,
     SupersedeMemoryInput,
     ThemeHealth,
     ThemeSentiment,
@@ -307,6 +308,20 @@ async def test_check_oob_read_tool_passes_protected_owner_ids(tool_ctx, monkeypa
 
     assert result["verdict"] == "ok"
     assert calls == [(tool_ctx.pool, "draft", tool_ctx.partner.id, protected_owner_ids, "relay")]
+
+
+async def test_search_emojis_returns_precise_candidates(tool_ctx):
+    result = await read_tools.search_emojis(tool_ctx, SearchEmojisInput(query="candle", limit=5))
+
+    assert any(hit.emoji.startswith("🕯") or hit.name == "candle" for hit in result.hits)
+    assert result.query == "candle"
+
+
+async def test_search_emojis_handles_meaning_queries(tool_ctx):
+    result = await read_tools.search_emojis(tool_ctx, SearchEmojisInput(query="quiet support", limit=8))
+
+    assert result.hits
+    assert any(hit.emoji in {"🫶", "🕯️", "🛟", "🤲"} for hit in result.hits)
 
 
 async def test_escalate_to_partner_passes_dyad_protected_owner_ids(tool_ctx, monkeypatch):

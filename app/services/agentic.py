@@ -670,7 +670,7 @@ async def _run_agentic(
                     "`sent_so_far`. Do not stream every thought or send process updates. If "
                     "`send_message_part` returns `interrupted`, stop sending in this turn. "
                     "If a text reply would be unnecessary and a small acknowledgement is enough, "
-                    "you may produce exactly `[react: 👍]`, `[react: ❤️]`, or `[react: 👋]` instead. "
+                    "you may use `search_emojis` and then produce exactly one `[react: emoji]` directive instead. "
                     "If a reaction would naturally complement a short reply, put one `[react: emoji]` "
                     "directive on its own line before or after the reply; the directive will not be shown to the user. "
                     "If the user asks you to emoji react, use a `[react: emoji]` directive; do not claim "
