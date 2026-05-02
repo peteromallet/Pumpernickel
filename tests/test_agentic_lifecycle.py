@@ -358,6 +358,77 @@ async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives(fake_poo
     assert "Final outbound skipped because a newer inbound message arrived before send." in turn["reasoning"]
 
 
+async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives_before_turn_opens(
+    fake_pool, app_env, monkeypatch
+):
+    user = User(uuid4(), "Maya", "15555550100", "UTC")
+    partner = User(uuid4(), "Ben", "15555550101", "UTC")
+    fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
+    fake_pool.users[partner.id] = {"id": partner.id, "name": partner.name, "phone": partner.phone, "timezone": partner.timezone}
+    message_id = uuid4()
+    first_sent_at = datetime.now(UTC) - timedelta(seconds=5)
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "wait nvm",
+        "processing_state": "raw",
+        "sent_at": first_sent_at,
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "wa-1",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    sent = []
+
+    async def fake_run_phase(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages):
+        if ctx.phase == "read":
+            newer_id = uuid4()
+            newer_sent_at = first_sent_at + timedelta(seconds=1)
+            assert newer_sent_at < ctx.turn_started_at
+            fake_pool.messages[newer_id] = {
+                "id": newer_id,
+                "direction": "inbound",
+                "sender_id": user.id,
+                "recipient_id": None,
+                "content": "wait one more",
+                "processing_state": "raw",
+                "sent_at": newer_sent_at,
+                "charge": "routine",
+                "deleted_at": None,
+                "whatsapp_message_id": "wa-2",
+                "media_type": None,
+                "media_url": None,
+                "media_duration_seconds": None,
+                "media_analysis": None,
+                "edit_history": None,
+                "edited_at": None,
+            }
+            return "Still here. What was it?", [], 0
+        return "", [], 0
+
+    async def fake_send(*args, **kwargs):
+        sent.append(args)
+        return uuid4()
+
+    monkeypatch.setattr(agentic, "run_phase", fake_run_phase)
+    monkeypatch.setattr(agentic, "send_outbound", fake_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user)
+
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert sent == []
+    assert turn["final_output_message_id"] is None
+    assert "Final outbound skipped because a newer inbound message arrived before send." in turn["reasoning"]
+
+
 async def test_run_agentic_send_message_part_is_visible_to_phase_b(fake_pool, app_env, monkeypatch):
     monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
     monkeypatch.setenv("DISCORD_MULTI_MESSAGE_DELAY_S", "0")

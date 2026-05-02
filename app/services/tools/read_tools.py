@@ -65,7 +65,15 @@ class NewerInboundDuringPacedSend(Exception):
 
 
 async def _newer_inbound_exists(ctx: TurnContext) -> bool:
-    if ctx.turn_started_at is None:
+    boundary = ctx.turn_started_at
+    if ctx.triggering_message_ids:
+        trigger_boundary = await ctx.pool.fetchval(
+            "SELECT MAX(sent_at) FROM messages WHERE id = ANY($1::uuid[])",
+            ctx.triggering_message_ids,
+        )
+        if trigger_boundary is not None:
+            boundary = trigger_boundary
+    if boundary is None:
         return False
     return bool(
         await ctx.pool.fetchval(
@@ -80,7 +88,7 @@ async def _newer_inbound_exists(ctx: TurnContext) -> bool:
             )
             """,
             ctx.user.id,
-            ctx.turn_started_at,
+            boundary,
             ctx.triggering_message_ids,
         )
     )

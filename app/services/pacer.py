@@ -116,6 +116,7 @@ class DiscordPacer:
         llm_client: Any | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now: Callable[[], datetime] | None = None,
+        random_float: Callable[[], float] = random.random,
     ) -> None:
         self.pool = pool
         self.settings = settings or get_settings()
@@ -123,6 +124,7 @@ class DiscordPacer:
         self._llm_client = llm_client
         self._sleep = sleep
         self._now = now or (lambda: datetime.now(UTC))
+        self._random_float = random_float
         self._typing: dict[UUID, TypingState] = {}
         self._last_bot_typing_at: dict[UUID, datetime] = {}
         self._last_reaction_at: dict[UUID, datetime] = {}
@@ -291,13 +293,23 @@ class DiscordPacer:
             llm_judgement=decision.llm_judgement,
         )
 
-    def answer_typing_delay_s(self, answer_text: str, preferences: Mapping[str, Any]) -> float:
+    def composition_duration_s(self, answer_text: str, preferences: Mapping[str, Any]) -> float:
         chars_per_s = max(1.0, float(preferences["answer_chars_per_s"]))
         estimated = len(answer_text) / chars_per_s
-        return min(
-            max(estimated, float(preferences["answer_typing_min_s"])),
+        max_s = min(
             float(preferences["answer_typing_max_s"]),
+            float(preferences.get("max_typing_wait_s", self.settings.discord_pacing_max_typing_wait_s)),
         )
+        min_s = min(float(preferences["answer_typing_min_s"]), max_s)
+        base_s = min(max(estimated, min_s), max_s)
+        jitter_ratio = self.settings.discord_pacing_composition_jitter_ratio
+        if jitter_ratio <= 0:
+            return base_s
+        offset_s = base_s * jitter_ratio * ((self._random_float() * 2.0) - 1.0)
+        return min(max(base_s + offset_s, min_s), max_s)
+
+    def answer_typing_delay_s(self, answer_text: str, preferences: Mapping[str, Any]) -> float:
+        return self.composition_duration_s(answer_text, preferences)
 
     def _typing_gap_remaining_s(self, user_id: UUID, *, min_gap_s: float | None = None) -> float:
         last = self._last_bot_typing_at.get(user_id)
@@ -359,15 +371,6 @@ class DiscordPacer:
         if self.typing_state(user.id, preferences) is not None:
             return waited_s
 
-        if send_kind == "incremental_next":
-            return waited_s + await self._perform_incremental_next_typing(
-                user,
-                channel_id,
-                answer_text,
-                preferences,
-                part_index=part_index,
-            )
-
         return waited_s + await self._perform_answer_typing_after_user_wait(
             user,
             channel_id,
@@ -415,12 +418,52 @@ class DiscordPacer:
         part_index: int | None,
     ) -> float:
         waited_s = 0.0
-        delay_s = self.answer_typing_delay_s(answer_text, preferences)
-        remaining_s = delay_s
+        min_gap_s = None
+        if send_kind == "incremental_next":
+            rhythm_s = float(self.settings.discord_multi_message_delay_s)
+            if rhythm_s > 0:
+                await self._sleep(rhythm_s)
+                waited_s += rhythm_s
+
+            waited_s += await self._wait_while_user_typing(user, channel_id, preferences)
+            if self.typing_state(user.id, preferences) is not None:
+                return waited_s
+
+            min_gap_s = float(self.settings.discord_pacing_incremental_typing_pulse_min_gap_s)
+
+        return waited_s + await self._run_composition_typing_pulses(
+            user,
+            channel_id,
+            answer_text,
+            preferences,
+            send_kind=send_kind,
+            part_index=part_index,
+            min_gap_s=min_gap_s,
+        )
+
+    async def _run_composition_typing_pulses(
+        self,
+        user: User,
+        channel_id: str,
+        answer_text: str,
+        preferences: Mapping[str, Any],
+        *,
+        send_kind: PacedSendKind,
+        part_index: int | None,
+        min_gap_s: float | None = None,
+    ) -> float:
+        waited_s = 0.0
+        composition_s = self.composition_duration_s(answer_text, preferences)
+        remaining_s = composition_s
         visible_s = float(self.settings.discord_pacing_typing_visible_s)
         off_gap_s = float(self.settings.discord_pacing_typing_off_gap_s)
+        start_reason = (
+            "started paced answer typing indicator"
+            if send_kind == "final"
+            else "started paced incremental typing indicator"
+        )
         while remaining_s > 0:
-            gap_remaining_s = self._typing_gap_remaining_s(user.id)
+            gap_remaining_s = self._typing_gap_remaining_s(user.id, min_gap_s=min_gap_s)
             if gap_remaining_s > 0:
                 wait_s = min(gap_remaining_s, remaining_s)
                 await self._sleep(wait_s)
@@ -433,10 +476,11 @@ class DiscordPacer:
             sent = await self._send_bot_typing_pulse(
                 user,
                 channel_id,
-                reason="started paced answer typing indicator",
+                reason=start_reason,
                 pulse_s=pulse_s,
                 preferences=preferences,
-                signal_snapshot={"send_kind": send_kind, "part_index": part_index},
+                min_gap_s=min_gap_s,
+                signal_snapshot={"composition_s": composition_s, "send_kind": send_kind, "part_index": part_index},
             )
             await self._sleep(pulse_s)
             waited_s += pulse_s
@@ -450,55 +494,19 @@ class DiscordPacer:
                     source="live",
                     decision="typing_stop",
                     reason="briefly paused paced typing before next pulse",
-                    signal_snapshot={"channel_id": channel_id, "pause_s": pause_s},
+                    signal_snapshot={
+                        "channel_id": channel_id,
+                        "composition_s": composition_s,
+                        "send_kind": send_kind,
+                        "part_index": part_index,
+                        "pause_s": pause_s,
+                    },
                     preference_snapshot=preferences,
                     wait_ms=int(round(pause_s * 1000)),
                 )
                 await self._sleep(pause_s)
                 waited_s += pause_s
                 remaining_s -= pause_s
-        return waited_s
-
-    async def _perform_incremental_next_typing(
-        self,
-        user: User,
-        channel_id: str,
-        answer_text: str,
-        preferences: Mapping[str, Any],
-        *,
-        part_index: int | None,
-    ) -> float:
-        waited_s = 0.0
-        rhythm_s = float(self.settings.discord_multi_message_delay_s)
-        if rhythm_s > 0:
-            await self._sleep(rhythm_s)
-            waited_s += rhythm_s
-
-        waited_s += await self._wait_while_user_typing(user, channel_id, preferences)
-        if self.typing_state(user.id, preferences) is not None:
-            return waited_s
-
-        min_gap_s = float(self.settings.discord_pacing_incremental_typing_pulse_min_gap_s)
-        if self._typing_gap_remaining_s(user.id, min_gap_s=min_gap_s) > 0:
-            return waited_s
-
-        pulse_s = min(
-            max(float(preferences["answer_typing_min_s"]), 0.25),
-            float(self.settings.discord_pacing_typing_visible_s),
-            1.6,
-        )
-        sent = await self._send_bot_typing_pulse(
-            user,
-            channel_id,
-            reason="started paced incremental typing indicator",
-            pulse_s=pulse_s,
-            preferences=preferences,
-            min_gap_s=min_gap_s,
-            signal_snapshot={"send_kind": "incremental_next", "part_index": part_index},
-        )
-        if sent:
-            await self._sleep(pulse_s)
-            waited_s += pulse_s
         return waited_s
 
     async def perform_thinking_typing_until_stopped(
@@ -548,7 +556,7 @@ class DiscordPacer:
         min_s = self.settings.discord_pacing_initial_typing_min_s
         max_s = max(min_s, self.settings.discord_pacing_initial_typing_max_s)
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=random.uniform(min_s, max_s))
+            await asyncio.wait_for(stop_event.wait(), timeout=min_s + (self._random_float() * (max_s - min_s)))
             return
         except TimeoutError:
             pass

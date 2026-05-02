@@ -5,9 +5,13 @@ import pytest
 
 from app.models.user import User
 from app.services import hooks, system_state
+from app.services.pacer import DiscordPacer
 from app.services.messaging import send_outbound, send_outbound_part
 from app.services.templates import TemplateCall, render_template
+from app.services.tools.read_tools import send_message_part
+from app.services.turn_context import TurnContext
 from app.services import whatsapp
+from tool_schemas import SendMessagePartInput
 
 
 pytestmark = pytest.mark.anyio
@@ -472,4 +476,171 @@ async def test_send_outbound_part_uses_runtime_part_key_for_idempotency(fake_poo
     assert sent == ["first part"]
     assert second["sent_so_far"] == ["first part"]
     assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
+    get_settings.cache_clear()
+
+
+async def test_send_message_part_paced_followup_uses_composition_and_rhythm(
+    fake_pool,
+    app_env,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    monkeypatch.setenv("DISCORD_MULTI_MESSAGE_DELAY_S", "1.1")
+    monkeypatch.setenv("DISCORD_PACING_COMPOSITION_JITTER_RATIO", "0")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _user(fake_pool)
+    partner = _user(fake_pool)
+    fake_pool.users[user.id]["pacing_preferences"] = {
+        "answer_typing_min_s": 0.4,
+        "answer_typing_max_s": 10,
+        "answer_chars_per_s": 10,
+        "max_typing_wait_s": 10,
+    }
+    turn_id = uuid4()
+    fake_pool.bot_turns[turn_id] = {
+        "id": turn_id,
+        "reasoning": "",
+        "completed_at": None,
+        "failure_reason": None,
+        "triggering_message_ids": [],
+        "final_output_message_id": None,
+    }
+    sent = []
+    typing_sent_at = []
+    sleeps = []
+    paced_calls = []
+
+    def current_time() -> datetime:
+        return now
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += timedelta(seconds=seconds)
+
+    async def send_typing(channel_id: str) -> None:
+        typing_sent_at.append((channel_id, now))
+
+    async def send_text(to, body, *, send_typing_indicator=True):
+        sent.append((to, body, send_typing_indicator, list(sleeps)))
+        return {"messages": [{"id": f"discord-{len(sent)}"}]}
+
+    pacer = DiscordPacer(fake_pool, send_typing=send_typing, sleep=sleep, now=current_time)
+
+    async def before_paced_send(answer_text: str, *, send_kind: str, part_index: int | None) -> None:
+        paced_calls.append((answer_text, send_kind, part_index))
+        await pacer.perform_send_typing(user, "channel-1", answer_text, send_kind=send_kind, part_index=part_index)
+
+    ctx = TurnContext(
+        turn_id=turn_id,
+        pool=fake_pool,
+        user=user,
+        partner=partner,
+        triggering_message_ids=[],
+        turn_started_at=now,
+        incremental_sending_enabled=True,
+        send_typing_indicator=False,
+        before_paced_send=before_paced_send,
+        sent_message_parts=[],
+    )
+    monkeypatch.setattr("app.services.discord.send_text", send_text)
+
+    first = await send_message_part(ctx, SendMessagePartInput(content="Six."))
+    second = await send_message_part(ctx, SendMessagePartInput(content="x" * 30))
+
+    assert first.status == "sent"
+    assert second.status == "sent"
+    assert paced_calls == [("Six.", "incremental_first", 1), ("x" * 30, "incremental_next", 2)]
+    assert sleeps == pytest.approx([0.4, 1.1, 3.0])
+    assert typing_sent_at[1][1] - typing_sent_at[0][1] == timedelta(seconds=1.5)
+    assert sent == [
+        (user.phone, "Six.", False, [0.4]),
+        (user.phone, "x" * 30, False, [0.4, 1.1, 3.0]),
+    ]
+    get_settings.cache_clear()
+
+
+async def test_send_message_part_interrupts_after_paced_wait_before_provider_send(
+    fake_pool,
+    app_env,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    started_at = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    user = _user(fake_pool)
+    partner = _user(fake_pool)
+    trigger_id = uuid4()
+    fake_pool.messages[trigger_id] = {
+        "id": trigger_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "first",
+        "processing_state": "raw",
+        "sent_at": started_at,
+        "charge": "routine",
+        "whatsapp_message_id": "discord-in",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+        "deleted_at": None,
+    }
+    sent = []
+    paced_calls = []
+
+    async def send_text(to, body, *, send_typing_indicator=True):
+        sent.append(body)
+        return {"messages": [{"id": "discord-out"}]}
+
+    async def before_paced_send(answer_text: str, *, send_kind: str, part_index: int | None) -> None:
+        paced_calls.append((answer_text, send_kind, part_index))
+        newer_id = uuid4()
+        fake_pool.messages[newer_id] = {
+            "id": newer_id,
+            "direction": "inbound",
+            "sender_id": user.id,
+            "recipient_id": None,
+            "content": "wait one more thing",
+            "processing_state": "raw",
+            "sent_at": started_at + timedelta(milliseconds=1),
+            "charge": "routine",
+            "whatsapp_message_id": "discord-in-2",
+            "media_type": None,
+            "media_url": None,
+            "media_duration_seconds": None,
+            "media_analysis": None,
+            "edit_history": None,
+            "edited_at": None,
+            "deleted_at": None,
+        }
+
+    ctx = TurnContext(
+        turn_id=uuid4(),
+        pool=fake_pool,
+        user=user,
+        partner=partner,
+        triggering_message_ids=[trigger_id],
+        turn_started_at=started_at,
+        incremental_sending_enabled=True,
+        send_typing_indicator=False,
+        before_paced_send=before_paced_send,
+        sent_message_parts=[],
+    )
+    monkeypatch.setattr("app.services.discord.send_text", send_text)
+
+    result = await send_message_part(ctx, SendMessagePartInput(content="stale part"))
+
+    assert result.status == "interrupted"
+    assert paced_calls == [("stale part", "incremental_first", 1)]
+    assert sent == []
+    assert [row for row in fake_pool.messages.values() if row.get("direction") == "outbound"] == []
     get_settings.cache_clear()

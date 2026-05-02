@@ -21,7 +21,29 @@ def test_typing_defaults_start_quickly(app_env) -> None:
     assert settings.discord_pacing_initial_typing_max_s == 1.2
     assert settings.discord_pacing_thinking_typing_start_s == 0.4
     assert settings.discord_pacing_answer_typing_min_s == 0.4
+    assert settings.discord_pacing_composition_jitter_ratio == 0.0
     assert settings.discord_pacing_incremental_typing_pulse_min_gap_s == 1.0
+
+
+def test_composition_duration_uses_length_clamps_cap_and_deterministic_jitter(fake_pool) -> None:
+    preferences = {
+        "answer_chars_per_s": 10,
+        "answer_typing_min_s": 0.5,
+        "answer_typing_max_s": 10,
+        "max_typing_wait_s": 4,
+    }
+    pacer = DiscordPacer(fake_pool)
+
+    assert pacer.composition_duration_s("x", preferences) == 0.5
+    assert pacer.composition_duration_s("x" * 20, preferences) == 2.0
+    assert pacer.composition_duration_s("x" * 100, preferences) == 4.0
+    assert pacer.composition_duration_s("x" * 20, preferences | {"answer_chars_per_s": 20}) == 1.0
+
+    settings = get_settings().model_copy(update={"discord_pacing_composition_jitter_ratio": 0.25})
+    jittered = DiscordPacer(fake_pool, settings=settings, random_float=lambda: 1.0)
+    assert jittered.composition_duration_s("x" * 20, preferences) == 2.5
+    jittered_low = DiscordPacer(fake_pool, settings=settings, random_float=lambda: 0.0)
+    assert jittered_low.composition_duration_s("x" * 20, preferences) == 1.5
 
 
 def _seed_user(fake_pool, *, preferences: dict | None = None) -> User:
@@ -202,7 +224,10 @@ async def test_answer_typing_suppresses_indicator_while_user_is_typing(fake_pool
 
 async def test_bot_typing_pulses_leave_visible_gaps(fake_pool) -> None:
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
-    user = _seed_user(fake_pool, preferences={"answer_typing_max_s": 25, "answer_chars_per_s": 10})
+    user = _seed_user(
+        fake_pool,
+        preferences={"answer_typing_max_s": 25, "answer_chars_per_s": 10, "max_typing_wait_s": 25},
+    )
     typing_sent_at = []
 
     def current_time() -> datetime:
@@ -221,11 +246,21 @@ async def test_bot_typing_pulses_leave_visible_gaps(fake_pool) -> None:
     assert len(typing_sent_at) == 3
     assert typing_sent_at[1][1] - typing_sent_at[0][1] >= timedelta(seconds=11)
     assert typing_sent_at[2][1] - typing_sent_at[1][1] >= timedelta(seconds=11)
+    typing_starts = [event for event in fake_pool.pacing_events.values() if event["decision"] == "typing_start"]
+    assert typing_starts[0]["signal_snapshot"]["composition_s"] == 25
+    assert typing_starts[0]["signal_snapshot"]["send_kind"] == "final"
+    assert typing_starts[0]["signal_snapshot"]["part_index"] is None
+    typing_stops = [event for event in fake_pool.pacing_events.values() if event["decision"] == "typing_stop"]
+    assert len(typing_stops) == 2
+    assert all(event["signal_snapshot"]["pause_s"] == 3 for event in typing_stops)
 
 
 async def test_incremental_followup_typing_uses_short_gap(fake_pool) -> None:
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
-    user = _seed_user(fake_pool, preferences={"answer_typing_min_s": 0.4})
+    user = _seed_user(
+        fake_pool,
+        preferences={"answer_typing_min_s": 0.4, "answer_chars_per_s": 10, "answer_typing_max_s": 10},
+    )
     typing_sent_at = []
 
     def current_time() -> datetime:
@@ -240,15 +275,23 @@ async def test_incremental_followup_typing_uses_short_gap(fake_pool) -> None:
 
     pacer = DiscordPacer(fake_pool, send_typing=send_typing, sleep=sleep, now=current_time)
     await pacer.perform_send_typing(user, "channel-1", "Six.", send_kind="incremental_first", part_index=1)
-    await pacer.perform_send_typing(user, "channel-1", "Seven.", send_kind="incremental_next", part_index=2)
+    waited_s = await pacer.perform_send_typing(
+        user,
+        "channel-1",
+        "x" * 30,
+        send_kind="incremental_next",
+        part_index=2,
+    )
 
     assert len(typing_sent_at) == 2
     assert typing_sent_at[1][1] - typing_sent_at[0][1] < timedelta(seconds=11)
     assert typing_sent_at[1][1] - typing_sent_at[0][1] >= timedelta(seconds=1)
+    assert waited_s == pytest.approx(4.1)
     events = list(fake_pool.pacing_events.values())
     assert events[-1]["decision"] == "typing_start"
     assert events[-1]["reason"] == "started paced incremental typing indicator"
     assert events[-1]["signal_snapshot"]["send_kind"] == "incremental_next"
+    assert events[-1]["signal_snapshot"]["composition_s"] == 3.0
 
 
 async def test_incremental_followup_rechecks_user_typing_after_rhythm(fake_pool) -> None:

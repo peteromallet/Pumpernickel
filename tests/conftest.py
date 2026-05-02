@@ -727,6 +727,10 @@ class FakePool:
         compact = " ".join(sql.split())
         if compact == "SELECT 1":
             return 1
+        if compact.startswith("SELECT MAX(sent_at) FROM messages WHERE id = ANY"):
+            wanted = set(args[0] or [])
+            sent = [m["sent_at"] for m in self.messages.values() if m["id"] in wanted]
+            return max(sent) if sent else None
         if compact.startswith("SELECT MAX(sent_at) FROM messages"):
             user_id = args[0]
             sent = [

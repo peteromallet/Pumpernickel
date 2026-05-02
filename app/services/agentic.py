@@ -554,10 +554,19 @@ async def _defer_for_text_cap(pool: Any, user: User, message_ids: list[UUID]) ->
 async def _newer_inbound_exists(
     pool: Any,
     user: User,
-    turn_started_at: datetime | None,
     triggering_message_ids: list[UUID],
+    *,
+    fallback_started_at: datetime | None = None,
 ) -> bool:
-    if turn_started_at is None:
+    boundary = fallback_started_at
+    if triggering_message_ids:
+        trigger_boundary = await pool.fetchval(
+            "SELECT MAX(sent_at) FROM messages WHERE id = ANY($1::uuid[])",
+            triggering_message_ids,
+        )
+        if trigger_boundary is not None:
+            boundary = trigger_boundary
+    if boundary is None:
         return False
     return bool(
         await pool.fetchval(
@@ -572,7 +581,7 @@ async def _newer_inbound_exists(
             )
             """,
             user.id,
-            turn_started_at,
+            boundary,
             triggering_message_ids,
         )
     )
@@ -699,7 +708,12 @@ async def _run_agentic(
                 sendable_text = await _resolve_outbound_text(active_pool, turn_id, user, assistant_text, dyad_owner_ids)
                 already_sent = [part["content"] for part in sent_parts]
                 if sendable_text and sendable_text not in already_sent:
-                    if await _newer_inbound_exists(active_pool, user, started_at, triggering_message_ids):
+                    if await _newer_inbound_exists(
+                        active_pool,
+                        user,
+                        triggering_message_ids,
+                        fallback_started_at=started_at,
+                    ):
                         await _append_reasoning(
                             active_pool,
                             turn_id,
@@ -711,7 +725,12 @@ async def _run_agentic(
                         async def before_final_provider_send(text: str = sendable_text) -> None:
                             if before_paced_send is not None and not send_typing_indicator:
                                 await before_paced_send(text, send_kind="final", part_index=None)
-                            if await _newer_inbound_exists(active_pool, user, started_at, triggering_message_ids):
+                            if await _newer_inbound_exists(
+                                active_pool,
+                                user,
+                                triggering_message_ids,
+                                fallback_started_at=started_at,
+                            ):
                                 raise NewerInboundBeforeFinalSend()
 
                         try:
@@ -789,24 +808,50 @@ async def _run_agentic(
             scheduled = await _defer_for_text_cap(active_pool, user, triggering_message_ids)
             final_output_message_id = None
             if scheduled:
-                final_output_message_id = await send_outbound(
+                fallback_text = "I'm running into limits today, will catch up tomorrow."
+
+                async def before_fallback_provider_send(text: str = fallback_text) -> None:
+                    if before_paced_send is not None and not send_typing_indicator:
+                        await before_paced_send(text, send_kind="final", part_index=None)
+                    if await _newer_inbound_exists(
+                        active_pool,
+                        user,
+                        triggering_message_ids,
+                        fallback_started_at=started_at,
+                    ):
+                        raise NewerInboundBeforeFinalSend()
+
+                if await _newer_inbound_exists(
                     active_pool,
                     user,
-                    "I'm running into limits today, will catch up tomorrow.",
-                    bot_turn_id=turn_id,
-                    send_typing_indicator=send_typing_indicator,
-                    before_provider_send=(
-                        (
-                            lambda: before_paced_send(
-                                "I'm running into limits today, will catch up tomorrow.",
-                                send_kind="final",
-                                part_index=None,
-                            )
+                    triggering_message_ids,
+                    fallback_started_at=started_at,
+                ):
+                    await _append_reasoning(
+                        active_pool,
+                        turn_id,
+                        "Spend cap fallback skipped because a newer inbound message arrived before send.",
+                    )
+                else:
+                    try:
+                        final_output_message_id = await send_outbound(
+                            active_pool,
+                            user,
+                            fallback_text,
+                            bot_turn_id=turn_id,
+                            send_typing_indicator=send_typing_indicator,
+                            before_provider_send=(
+                                before_fallback_provider_send
+                                if before_paced_send is not None and not send_typing_indicator
+                                else None
+                            ),
                         )
-                        if before_paced_send is not None and not send_typing_indicator
-                        else None
-                    ),
-                )
+                    except NewerInboundBeforeFinalSend:
+                        await _append_reasoning(
+                            active_pool,
+                            turn_id,
+                            "Spend cap fallback skipped because a newer inbound message arrived during paced send.",
+                        )
             await _complete_turn(
                 active_pool,
                 turn_id,
