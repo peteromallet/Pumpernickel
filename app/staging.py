@@ -44,7 +44,14 @@ async def _replay(pool: Any, prompt_version: str, since: str, user_id: str) -> N
     settings = get_settings()
     for row in rows:
         hot_context = await build_hot_context(pool, user, partner, [row["id"]], {"kind": "staging_replay"})
-        system_prompt = render_system_prompt(settings.assistant_name, user.name, partner.name)
+        system_prompt = render_system_prompt(
+            settings.assistant_name,
+            user.name,
+            partner.name,
+            onboarding_state=user.onboarding_state,
+            current_user_sharing_default=user.cross_thread_sharing_default,
+            partner_sharing_default=partner.cross_thread_sharing_default,
+        )
         rendered = render_hot_context(hot_context)
         candidate = (
             f"[dry-run:{prompt_version}] Would answer {user.name} after message {row['id']}: "

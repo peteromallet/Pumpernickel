@@ -156,7 +156,16 @@ async def classify_charge(
                 messages=[{"role": "user", "content": json.dumps({"message": content})}],
             )
         await record_anthropic_haiku_text_response_cost(pool, _attr(response, "usage", {}))
-        label, reason = _parse_charge(_response_text(response))
+        text = _response_text(response)
+        try:
+            label, reason = _parse_charge(text)
+        except (json.JSONDecodeError, ValueError, KeyError) as exc:
+            logger.warning(
+                "charge classifier returned unparseable response (%s): %r",
+                exc,
+                text[:200],
+            )
+            return _fallback(f"unparseable response: {exc}", content)
     except Exception as exc:
         logger.warning("charge classification failed: %s", exc)
         return _fallback(str(exc), content)

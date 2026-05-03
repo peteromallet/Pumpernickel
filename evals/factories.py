@@ -310,7 +310,7 @@ async def _seed_scheduled_jobs(pool: Any, specs: Any, refs: dict[str, UUID], def
                 row["user_id"],
                 row["job_type"],
                 row["scheduled_for"],
-                json.dumps(row["context"]),
+                row["context"],
                 row["status"],
                 row["attempt_count"],
                 row["max_attempts"],

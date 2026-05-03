@@ -1,5 +1,3 @@
-import json
-
 from app.models.user import (
     fetch_user_by_id,
     fetch_user_pacing_preferences,
@@ -47,18 +45,6 @@ async def test_pacing_preferences_are_bounded_and_stored(fake_pool) -> None:
 
     fetched_user = await fetch_user_by_id(fake_pool, user.id)
     assert fetched_user.pacing_preferences == preferences
-
-
-async def test_pacing_preferences_accept_json_string_from_driver(fake_pool) -> None:
-    user = await upsert_user(fake_pool, "Maya", "15555550100", "UTC")
-    fake_pool.users[user.id]["pacing_preferences"] = json.dumps({"max_wait_s": 4, "enabled": True})
-
-    fetched = await fetch_user_pacing_preferences(fake_pool, user.id)
-    fetched_user = await fetch_user_by_id(fake_pool, user.id)
-
-    assert fetched["max_wait_s"] == 4.0
-    assert fetched["enabled"] is True
-    assert fetched_user.pacing_preferences == {"max_wait_s": 4, "enabled": True}
 
 
 async def test_record_pacing_event_uses_fake_pool_durable_store(fake_pool) -> None:

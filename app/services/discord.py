@@ -345,9 +345,10 @@ class DiscordGatewayBot:
                     break
 
     async def _heartbeat(self, ws: Any, interval: float) -> None:
-        while not self._closed.is_set():
-            await asyncio.sleep(interval)
-            await ws.send(json.dumps({"op": 1, "d": None}))
+        with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+            while not self._closed.is_set():
+                await asyncio.sleep(interval)
+                await ws.send(json.dumps({"op": 1, "d": None}))
 
     async def _handle_gateway_event(self, payload: dict[str, Any]) -> None:
         if payload.get("t") != "TYPING_START" or self.coalescer is None:

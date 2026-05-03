@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -23,16 +22,6 @@ logger = logging.getLogger(__name__)
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def _as_context(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
-        return json.loads(value)
-    return dict(value)
 
 
 def _zoneinfo(name: str) -> ZoneInfo:
@@ -106,7 +95,7 @@ class ScheduledJobHandlers:
 
     async def handle_checkin(self, job: dict[str, Any]) -> None:
         user = await fetch_user_by_id(self.pool, job["user_id"])
-        context = _as_context(job.get("context"))
+        context = job.get("context") or {}
         metadata = {"kind": "checkin", "context": {**context, "delayed": bool(job.get("delayed"))}}
         if await _can_send_freeform(self.pool, user, self.settings):
             await run_agentic_job(user, metadata)
@@ -120,7 +109,7 @@ class ScheduledJobHandlers:
 
     async def handle_watch_item_due(self, job: dict[str, Any]) -> None:
         user = await fetch_user_by_id(self.pool, job["user_id"])
-        context = _as_context(job.get("context"))
+        context = job.get("context") or {}
         watch_item = await self._fetch_watch_item(context.get("watch_item_id"))
         metadata = {
             "kind": "watch_item_due",
@@ -142,7 +131,7 @@ class ScheduledJobHandlers:
 
     async def handle_oob_review(self, job: dict[str, Any]) -> None:
         user = await fetch_user_by_id(self.pool, job["user_id"])
-        context = _as_context(job.get("context"))
+        context = job.get("context") or {}
         await run_agentic_job(
             user,
             {
@@ -157,7 +146,7 @@ class ScheduledJobHandlers:
 
     async def handle_deferred_turn(self, job: dict[str, Any]) -> None:
         user = await fetch_user_by_id(self.pool, job["user_id"])
-        context = _as_context(job.get("context"))
+        context = job.get("context") or {}
         message_ids = [UUID(value) for value in context.get("triggering_message_ids", [])]
         if message_ids:
             await self.pool.execute(
@@ -267,7 +256,7 @@ async def schedule_next_weekly_summary(
         """,
         user_row["id"],
         scheduled_for,
-        json.dumps({"source_job_id": str(source_job_id) if source_job_id is not None else None}),
+        {"source_job_id": str(source_job_id) if source_job_id is not None else None},
         source_job_id,
     )
 

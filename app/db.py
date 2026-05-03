@@ -1,5 +1,6 @@
 """Async Postgres pool helpers."""
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -7,6 +8,22 @@ from typing import Any
 from fastapi import Request
 
 from app.config import get_settings
+
+
+def _jsonb_encoder(value: Any) -> str:
+    return json.dumps(value, default=str)
+
+
+async def _init_connection(connection: Any) -> None:
+    """Register Python dict <-> Postgres jsonb/json codec on each pooled connection."""
+    for type_name in ("jsonb", "json"):
+        await connection.set_type_codec(
+            type_name,
+            schema="pg_catalog",
+            encoder=_jsonb_encoder,
+            decoder=json.loads,
+            format="text",
+        )
 
 
 class SchemaPool:
@@ -75,7 +92,11 @@ async def db_lifespan(app: Any) -> AsyncIterator[None]:
     import asyncpg
 
     settings = get_settings()
-    raw_pool = await asyncpg.create_pool(settings.database_url, statement_cache_size=0)
+    raw_pool = await asyncpg.create_pool(
+        settings.database_url,
+        statement_cache_size=0,
+        init=_init_connection,
+    )
     pool = SchemaPool(raw_pool, settings.database_schema)
     app.state.pool = pool
     try:

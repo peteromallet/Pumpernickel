@@ -567,7 +567,7 @@ async def _defer_for_text_cap(pool: Any, user: User, message_ids: list[UUID]) ->
         """,
         user.id,
         datetime.now(UTC) + timedelta(days=1),
-        json.dumps({"triggering_message_ids": [str(message_id) for message_id in message_ids], "reason": "text_spend_cap"}),
+        {"triggering_message_ids": [str(message_id) for message_id in message_ids], "reason": "text_spend_cap"},
     )
     return row is not None
 
@@ -638,6 +638,9 @@ async def _run_agentic(
             user.name,
             partner.name,
             prompt_version=selected_prompt_version,
+            onboarding_state=user.onboarding_state,
+            current_user_sharing_default=user.cross_thread_sharing_default,
+            partner_sharing_default=partner.cross_thread_sharing_default,
         )
         prompt_snapshot = f"{system_prompt}\n\n{rendered_hot_context}"
         turn_id, started_at = await _open_turn(

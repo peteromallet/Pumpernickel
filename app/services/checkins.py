@@ -40,7 +40,7 @@ async def _schedule_once(conn: Any, user_id: UUID, scheduled_for: datetime, cont
         """,
         user_id,
         scheduled_for,
-        json.dumps(context),
+        context,
     )
     return old, row
 

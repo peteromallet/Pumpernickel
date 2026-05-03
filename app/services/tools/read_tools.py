@@ -13,6 +13,7 @@ from app.services.turn_context import TurnContext
 from app.config import get_settings
 from app.services.messaging import send_outbound_part
 from app.services.oob_check import check_oob_with_policy, summarize_partner_oob
+from app.services.text_safety import clean_user_facing_text, looks_like_internal_process_text
 from app.services.tools.common import (
     add_date_range,
     memory_row,
@@ -189,6 +190,14 @@ async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> Sen
         )
 
     content = args.content.strip()
+    if looks_like_internal_process_text(content) or clean_user_facing_text(content).strip() == "":
+        return SendMessagePartOutput(
+            status="withheld",
+            client_part_key=args.client_part_key,
+            visible_to_user=False,
+            sent_so_far=[part["content"] for part in sent_parts],
+            reason="content looks like internal process narration (memory IDs, write plans, phase notes); send a user-facing reply instead",
+        )
     part_index = len(sent_parts) + 1
     part_key = f"{ctx.turn_id}:{part_index}"
     paced_send_available = ctx.before_paced_send is not None and not ctx.send_typing_indicator

@@ -13,6 +13,15 @@ from app.config import get_settings
 from app.main import app
 
 
+def _coerce_jsonb(value):
+    """Mirror the asyncpg jsonb codec for FakePool: accept dicts, decode strings, pass None."""
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
 REQUIRED_ENV = {
     "DATABASE_URL": "postgresql://user:pass@localhost:5432/db",
     "DATABASE_SCHEMA": "public",
@@ -158,7 +167,7 @@ class FakePool:
             return {"cross_thread_sharing_default": user.get("cross_thread_sharing_default")}
         if compact.startswith("UPDATE users SET pacing_preferences"):
             user_id, preferences_json = args
-            preferences = json.loads(preferences_json)
+            preferences = _coerce_jsonb(preferences_json)
             self.users.setdefault(
                 user_id,
                 {
@@ -376,8 +385,8 @@ class FakePool:
                 "run_id": run_id,
                 "scenario_name": scenario_name,
                 "status": status,
-                "judge_verdicts": json.loads(judge_verdicts),
-                "tool_calls": json.loads(tool_calls),
+                "judge_verdicts": _coerce_jsonb(judge_verdicts),
+                "tool_calls": _coerce_jsonb(tool_calls),
                 "failure_reason": failure_reason,
                 "created_at": datetime.now(UTC),
             }
@@ -647,7 +656,7 @@ class FakePool:
                 "user_id": user_id,
                 "job_type": "weekly_summary",
                 "scheduled_for": scheduled_for,
-                "context": json.loads(context_json),
+                "context": _coerce_jsonb(context_json),
                 "status": "pending",
                 "attempt_count": 0,
                 "max_attempts": 2,
@@ -669,7 +678,7 @@ class FakePool:
                 "user_id": user_id,
                 "job_type": "deferred_turn",
                 "scheduled_for": scheduled_for,
-                "context": json.loads(context_json),
+                "context": _coerce_jsonb(context_json),
                 "status": "pending",
                 "attempt_count": 0,
                 "max_attempts": 2,
@@ -690,7 +699,7 @@ class FakePool:
                 "user_id": user_id,
                 "job_type": job_type,
                 "scheduled_for": scheduled_for,
-                "context": json.loads(context_json),
+                "context": _coerce_jsonb(context_json),
                 "status": "pending",
                 "attempt_count": 0,
                 "max_attempts": 2,
@@ -711,7 +720,7 @@ class FakePool:
                 "user_id": user_id,
                 "job_type": job_type,
                 "scheduled_for": scheduled_for,
-                "context": json.loads(context_json),
+                "context": _coerce_jsonb(context_json),
                 "status": "pending",
                 "attempt_count": 0,
                 "max_attempts": 2,
@@ -728,7 +737,7 @@ class FakePool:
                 "user_id": user_id,
                 "job_type": "checkin",
                 "scheduled_for": scheduled_for,
-                "context": json.loads(context_json),
+                "context": _coerce_jsonb(context_json),
                 "status": "pending",
                 "attempt_count": 0,
                 "max_attempts": 2,
@@ -829,11 +838,11 @@ class FakePool:
                 "source": source,
                 "decision": decision,
                 "reason": reason,
-                "signal_snapshot": json.loads(signal_snapshot),
-                "preference_snapshot": json.loads(preference_snapshot),
+                "signal_snapshot": _coerce_jsonb(signal_snapshot),
+                "preference_snapshot": _coerce_jsonb(preference_snapshot),
                 "wait_ms": wait_ms,
                 "reaction": reaction,
-                "llm_judgement": json.loads(llm_judgement) if llm_judgement is not None else None,
+                "llm_judgement": _coerce_jsonb(llm_judgement),
                 "created_at": datetime.now(UTC),
             }
             self.pacing_events[row["id"]] = row
@@ -1593,8 +1602,8 @@ class FakePool:
                 {
                     "turn_id": turn_id,
                     "tool_name": tool_name,
-                    "arguments": json.loads(arguments),
-                    "result": json.loads(result),
+                    "arguments": _coerce_jsonb(arguments),
+                    "result": _coerce_jsonb(result),
                     "called_at": called_at,
                     "duration_ms": duration_ms,
                 }

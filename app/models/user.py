@@ -1,6 +1,5 @@
 """Small user model helpers shared by ingestion, debouncing, and recovery."""
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 from uuid import UUID
@@ -123,22 +122,9 @@ def resolve_pacing_preferences(
     return resolved
 
 
-def _normalize_json_object(value: Any) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-        if isinstance(decoded, Mapping):
-            return dict(decoded)
-    return {}
-
-
 def _row_to_user(row: Any) -> User:
     onboarding_state = row["onboarding_state"] if "onboarding_state" in row else "pending"
-    pacing_preferences = row["pacing_preferences"] if "pacing_preferences" in row else {}
+    pacing_preferences = row["pacing_preferences"] if "pacing_preferences" in row else None
     cross_thread_sharing_default = row["cross_thread_sharing_default"] if "cross_thread_sharing_default" in row else None
     return User(
         id=row["id"],
@@ -146,7 +132,7 @@ def _row_to_user(row: Any) -> User:
         phone=row["phone"],
         timezone=row["timezone"],
         onboarding_state=onboarding_state,
-        pacing_preferences=_normalize_json_object(pacing_preferences),
+        pacing_preferences=dict(pacing_preferences or {}),
         cross_thread_sharing_default=cross_thread_sharing_default,
     )
 
@@ -183,8 +169,8 @@ async def fetch_user_pacing_preferences(pool: Any, user_id: UUID) -> dict[str, A
         "SELECT pacing_preferences FROM users WHERE id = $1",
         user_id,
     )
-    raw = row["pacing_preferences"] if row is not None else {}
-    return resolve_pacing_preferences(_normalize_json_object(raw))
+    raw = row["pacing_preferences"] if row is not None else None
+    return resolve_pacing_preferences(raw)
 
 
 async def update_user_pacing_preferences(
@@ -201,10 +187,10 @@ async def update_user_pacing_preferences(
         RETURNING pacing_preferences
         """,
         user_id,
-        json.dumps(bounded, default=str),
+        bounded,
     )
     raw = row["pacing_preferences"] if row is not None else bounded
-    return resolve_pacing_preferences(_normalize_json_object(raw))
+    return resolve_pacing_preferences(raw)
 
 
 async def record_pacing_event(
@@ -243,11 +229,11 @@ async def record_pacing_event(
         source,
         decision,
         reason,
-        json.dumps(dict(signal_snapshot or {}), default=str),
-        json.dumps(dict(preference_snapshot or {}), default=str),
+        dict(signal_snapshot or {}),
+        dict(preference_snapshot or {}),
         wait_ms,
         reaction,
-        json.dumps(dict(llm_judgement or {}), default=str) if llm_judgement is not None else None,
+        dict(llm_judgement) if llm_judgement is not None else None,
     )
     return row["id"]
 

@@ -76,12 +76,26 @@ def test_prompt_pushes_balanced_perspective_without_forced_optimism() -> None:
 
 
 def test_prompt_tells_agent_to_handle_first_contact() -> None:
-    rendered = render_system_prompt("Mediator", "Maya", "Ben", prompt_version="v1")
+    rendered = render_system_prompt(
+        "Mediator", "Maya", "Ben", prompt_version="v1", onboarding_state="pending"
+    )
 
     assert "# First Contact" in rendered
     assert "onboarding_state" in rendered
     assert "Write the first message yourself using judgment" in rendered
     assert "not a canned script" in rendered
+
+
+def test_prompt_omits_first_contact_when_onboarding_complete() -> None:
+    rendered = render_system_prompt(
+        "Mediator", "Maya", "Ben", prompt_version="v1", onboarding_state="welcomed"
+    )
+
+    assert "# First Contact" not in rendered
+    assert "Write the first message yourself using judgment" not in rendered
+
+    default_rendered = render_system_prompt("Mediator", "Maya", "Ben", prompt_version="v1")
+    assert "# First Contact" not in default_rendered
 
 
 def test_prompt_treats_garbled_voice_text_as_transcription_artifact() -> None:
@@ -125,6 +139,94 @@ def test_prompt_closes_low_energy_conversations() -> None:
     assert "Silence is also acceptable" in rendered
     assert "Goodnight" in rendered
     assert "schedule one in Phase B rather than keeping the live chat open" in rendered
+
+
+def test_cross_thread_unset_branch_present_when_current_user_unset() -> None:
+    rendered = render_system_prompt(
+        "Mediator",
+        "Maya",
+        "Ben",
+        prompt_version="v1",
+        current_user_sharing_default="unset",
+        partner_sharing_default="opt_in",
+    )
+
+    assert "Treat this as urgent" in rendered
+    assert "ask them to choose `opt_in` or `opt_out`" in rendered
+    assert "the choice is not all-or-nothing" in rendered
+    assert "Peter has opted in by default" in rendered
+    # opt-out soft-nudge content should not appear when user is unset
+    assert "never pressure or repeat" not in rendered
+
+
+def test_cross_thread_opt_out_branch_present_when_current_user_opt_out() -> None:
+    rendered = render_system_prompt(
+        "Mediator",
+        "Maya",
+        "Ben",
+        prompt_version="v1",
+        current_user_sharing_default="opt_out",
+        partner_sharing_default="opt_in",
+    )
+
+    assert "private by default" in rendered
+    assert "never pressure or repeat" in rendered
+    assert "gently surface the value sharing could unlock" in rendered
+    # urgent-ask phrasing should not appear when user has chosen opt_out
+    assert "Treat this as urgent" not in rendered
+    assert "ask them to choose `opt_in` or `opt_out`" not in rendered
+
+
+def test_cross_thread_opt_in_branch_when_current_user_opt_in() -> None:
+    rendered = render_system_prompt(
+        "Mediator",
+        "Maya",
+        "Ben",
+        prompt_version="v1",
+        current_user_sharing_default="opt_in",
+        partner_sharing_default="opt_in",
+    )
+
+    # Neither the urgent ask nor the soft nudge should appear when the user has chosen opt_in.
+    assert "Treat this as urgent" not in rendered
+    assert "ask them to choose `opt_in` or `opt_out`" not in rendered
+    assert "never pressure or repeat" not in rendered
+    assert "gently surface the value sharing could unlock" not in rendered
+    assert "OOB always overrides opt-in" in rendered
+
+
+def test_partner_perspective_active_when_partner_opt_in() -> None:
+    rendered = render_system_prompt(
+        "Mediator",
+        "Maya",
+        "Ben",
+        prompt_version="v1",
+        current_user_sharing_default="opt_in",
+        partner_sharing_default="opt_in",
+    )
+
+    assert "# Surfacing The Partner's Perspective" in rendered
+    assert "Keep their perspective live in this thread" in rendered
+    assert "Be active, not passive" in rendered
+    assert "Search before surfacing" in rendered
+
+
+def test_partner_perspective_quiet_when_partner_opt_out() -> None:
+    rendered = render_system_prompt(
+        "Mediator",
+        "Maya",
+        "Ben",
+        prompt_version="v1",
+        current_user_sharing_default="opt_in",
+        partner_sharing_default="opt_out",
+    )
+
+    assert "# Surfacing The Partner's Perspective" in rendered
+    # Active surfacing block should not appear when partner is opt_out.
+    assert "Keep their perspective live in this thread" not in rendered
+    assert "Be active, not passive" not in rendered
+    # The short reminder should appear instead.
+    assert "Do not paraphrase partner-thread content" in rendered
 
 
 async def test_eval_turn_uses_explicit_pool_prompt_version_and_fake_whatsapp(fake_pool, app_env, monkeypatch) -> None:

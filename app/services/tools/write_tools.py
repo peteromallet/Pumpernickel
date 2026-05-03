@@ -94,6 +94,12 @@ def _json_payload(value: BaseModel | dict[str, Any]) -> str:
     return json.dumps(value, default=str)
 
 
+def _jsonb_payload(value: BaseModel | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(value, BaseModel):
+        return json.loads(value.model_dump_json())
+    return value
+
+
 async def _log_tool_call(
     ctx: TurnContext,
     name: str,
@@ -109,8 +115,8 @@ async def _log_tool_call(
         """,
         ctx.turn_id,
         name,
-        args.model_dump_json(),
-        _json_payload(result),
+        _jsonb_payload(args),
+        _jsonb_payload(result),
         started_at,
         duration_ms,
     )
@@ -158,7 +164,7 @@ async def _schedule_context_job(
         user_id,
         job_type,
         scheduled_for,
-        json.dumps({context_key: str(context_id)}),
+        {context_key: str(context_id)},
     )
 
 

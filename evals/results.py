@@ -111,8 +111,8 @@ async def record_eval_result(
         run_id,
         scenario_name,
         status,
-        json.dumps(judge_verdicts or []),
-        json.dumps(tool_calls or []),
+        list(judge_verdicts or []),
+        list(tool_calls or []),
         failure_reason,
     )
     return row["id"]

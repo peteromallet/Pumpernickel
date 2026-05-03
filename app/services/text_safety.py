@@ -43,7 +43,24 @@ _INTERNAL_OUTPUT_PATTERNS = (
     "safety escalation",
     "should be addressed",
     "should be updated",
+    "let me do those writes",
+    "do those writes",
+    "needs updating",
+    "new observation",
+    "reinforce observation",
+    "reinforce** observation",
+    "update observation",
+    "supersede observation",
+    "new memory",
+    "reinforce memory",
+    "update memory",
+    "supersede memory",
+    "new theme",
+    "new watch item",
+    "new oob",
 )
+
+_INTERNAL_ID_REF_RE = re.compile(r"`[a-f0-9]{6,}`")
 
 _PROCESS_OPENERS = (
     "the person's message",
@@ -62,9 +79,13 @@ _PROCESS_OPENERS = (
 
 def _looks_internal(line: str) -> bool:
     lowered = line.lower()
-    return any(pattern in lowered for pattern in _INTERNAL_OUTPUT_PATTERNS) or any(
-        lowered.startswith(pattern) for pattern in _PROCESS_OPENERS
-    )
+    if any(pattern in lowered for pattern in _INTERNAL_OUTPUT_PATTERNS):
+        return True
+    if any(lowered.startswith(pattern) for pattern in _PROCESS_OPENERS):
+        return True
+    if _INTERNAL_ID_REF_RE.search(line):
+        return True
+    return False
 
 
 def looks_like_internal_process_text(text: str) -> bool:
@@ -79,12 +100,20 @@ def clean_user_facing_text(text: str) -> str:
     if len(parts) == 2 and any(_looks_internal(line.strip()) for line in parts[0].splitlines() if line.strip()):
         text = parts[1]
 
+    # Whole-paragraph drop: if any non-blank, non-separator line in the remaining
+    # text looks like internal process narration, drop the entire text rather
+    # than ship a half-coherent fragment with the offending lines snipped out.
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line in {"---", "***", "___"}:
+            continue
+        if _looks_internal(line):
+            return ""
+
     cleaned_lines: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if line in {"---", "***", "___"}:
-            continue
-        if _looks_internal(line):
             continue
         cleaned_lines.append(raw_line.rstrip())
     cleaned = "\n".join(cleaned_lines).strip()

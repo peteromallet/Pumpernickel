@@ -188,7 +188,14 @@ async def process_inbound(
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
-            for message in value.get("messages", []):
+            # Process image messages first within a single inbound value so that
+            # vision.handle_image populates media_analysis before any text-driven
+            # coalescer add fires. This keeps a Discord/WhatsApp message that
+            # bundles text + image attachments to a single agentic turn that
+            # already knows about the image, instead of racing into two replies.
+            messages_in_value = list(value.get("messages", []))
+            messages_in_value.sort(key=lambda m: 0 if m.get("type") == "image" else 1)
+            for message in messages_in_value:
                 delete_target = _delete_target_id(value, message)
                 if delete_target is not None:
                     await _handle_delete(pool, delete_target)

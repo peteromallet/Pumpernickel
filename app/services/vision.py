@@ -13,14 +13,15 @@ from app.services.spend import is_under_cap, record_llm_cost
 from app.services.templates import TemplateCall
 
 
-MEDIA_EXPLAIN_PROMPT = """Explain this image for durable future recall by a relationship-mediation assistant.
+MEDIA_EXPLAIN_PROMPT = """Describe this image for durable future recall by a relationship-mediation assistant.
 
-Write a compact, queryable note. Include:
-- visible people, setting, objects, screenshots/text, actions, and emotional tone when apparent
-- relationship-relevant context that may matter later
-- uncertainty where the image is ambiguous
+Return plain text in two parts:
 
-Do not identify unknown people or infer protected traits. Do not add advice. Return plain text only."""
+1. A compact description paragraph covering: visible people, setting, objects, actions, emotional tone when apparent, and relationship-relevant context that may matter later. Note uncertainty where the image is ambiguous.
+
+2. A line that begins exactly with "Visible text:" followed by a verbatim transcription of every readable string in the image, in natural reading order. This includes UI labels, screenshot message bodies (preserve speaker/sender attributions and message order if discernible), captions, signs, watermarks, and handwriting if legible. Preserve casing, punctuation, line breaks, and emoji as they appear. Do not paraphrase or summarize the text. If a portion is partially obscured or unreadable, transcribe what you can and mark the unclear span with "[unclear]" rather than guessing. If there is no readable text in the image, write "Visible text: none".
+
+Safety rails: do not identify unknown people, do not infer protected traits, do not add advice or interpretation beyond what is visibly evident. Plain text only -- no markdown headers or code fences."""
 
 
 def _extract_output_text(data: dict[str, Any]) -> str:
