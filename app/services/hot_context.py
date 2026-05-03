@@ -388,7 +388,7 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
     if not hc.current_user.get("cross_thread_sharing_default"):
         lines += [
             "## URGENT ACTION NEEDED",
-            "- The current user has NOT chosen a cross-thread sharing default. Ask them to pick opt_in or opt_out in your next reply. Do not bridge or rely on their thread for the partner until they choose. The only reason to defer is if they are mid-crisis or the question is time-critical.",
+            "- The current user has NOT chosen a cross-thread sharing default. Ask them to pick opt_in or opt_out in your next reply. Do not bridge or rely on their thread for the partner until they choose. The only reason to defer is if they are mid-crisis or the question is time-critical. When you ask, make it clear the choice is not all-or-nothing: even on opt_in they can mark individual things out of bounds so those stay private, and even on opt_out they can authorize specific things to be shared.",
             "",
         ]
     lines += [
@@ -416,7 +416,7 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
     ]
     if hc.current_user.get("cross_thread_sharing_default") == "opt_out":
         lines.append(
-            "- soft_nudge: The current user is opted out of cross-thread sharing. Don't push, but at a natural opening (not every reply, and never mid-crisis), surface the value of sharing — e.g. helping their partner understand their perspective, reducing repeated explanations, or unlocking the bridge for specific topics. They can stay opted out and still allow case-by-case sharing. Skip this if they have recently declined or signalled they don't want to revisit it."
+            "- soft_nudge: The current user is opted out of cross-thread sharing. Don't push, but at a natural opening (not every reply, and never mid-crisis), surface the value of sharing — e.g. helping their partner understand their perspective, reducing repeated explanations, or unlocking the bridge for specific topics. Make the alternatives concrete: they can stay opted out and authorize specific things case-by-case, or switch to opt_in and still mark individual things out of bounds so those stay private. Skip this if they have recently declined or signalled they don't want to revisit it."
         )
     if not truncations.get("conversation_load"):
         lines += [
