@@ -263,7 +263,8 @@ async def test_render_hot_context_respects_default_token_budget(hot_context_seed
     assert "onboarding_state: welcomed" in text
     assert "## Conversation load" in text
     assert "## Sharing defaults" in text
-    assert "action_needed: Ask the current user" in text
+    assert "## URGENT ACTION NEEDED" in text
+    assert "Ask them to pick opt_in or opt_out" in text
     assert "total_messages: 25" in text
     assert "share carefully" in text
     assert "must stay private" not in text
@@ -278,8 +279,8 @@ def test_render_hot_context_truncates_without_dropping_oob(monkeypatch):
     user_id = uuid4()
     partner_id = uuid4()
     hc = HotContext(
-        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "UTC", "style_notes": "short", "onboarding_state": "welcomed"},
-        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "UTC", "style_notes": "short", "onboarding_state": "pending"},
+        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "UTC", "style_notes": "short", "onboarding_state": "welcomed", "cross_thread_sharing_default": "opt_in"},
+        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "UTC", "style_notes": "short", "onboarding_state": "pending", "cross_thread_sharing_default": "opt_in"},
         conversation_load={"period": "today", "timezone": "UTC", "total_count": 24, "inbound_count": 13, "outbound_count": 11},
         active_oob=[
             {
