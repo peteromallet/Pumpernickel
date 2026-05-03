@@ -384,7 +384,14 @@ def _message_thread_owner_id(row: Any) -> Any:
 
 
 def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit: int = 240) -> str:
-    lines: list[str] = [
+    lines: list[str] = []
+    if not hc.current_user.get("cross_thread_sharing_default"):
+        lines += [
+            "## URGENT ACTION NEEDED",
+            "- The current user has NOT chosen a cross-thread sharing default. Ask them to pick opt_in or opt_out in your next reply. Do not bridge or rely on their thread for the partner until they choose. The only reason to defer is if they are mid-crisis or the question is time-critical.",
+            "",
+        ]
+    lines += [
         "## You",
         f"- id: {_clip(hc.current_user['id'], clip_limit)}",
         f"- name: {_clip(hc.current_user['name'], clip_limit)}",
@@ -407,10 +414,6 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
         f"- current_user: {_clip(hc.current_user.get('cross_thread_sharing_default') or 'unset', clip_limit)}",
         f"- partner: {_clip(hc.partner_user.get('cross_thread_sharing_default') or 'unset', clip_limit)}",
     ]
-    if not hc.current_user.get("cross_thread_sharing_default"):
-        lines.append(
-            "- action_needed: Ask the current user to choose opt_in or opt_out for cross-thread sharing when there is a natural opening."
-        )
     if not truncations.get("conversation_load"):
         lines += [
             "",
