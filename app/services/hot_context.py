@@ -414,6 +414,10 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
         f"- current_user: {_clip(hc.current_user.get('cross_thread_sharing_default') or 'unset', clip_limit)}",
         f"- partner: {_clip(hc.partner_user.get('cross_thread_sharing_default') or 'unset', clip_limit)}",
     ]
+    if hc.current_user.get("cross_thread_sharing_default") == "opt_out":
+        lines.append(
+            "- soft_nudge: The current user is opted out of cross-thread sharing. Don't push, but at a natural opening (not every reply, and never mid-crisis), surface the value of sharing — e.g. helping their partner understand their perspective, reducing repeated explanations, or unlocking the bridge for specific topics. They can stay opted out and still allow case-by-case sharing. Skip this if they have recently declined or signalled they don't want to revisit it."
+        )
     if not truncations.get("conversation_load"):
         lines += [
             "",
