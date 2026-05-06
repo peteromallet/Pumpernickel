@@ -1239,6 +1239,32 @@ async def test_schedule_checkin_accepts_local_berlin_clock_time(tool_ctx):
     assert tool_ctx.pool.scheduled_jobs[result.job_id]["scheduled_for"] == datetime(2036, 5, 6, 19, 0, tzinfo=UTC)
 
 
+async def test_schedule_checkin_rejects_utc_when_for_non_utc_user(tool_ctx):
+    berlin_user = User(tool_ctx.user.id, tool_ctx.user.name, tool_ctx.user.phone, "Europe/Berlin")
+    berlin_ctx = TurnContext(
+        tool_ctx.turn_id,
+        tool_ctx.pool,
+        berlin_user,
+        tool_ctx.partner,
+        tool_ctx.triggering_message_ids,
+        current_step=tool_ctx.current_step,
+    )
+
+    with pytest.raises(write_tools.ToolCallRejected) as exc:
+        await write_tools.schedule_checkin(
+            berlin_ctx,
+            ScheduleCheckinInput(
+                user_id=berlin_user.id,
+                when=datetime(2036, 5, 6, 21, 0, tzinfo=UTC),
+                about_what="the 9pm conversation",
+                reason="user asked for a check-in at local 9pm",
+            ),
+        )
+
+    assert exc.value.result["error"] == "use_local_when_for_user_local_time"
+    assert exc.value.result["timezone"] == "Europe/Berlin"
+
+
 async def test_schedule_checkin_rejects_naive_datetime(tool_ctx):
     with pytest.raises(ValueError):
         ScheduleCheckinInput(

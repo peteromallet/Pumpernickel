@@ -1108,10 +1108,6 @@ class LocalScheduleTime(BaseModel):
 
 class ScheduleTaskInput(BaseModel):
     brief: str = Field(min_length=1, max_length=2000)
-    when: datetime | None = Field(
-        default=None,
-        description="Absolute first fire time. Use only for concrete clock/calendar times or after resolving calendar-relative language such as 'tomorrow morning'. Must be timezone-aware and in the future.",
-    )
     delay: ScheduleDelay | None = Field(
         default=None,
         description="Preferred/default for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Provide exactly one of delay, local_when, or when.",
@@ -1119,6 +1115,10 @@ class ScheduleTaskInput(BaseModel):
     local_when: LocalScheduleTime | None = Field(
         default=None,
         description="Use for concrete local clock phrases like '9pm tonight', 'Monday at 8', or 'tomorrow morning'. The server converts this wall-clock time from the provided timezone, or the current user's timezone if omitted, to UTC.",
+    )
+    when: datetime | None = Field(
+        default=None,
+        description="Absolute exact instant. Do not use for user-local clock phrases; use local_when instead. If the current user is not in UTC, UTC/Z datetimes may be rejected so local-time mistakes can be corrected.",
     )
     recurrence: ScheduledTaskRecurrence | None = None
 
@@ -1161,10 +1161,6 @@ class UpdateScheduledTaskInput(BaseModel):
         description="Only valid during a scheduled_task turn; targets the currently firing task.",
     )
     brief: str | None = Field(default=None, min_length=1, max_length=2000)
-    when: datetime | None = Field(
-        default=None,
-        description="Replacement next fire time. Use only for concrete clock/calendar times or after resolving calendar-relative language such as 'tomorrow morning'. Must be timezone-aware and in the future.",
-    )
     delay: ScheduleDelay | None = Field(
         default=None,
         description="Preferred/default replacement time for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Do not provide together with when or local_when.",
@@ -1172,6 +1168,10 @@ class UpdateScheduledTaskInput(BaseModel):
     local_when: LocalScheduleTime | None = Field(
         default=None,
         description="Replacement local wall-clock time for phrases like '9pm tonight' or 'Monday at 8'. The server converts from the provided timezone, or the current user's timezone if omitted, to UTC.",
+    )
+    when: datetime | None = Field(
+        default=None,
+        description="Replacement exact instant. Do not use for user-local clock phrases; use local_when instead. If the current user is not in UTC, UTC/Z datetimes may be rejected so local-time mistakes can be corrected.",
     )
     recurrence: ScheduledTaskRecurrence | None = Field(
         default=None,
@@ -1232,10 +1232,6 @@ class CancelScheduledTaskOutput(BaseModel):
 
 class ScheduleCheckinInput(BaseModel):
     user_id: UUID
-    when: datetime | None = Field(
-        default=None,
-        description="Absolute future time to fire. Use only for concrete clock/calendar times or after resolving calendar-relative language such as 'tomorrow morning'.",
-    )
     delay: ScheduleDelay | None = Field(
         default=None,
         description="Preferred/default for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Provide exactly one of delay, local_when, or when.",
@@ -1243,6 +1239,10 @@ class ScheduleCheckinInput(BaseModel):
     local_when: LocalScheduleTime | None = Field(
         default=None,
         description="Use for concrete local clock phrases like '9pm tonight', 'Monday at 8', or 'tomorrow morning'. The server converts this wall-clock time from the provided timezone, or the current user's timezone if omitted, to UTC.",
+    )
+    when: datetime | None = Field(
+        default=None,
+        description="Absolute exact instant. Do not use for user-local clock phrases; use local_when instead. If the current user is not in UTC, UTC/Z datetimes may be rejected so local-time mistakes can be corrected.",
     )
     about_what: str
     reason: str = Field(description="Why the bot decided this check-in is worth scheduling. Logged for audit.")

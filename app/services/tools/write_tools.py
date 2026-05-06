@@ -1224,6 +1224,21 @@ def _future_utc(value: datetime, *, field_name: str = "when") -> datetime:
     return scheduled_for
 
 
+def _reject_utc_when_for_local_user(ctx: TurnContext, when: datetime) -> None:
+    user_timezone = str(getattr(ctx.user, "timezone", None) or "UTC")
+    if user_timezone.upper() in {"UTC", "ETC/UTC"}:
+        return
+    if when.utcoffset() == timedelta(0):
+        raise ToolCallRejected(
+            {
+                "error": "use_local_when_for_user_local_time",
+                "field": "when",
+                "timezone": user_timezone,
+                "hint": "For local clock phrases like '9pm tonight', call the tool again with local_when instead of UTC when.",
+            }
+        )
+
+
 def _delay_delta(delay: ScheduleDelay) -> timedelta:
     return timedelta(weeks=delay.weeks, days=delay.days, hours=delay.hours, minutes=delay.minutes)
 
@@ -1258,6 +1273,7 @@ def _scheduled_for_from_schedule_fields(
         return _scheduled_for_from_local_when(ctx, local_when)
     if when is None:
         raise ToolCallRejected({"error": "missing_schedule_time", "field": "when"})
+    _reject_utc_when_for_local_user(ctx, when)
     return _future_utc(when)
 
 
