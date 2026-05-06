@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from evals.capture import record_tool_call
+from app.services.turn_audit import record_turn_event
 from app.services.turn_plan import TurnStep
 from app.services.turn_context import TurnContext
 from app.services.tools import read_tools, write_tools
@@ -85,10 +86,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "add_oob": "Add a new active out-of-bounds constraint when a user sets a new sharing boundary; do not infer OOB silently from discomfort alone.",
     "update_oob": "Revise an existing out-of-bounds constraint when the owner changes severity, wording, review time, or shareable context.",
     "lift_oob": "Lift an out-of-bounds constraint when the owner says it no longer applies.",
-    "schedule_checkin": "Schedule one useful follow-up check-in for this user; do not stack multiple competing pending check-ins for the same user. Prefer `delay` by default for simple relative durations like 'in two hours', 'in 10 hours', or 'in two days'. Use `when` only for concrete clock/calendar times or resolved calendar-relative times.",
+    "schedule_checkin": "Schedule one useful user-facing future check-in/message/reminder for this user; do not stack multiple competing pending check-ins for the same user. Use this, not `schedule_task`, when the user asks 'message me', 'remind me', or 'check in with me' at a future time. Prefer `delay` by default for simple relative durations like 'in two hours', 'in 10 hours', or 'in two days'. Use `local_when` for local clock phrases like '9pm tonight' or 'Monday at 8'. Use `when` only when you already have an exact timezone-aware instant.",
     "cancel_scheduled_checkin": "Cancel a pending check-in when it is no longer wanted or relevant.",
-    "schedule_task": "Schedule an agent-managed future task brief for the current user. Prefer `delay` by default for simple relative durations like 'in two hours', 'in 10 hours', or 'in two days'. Use `when` only for concrete clock/calendar times or resolved calendar-relative times. Use `recurrence` for durable hourly, daily, or weekly repeats.",
-    "update_scheduled_task": "Update a pending agent-managed scheduled task by task_id, job_id, or current_task=true during a scheduled_task turn. Use for changing the brief, next fire time, or recurrence. Prefer `delay` by default for simple relative durations; use `when` only for concrete clock/calendar times or resolved calendar-relative times.",
+    "schedule_task": "Schedule an internal agent-managed future task brief for the current user, including recurring/non-message work. Do not use for user-facing 'message/remind/check in with me' requests; use `schedule_checkin` for those. Prefer `delay` by default for simple relative durations like 'in two hours', 'in 10 hours', or 'in two days'. Use `local_when` for local clock phrases like '9pm tonight' or 'Monday at 8'. Use `when` only when you already have an exact timezone-aware instant. Use `recurrence` for durable hourly, daily, or weekly repeats.",
+    "update_scheduled_task": "Update a pending agent-managed scheduled task by task_id, job_id, or current_task=true during a scheduled_task turn. Use for changing the brief, next fire time, or recurrence. Prefer `delay` by default for simple relative durations; use `local_when` for local clock phrases; use `when` only for exact timezone-aware instants.",
     "cancel_scheduled_task": "Cancel a pending agent-managed scheduled task by task_id, job_id, or current_task=true during a scheduled_task turn.",
     "escalate_to_partner": "Send partner escalation only when one of two named gates is true: the triggering message meets the `crisis` charge definition, or the user explicitly asks you to alert their partner. The reason must name which gate fired. Do not use for ordinary friction, even intense friction. Use concise, balanced, non-accusatory wording; do not include protected OOB details, private analysis, pressure, or anything designed to manage the partner's reaction.",
     "edit_outbound_message": "Edit one already-sent bot outbound message when the original wording was materially wrong, unsafe, confusing, too sharp, or likely to land badly and an edit is cleaner than a follow-up. Do not edit to hide accountability; if the correction matters, acknowledge it in conversation when appropriate.",
@@ -301,17 +302,52 @@ def _record_visible_tool_call(*, tool_name: str, args: Any, result: dict[str, An
 async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> dict[str, Any]:
     started = datetime.now(UTC)
     phase = ctx.current_step
+    await record_turn_event(
+        ctx.pool,
+        ctx.turn_id,
+        "tool.requested",
+        step=phase,
+        actor="tool",
+        metadata={"tool_name": name},
+    )
     registry_entry = TOOL_REGISTRY.get(name)
     if registry_entry is None:
         result = _tool_error(f"unknown tool: {name}")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            metadata={"tool_name": name, "reason": "unknown_tool"},
+        )
         _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
         return result
     if name not in _step_allowed(ctx):
         result = _tool_error(f"step: tool {name} is not allowed in {ctx.current_step} step")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            metadata={"tool_name": name, "reason": "step_not_allowed"},
+        )
         _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
         return result
     if name == "consult_perspective" and ctx.trigger_metadata.get("_inside_consult"):
         result = _tool_error("step: consult_perspective cannot call itself")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            metadata={"tool_name": name, "reason": "recursive_consult"},
+        )
         _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
         return result
     input_model, output_model = registry_entry
@@ -319,36 +355,105 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
         args = input_model.model_validate(_inject_consult_defaults(name, raw_args, ctx))
     except ValidationError as exc:
         result = _tool_error(f"validation: {exc}")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            metadata={"tool_name": name, "reason": "validation"},
+        )
         _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
         return result
     required_reads = READ_BEFORE_WRITE.get(name)
     if required_reads and not (required_reads & set(ctx.tool_call_log)):
         required = " or ".join(sorted(required_reads))
         result = _tool_error(f"read_before_write: call {required} before {name}")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            metadata={"tool_name": name, "reason": "read_before_write", "required_reads": sorted(required_reads)},
+        )
         _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
         return result
     fn = TOOL_DISPATCH.get(name)
     if fn is None:
         result = _tool_error(f"dispatch: tool {name} is not implemented")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            metadata={"tool_name": name, "reason": "dispatch_missing"},
+        )
         _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
         return result
     try:
         result = await fn(ctx, args)
     except ToolCallRejected as exc:
         result = {**exc.result, "is_error": True}
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+            metadata={"tool_name": name, "reason": result.get("error") or "tool_call_rejected"},
+        )
         _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
         return result
     except Exception as exc:
         result = _tool_error(f"exception: {exc}")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.failed",
+            step=phase,
+            severity="error",
+            actor="tool",
+            duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+            metadata={"tool_name": name, "exception_type": type(exc).__name__},
+        )
         _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
         raise
     try:
         validated = output_model.model_validate(result)
     except ValidationError as exc:
         result = _tool_error(f"result_validation: {exc}")
+        await record_turn_event(
+            ctx.pool,
+            ctx.turn_id,
+            "tool.rejected",
+            step=phase,
+            severity="warning",
+            actor="tool",
+            duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+            metadata={"tool_name": name, "reason": "result_validation"},
+        )
         _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
         return result
     result_dict = validated.model_dump(mode="json")
+    await record_turn_event(
+        ctx.pool,
+        ctx.turn_id,
+        "plan.updated" if name == "update_turn_plan" else "tool.completed",
+        step=phase,
+        actor="tool",
+        duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+        metadata={
+            "tool_name": name,
+            "is_error": bool(result_dict.get("is_error") or result_dict.get("error")),
+        },
+    )
     if name != "update_turn_plan":
         ctx.tool_call_log.append(name)
         _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result_dict, phase=phase, started_at=started)

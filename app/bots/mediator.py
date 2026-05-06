@@ -56,6 +56,8 @@ MEDIATOR_RESPOND_INSTRUCTION = (
     "`send_message_part` call, see whether it actually sent, and continue from the returned "
     "`sent_so_far`. Do not stream every thought or send process updates. If "
     "`send_message_part` returns `interrupted`, stop sending in this turn. "
+    "After all intended `send_message_part` calls have been sent, return an empty assistant "
+    "response; do not narrate the next step or summarize what you just sent. "
     "If a text reply would be unnecessary and a small acknowledgement is enough, "
     "you may use `search_emojis` and then produce exactly one `[react: emoji]` directive instead. "
     "If a reaction would naturally complement a short reply, put one `[react: emoji]` "

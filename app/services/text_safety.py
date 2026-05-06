@@ -13,6 +13,12 @@ _INTERNAL_OUTPUT_PATTERNS = (
     "phase b",
     "read phase",
     "write phase",
+    "read step",
+    "respond step",
+    "record step",
+    "schedule step",
+    "consult step",
+    "turn plan",
     "write calls",
     "write tools",
     "phase errors",
@@ -61,6 +67,15 @@ _INTERNAL_OUTPUT_PATTERNS = (
 )
 
 _INTERNAL_ID_REF_RE = re.compile(r"`[a-f0-9]{6,}`")
+_INTERNAL_STEP_RE = re.compile(
+    r"\bnow\s+(?:i(?:'|’)ll\s+move\s+)?(?:am\s+)?at\s+the\s+"
+    r"(?:read|respond|record|schedule|consult|done)\s+step\b",
+    re.IGNORECASE,
+)
+_INTERNAL_STEP_LABEL_RE = re.compile(
+    r"^\s*(?:current|next)\s+step\s*:",
+    re.IGNORECASE,
+)
 
 _PROCESS_OPENERS = (
     "the person's message",
@@ -80,6 +95,10 @@ _PROCESS_OPENERS = (
 def _looks_internal(line: str) -> bool:
     lowered = line.lower()
     if any(pattern in lowered for pattern in _INTERNAL_OUTPUT_PATTERNS):
+        return True
+    if _INTERNAL_STEP_RE.search(line):
+        return True
+    if _INTERNAL_STEP_LABEL_RE.search(line):
         return True
     if any(lowered.startswith(pattern) for pattern in _PROCESS_OPENERS):
         return True

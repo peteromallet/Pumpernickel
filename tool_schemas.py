@@ -11,7 +11,7 @@ Pydantic v2.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date as dt_date, datetime, time as dt_time
 from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -623,6 +623,10 @@ class BotAction(BaseModel):
     final_outbound_content: str | None = None
     reasoning: str
     tool_calls: list[dict]  # raw tool_calls rows; the LLM can read them
+    audit_events: list[dict] = Field(
+        default_factory=list,
+        description="Queryable per-turn diagnostic events. Plain metadata is sanitized; raw sensitive text is not exposed.",
+    )
 
 
 class GetBotActionsOutput(BaseModel):
@@ -1086,6 +1090,22 @@ class ScheduleDelay(BaseModel):
         return self
 
 
+class LocalScheduleTime(BaseModel):
+    date: dt_date = Field(description="Local calendar date for the user's intended wall-clock time.")
+    time: dt_time = Field(description="Local wall-clock time on that date, e.g. 21:00:00 for 9pm.")
+    timezone: str | None = Field(
+        default=None,
+        description="IANA timezone for the local wall-clock time. Omit to use the current user's timezone.",
+    )
+
+    @field_validator("time")
+    @classmethod
+    def reject_timezone_on_time(cls, value: dt_time) -> dt_time:
+        if value.tzinfo is not None and value.utcoffset() is not None:
+            raise ValueError("local_when.time must not include a timezone")
+        return value
+
+
 class ScheduleTaskInput(BaseModel):
     brief: str = Field(min_length=1, max_length=2000)
     when: datetime | None = Field(
@@ -1094,7 +1114,11 @@ class ScheduleTaskInput(BaseModel):
     )
     delay: ScheduleDelay | None = Field(
         default=None,
-        description="Preferred/default for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Provide exactly one of delay or when.",
+        description="Preferred/default for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Provide exactly one of delay, local_when, or when.",
+    )
+    local_when: LocalScheduleTime | None = Field(
+        default=None,
+        description="Use for concrete local clock phrases like '9pm tonight', 'Monday at 8', or 'tomorrow morning'. The server converts this wall-clock time from the provided timezone, or the current user's timezone if omitted, to UTC.",
     )
     recurrence: ScheduledTaskRecurrence | None = None
 
@@ -1107,8 +1131,8 @@ class ScheduleTaskInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_time(self) -> "ScheduleTaskInput":
-        if (self.when is None) == (self.delay is None):
-            raise ValueError("provide exactly one of when or delay")
+        if sum(value is not None for value in (self.when, self.delay, self.local_when)) != 1:
+            raise ValueError("provide exactly one of when, delay, or local_when")
         return self
 
 
@@ -1143,7 +1167,11 @@ class UpdateScheduledTaskInput(BaseModel):
     )
     delay: ScheduleDelay | None = Field(
         default=None,
-        description="Preferred/default replacement time for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Do not provide together with when.",
+        description="Preferred/default replacement time for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Do not provide together with when or local_when.",
+    )
+    local_when: LocalScheduleTime | None = Field(
+        default=None,
+        description="Replacement local wall-clock time for phrases like '9pm tonight' or 'Monday at 8'. The server converts from the provided timezone, or the current user's timezone if omitted, to UTC.",
     )
     recurrence: ScheduledTaskRecurrence | None = Field(
         default=None,
@@ -1164,10 +1192,10 @@ class UpdateScheduledTaskInput(BaseModel):
         if sum(targets) != 1:
             raise ValueError("provide exactly one of task_id, job_id, or current_task=true")
         has_recurrence_update = "recurrence" in self.model_fields_set
-        if self.when is not None and self.delay is not None:
-            raise ValueError("provide at most one of when or delay")
-        if self.brief is None and self.when is None and self.delay is None and not has_recurrence_update:
-            raise ValueError("provide at least one update: brief, when, or recurrence")
+        if sum(value is not None for value in (self.when, self.delay, self.local_when)) > 1:
+            raise ValueError("provide at most one of when, delay, or local_when")
+        if self.brief is None and self.when is None and self.delay is None and self.local_when is None and not has_recurrence_update:
+            raise ValueError("provide at least one update: brief, when, local_when, or recurrence")
         return self
 
 
@@ -1210,7 +1238,11 @@ class ScheduleCheckinInput(BaseModel):
     )
     delay: ScheduleDelay | None = Field(
         default=None,
-        description="Preferred/default for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Provide exactly one of delay or when.",
+        description="Preferred/default for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Provide exactly one of delay, local_when, or when.",
+    )
+    local_when: LocalScheduleTime | None = Field(
+        default=None,
+        description="Use for concrete local clock phrases like '9pm tonight', 'Monday at 8', or 'tomorrow morning'. The server converts this wall-clock time from the provided timezone, or the current user's timezone if omitted, to UTC.",
     )
     about_what: str
     reason: str = Field(description="Why the bot decided this check-in is worth scheduling. Logged for audit.")
@@ -1224,8 +1256,8 @@ class ScheduleCheckinInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_time(self) -> "ScheduleCheckinInput":
-        if (self.when is None) == (self.delay is None):
-            raise ValueError("provide exactly one of when or delay")
+        if sum(value is not None for value in (self.when, self.delay, self.local_when)) != 1:
+            raise ValueError("provide exactly one of when, delay, or local_when")
         return self
 
 

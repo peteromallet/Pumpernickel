@@ -1,5 +1,5 @@
 from uuid import uuid4
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -287,7 +287,9 @@ def test_scheduled_task_tools_are_registered_and_phase_gated() -> None:
         assert name in TOOL_DESCRIPTIONS
     assert "current_task=true" in TOOL_DESCRIPTIONS["update_scheduled_task"]
     assert "Prefer `delay` by default" in TOOL_DESCRIPTIONS["schedule_task"]
-    assert "Use `when` only" in TOOL_DESCRIPTIONS["schedule_checkin"]
+    assert "message me" in TOOL_DESCRIPTIONS["schedule_checkin"]
+    assert "use `schedule_checkin`" in TOOL_DESCRIPTIONS["schedule_task"]
+    assert "Use `local_when`" in TOOL_DESCRIPTIONS["schedule_checkin"]
 
 
 def test_scheduled_task_schema_validation_rejects_invalid_inputs() -> None:
@@ -296,6 +298,7 @@ def test_scheduled_task_schema_validation_rejects_invalid_inputs() -> None:
     from tool_schemas import (
         CancelScheduledTaskInput,
         ScheduleDelay,
+        LocalScheduleTime,
         ScheduleTaskInput,
         ScheduleTaskOutput,
         ScheduledTaskRecurrence,
@@ -310,6 +313,10 @@ def test_scheduled_task_schema_validation_rejects_invalid_inputs() -> None:
     ScheduleTaskInput(brief="Send tomorrow's repair brief.", when=aware_when)
     ScheduleTaskInput(brief="Send in two days.", delay=ScheduleDelay(days=2))
     ScheduleTaskInput(
+        brief="Send at 9pm Berlin.",
+        local_when=LocalScheduleTime(date=date(2026, 5, 6), time=time(21, 0), timezone="Europe/Berlin"),
+    )
+    ScheduleTaskInput(
         brief="Repeat every three hours.",
         delay=ScheduleDelay(hours=3),
         recurrence={"type": "hourly", "interval": 3},
@@ -322,9 +329,9 @@ def test_scheduled_task_schema_validation_rejects_invalid_inputs() -> None:
 
     with pytest.raises(ValidationError, match="when must be timezone-aware"):
         ScheduleTaskInput(brief="Naive one-shot.", when=datetime(2026, 5, 5, 9, 30))
-    with pytest.raises(ValidationError, match="provide exactly one of when or delay"):
+    with pytest.raises(ValidationError, match="provide exactly one of when, delay, or local_when"):
         ScheduleTaskInput(brief="Missing schedule.")
-    with pytest.raises(ValidationError, match="provide exactly one of when or delay"):
+    with pytest.raises(ValidationError, match="provide exactly one of when, delay, or local_when"):
         ScheduleTaskInput(brief="Ambiguous schedule.", when=aware_when, delay=ScheduleDelay(days=2))
     with pytest.raises(ValidationError, match="delay must be a positive duration"):
         ScheduleDelay()
@@ -340,7 +347,7 @@ def test_scheduled_task_schema_validation_rejects_invalid_inputs() -> None:
         UpdateScheduledTaskInput(task_id=task_id, job_id=job_id, brief="ambiguous")
     with pytest.raises(ValidationError, match="provide at least one update"):
         UpdateScheduledTaskInput(task_id=task_id)
-    with pytest.raises(ValidationError, match="provide at most one of when or delay"):
+    with pytest.raises(ValidationError, match="provide at most one of when, delay, or local_when"):
         UpdateScheduledTaskInput(task_id=task_id, when=aware_when, delay=ScheduleDelay(hours=2))
     with pytest.raises(ValidationError, match="provide exactly one"):
         CancelScheduledTaskInput()

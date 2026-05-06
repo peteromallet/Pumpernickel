@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -63,6 +63,8 @@ def _temporal_context(timezone_name: str | None, now_utc: datetime | None = None
     now = now.astimezone(UTC)
     tz = _timezone_or_utc(timezone_name)
     now_local = now.astimezone(tz)
+    local_day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_day_end = local_day_start + timedelta(days=1)
     return {
         "now_utc": now.isoformat(),
         "now_local": now_local.isoformat(),
@@ -70,6 +72,10 @@ def _temporal_context(timezone_name: str | None, now_utc: datetime | None = None
         "local_date": now_local.date().isoformat(),
         "local_time": now_local.strftime("%H:%M:%S"),
         "local_weekday": now_local.strftime("%A"),
+        "local_day_start": local_day_start.isoformat(),
+        "local_day_end": local_day_end.isoformat(),
+        "local_day_start_utc": local_day_start.astimezone(UTC).isoformat(),
+        "local_day_end_utc": local_day_end.astimezone(UTC).isoformat(),
     }
 
 
@@ -522,7 +528,8 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
             f"- local_date: {_clip(hc.temporal_context.get('local_date'), clip_limit)}",
             f"- local_time: {_clip(hc.temporal_context.get('local_time'), clip_limit)}",
             f"- local_weekday: {_clip(hc.temporal_context.get('local_weekday'), clip_limit)}",
-            "- scheduling_note: Default to scheduling tool delay fields for simple duration phrases like 'in two hours', 'in 10 hours', or 'in two days'. Use absolute datetimes only for concrete clock/calendar times or calendar-relative phrases resolved against now_local.",
+            f"- local_day_bounds: {_clip(hc.temporal_context.get('local_day_start'), clip_limit)} to {_clip(hc.temporal_context.get('local_day_end'), clip_limit)} (UTC {_clip(hc.temporal_context.get('local_day_start_utc'), clip_limit)} to {_clip(hc.temporal_context.get('local_day_end_utc'), clip_limit)})",
+            "- scheduling_note: Default to scheduling tool delay fields for simple duration phrases like 'in two hours', 'in 10 hours', or 'in two days'. Use local_when for concrete local clock phrases like '9pm tonight' or 'Monday at 8'. Use absolute when only for exact timezone-aware instants.",
         ]
     lines += [
         "",

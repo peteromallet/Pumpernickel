@@ -699,3 +699,53 @@ async def test_send_message_part_withholds_internal_process_narration(
     assert result.reason and "internal process" in result.reason
     assert sent == []
     get_settings.cache_clear()
+
+
+async def test_send_message_part_withholds_step_transition_narration(
+    fake_pool,
+    app_env,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    user = _user(fake_pool)
+    partner = _user(fake_pool)
+    turn_id = uuid4()
+    fake_pool.bot_turns[turn_id] = {
+        "id": turn_id,
+        "reasoning": "",
+        "completed_at": None,
+        "failure_reason": None,
+        "triggering_message_ids": [],
+        "final_output_message_id": None,
+    }
+    sent: list[str] = []
+
+    async def send_text(to, body, *, send_typing_indicator=True):
+        sent.append(body)
+        return {"messages": [{"id": "discord-out"}]}
+
+    monkeypatch.setattr("app.services.discord.send_text", send_text)
+
+    ctx = TurnContext(
+        turn_id=turn_id,
+        pool=fake_pool,
+        user=user,
+        partner=partner,
+        triggering_message_ids=[],
+        turn_started_at=datetime.now(UTC),
+        incremental_sending_enabled=True,
+        send_typing_indicator=False,
+        before_paced_send=None,
+        sent_message_parts=[],
+    )
+
+    result = await send_message_part(ctx, SendMessagePartInput(content="Now at the schedule step."))
+
+    assert result.status == "withheld"
+    assert result.visible_to_user is False
+    assert result.reason and "internal process" in result.reason
+    assert sent == []
+    get_settings.cache_clear()

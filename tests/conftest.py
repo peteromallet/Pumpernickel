@@ -107,6 +107,7 @@ class FakePool:
         self.users = {}
         self.messages = {}
         self.bot_turns = {}
+        self.turn_audit_events = []
         self.llm_spend_log = {}
         self.tool_calls = []
         self.memories = {}
@@ -365,6 +366,39 @@ class FakePool:
             }
             self.bot_turns[row["id"]] = row
             return {"id": row["id"], "started_at": row["started_at"]}
+        if compact.startswith("INSERT INTO turn_audit_events"):
+            (
+                turn_id,
+                event_type,
+                step,
+                severity,
+                occurred_at,
+                duration_ms,
+                actor,
+                message,
+                metadata,
+                sensitive_metadata_encrypted,
+            ) = args
+            event_seq = 1 + max(
+                [row["event_seq"] for row in self.turn_audit_events if row["turn_id"] == turn_id],
+                default=0,
+            )
+            row = {
+                "id": uuid4(),
+                "turn_id": turn_id,
+                "event_seq": event_seq,
+                "event_type": event_type,
+                "step": step,
+                "severity": severity,
+                "occurred_at": occurred_at,
+                "duration_ms": duration_ms,
+                "actor": actor,
+                "message": message,
+                "metadata": _coerce_jsonb(metadata) or {},
+                "sensitive_metadata_encrypted": sensitive_metadata_encrypted,
+            }
+            self.turn_audit_events.append(row)
+            return {"id": row["id"], "event_seq": event_seq}
         if compact.startswith("INSERT INTO public.eval_runs"):
             prompt_version, scenarios_passed, scenarios_failed, total_cost_usd, git_sha, notes = args
             row = {
@@ -1535,11 +1569,47 @@ class FakePool:
             return rows[:20]
         if "FROM users" in compact and "onboarding_state" in compact:
             return list(self.users.values())
+        if compact.startswith("SELECT event_seq") and "FROM turn_audit_events" in compact:
+            turn_id = args[0] if args else None
+            rows = [
+                {
+                    "event_seq": row["event_seq"],
+                    "event_type": row["event_type"],
+                    "step": row["step"],
+                    "severity": row["severity"],
+                    "occurred_at": row["occurred_at"],
+                    "duration_ms": row["duration_ms"],
+                    "actor": row["actor"],
+                    "message": row["message"],
+                    "metadata": row["metadata"],
+                }
+                for row in self.turn_audit_events
+                if turn_id is None or str(row.get("turn_id")) == str(turn_id)
+            ]
+            rows.sort(key=lambda row: row["event_seq"])
+            return rows
         if "FROM bot_turns" in compact:
             rows = []
             for turn in self.bot_turns.values():
                 trigger = self.messages.get(turn.get("triggered_by_message_id"))
                 outbound = self.messages.get(turn.get("final_output_message_id"))
+                audit_events = [
+                    {
+                        "id": row["id"],
+                        "turn_id": row["turn_id"],
+                        "event_seq": row["event_seq"],
+                        "event_type": row["event_type"],
+                        "step": row["step"],
+                        "severity": row["severity"],
+                        "occurred_at": row["occurred_at"],
+                        "duration_ms": row["duration_ms"],
+                        "actor": row["actor"],
+                        "message": row["message"],
+                        "metadata": row["metadata"],
+                    }
+                    for row in self.turn_audit_events
+                    if row["turn_id"] == turn["id"]
+                ]
                 rows.append(
                     {
                         **turn,
@@ -1547,6 +1617,7 @@ class FakePool:
                         "triggering_content": trigger.get("content") if trigger else None,
                         "final_outbound_content": outbound.get("content") if outbound else None,
                         "tool_calls": [tc for tc in self.tool_calls if tc["turn_id"] == turn["id"]],
+                        "audit_events": audit_events,
                     }
                 )
             rows.sort(key=lambda row: row["started_at"], reverse=True)

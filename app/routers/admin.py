@@ -142,6 +142,17 @@ async def turn_detail(turn_id: str, pool: Any = Depends(get_pool), _: None = Dep
     if not rows:
         raise HTTPException(status_code=404)
     row = rows[0]
+    audit_events = await _fetch(
+        pool,
+        """
+        SELECT event_seq, event_type, step, severity, occurred_at, duration_ms, actor, message, metadata
+        FROM turn_audit_events
+        WHERE turn_id = $1::uuid
+        ORDER BY event_seq
+        """,
+        turn_id,
+    )
+    row["audit_events"] = audit_events
     body = "".join(f"<h2>{_esc(key)}</h2><pre>{_esc(value)}</pre>" for key, value in row.items())
     return _page("Turn Detail", body)
 

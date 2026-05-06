@@ -551,6 +551,10 @@ def test_render_hot_context_includes_current_time_for_relative_scheduling(monkey
             "local_date": "2026-05-06",
             "local_time": "12:00:00",
             "local_weekday": "Wednesday",
+            "local_day_start": "2026-05-06T00:00:00+02:00",
+            "local_day_end": "2026-05-07T00:00:00+02:00",
+            "local_day_start_utc": "2026-05-05T22:00:00+00:00",
+            "local_day_end_utc": "2026-05-06T22:00:00+00:00",
         },
         conversation_load={"period": "today", "timezone": "Europe/Berlin", "total_count": 1, "inbound_count": 1, "outbound_count": 0},
         active_oob=[],
@@ -568,7 +572,9 @@ def test_render_hot_context_includes_current_time_for_relative_scheduling(monkey
     assert "## Current time" in text
     assert "now_utc: 2026-05-06T10:00:00+00:00" in text
     assert "now_local: 2026-05-06T12:00:00+02:00" in text
+    assert "local_day_bounds: 2026-05-06T00:00:00+02:00 to 2026-05-07T00:00:00+02:00" in text
     assert "Default to scheduling tool delay fields" in text
+    assert "Use local_when for concrete local clock phrases" in text
     get_settings.cache_clear()
 
 

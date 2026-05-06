@@ -22,6 +22,7 @@ from app.services.spend import is_under_cap, record_llm_cost
 from app.services.crypto import encrypt_value
 from app.services.text_safety import clean_user_facing_text
 from app.services.tools.registry import STEP_ALLOWED_TOOLS, call_tool, to_anthropic_tools
+from app.services.turn_audit import record_turn_event
 from app.services.turn_plan import TurnPlan, make_turn_plan, orient_summary, pick_default_skeleton
 from app.services.turn_context import BeforePacedSend, TurnContext, partner_of
 
@@ -531,6 +532,13 @@ async def _complete_turn(
         tool_call_count,
         turn_id,
     )
+    await record_turn_event(
+        pool,
+        turn_id,
+        "turn.completed",
+        duration_ms=duration_ms,
+        metadata={"final_output_message_id": final_output_message_id, "tool_call_count": tool_call_count},
+    )
 
 
 async def _record_turn_final_output(pool: Any, turn_id: UUID, final_output_message_id: UUID) -> None:
@@ -549,6 +557,13 @@ async def _fail_turn(pool: Any, turn_id: UUID | None, failure_reason: str) -> No
     if turn_id is None:
         return
     await pool.execute("UPDATE bot_turns SET failure_reason=$1 WHERE id=$2", failure_reason, turn_id)
+    await record_turn_event(
+        pool,
+        turn_id,
+        "turn.failed",
+        severity="error",
+        metadata={"failure_reason": failure_reason},
+    )
 
 
 async def _defer_for_text_cap(pool: Any, user: User, message_ids: list[UUID]) -> bool:
@@ -686,6 +701,18 @@ async def _run_agentic(
             settings.conversational_model,
             selected_prompt_version,
         )
+        await record_turn_event(
+            active_pool,
+            turn_id,
+            "turn.opened",
+            metadata={
+                "triggered_by_message_id": triggering_message_ids[0] if triggering_message_ids else None,
+                "triggering_message_count": len(triggering_message_ids),
+                "user_in_context": user.id,
+                "model_version": settings.conversational_model,
+                "system_prompt_version": selected_prompt_version,
+            },
+        )
         charge = _trigger_charge(hot_context)
         explicit_partner_alert_requested = _explicit_partner_alert_requested(hot_context)
         hot_context_signals = _build_hot_context_signals(hot_context)
@@ -740,14 +767,42 @@ async def _run_agentic(
 
         while turn_plan.current != "done":
             ctx.current_step = turn_plan.current
-            step_text, messages, step_tool_count = await run_step(
-                None,
-                ctx,
-                system_prompt,
-                rendered_hot_context,
-                _allowed_tools_for_step(ctx),
-                messages,
-                max_tool_iterations=STEP_ITERATION_CAPS.get(ctx.current_step, 4),
+            step_started_at = datetime.now(UTC)
+            await record_turn_event(
+                active_pool,
+                turn_id,
+                "step.started",
+                step=ctx.current_step,
+                metadata={"skeleton_name": turn_plan.skeleton_name},
+            )
+            try:
+                step_text, messages, step_tool_count = await run_step(
+                    None,
+                    ctx,
+                    system_prompt,
+                    rendered_hot_context,
+                    _allowed_tools_for_step(ctx),
+                    messages,
+                    max_tool_iterations=STEP_ITERATION_CAPS.get(ctx.current_step, 4),
+                )
+            except Exception as exc:
+                await record_turn_event(
+                    active_pool,
+                    turn_id,
+                    "step.failed",
+                    step=ctx.current_step,
+                    severity="error",
+                    duration_ms=max(0, int((datetime.now(UTC) - step_started_at).total_seconds() * 1000)),
+                    metadata={"exception_type": type(exc).__name__},
+                )
+                raise
+            await record_turn_event(
+                active_pool,
+                turn_id,
+                "step.completed",
+                step=ctx.current_step,
+                duration_ms=max(0, int((datetime.now(UTC) - step_started_at).total_seconds() * 1000)),
+                metadata={"tool_call_count": step_tool_count, "assistant_text_present": bool(step_text)},
             )
             tool_call_count += step_tool_count
 
@@ -762,7 +817,14 @@ async def _run_agentic(
                 sent_parts = ctx.sent_message_parts or []
                 final_output_message_id = sent_parts[-1]["message_id"] if sent_parts else final_output_message_id
                 responded_to_user = responded_to_user or bool(sent_parts)
-                if assistant_text:
+                if sent_parts and assistant_text:
+                    await _append_reasoning(
+                        active_pool,
+                        turn_id,
+                        "Suppressed final respond text because send_message_part already delivered user-visible text.",
+                    )
+                    assistant_text = ""
+                elif assistant_text:
                     assistant_text = clean_user_facing_text(assistant_text)
                     reaction_emoji, assistant_text = _extract_reaction_directive(assistant_text)
                     if reaction_emoji is not None:
@@ -774,7 +836,18 @@ async def _run_agentic(
                         dyad_owner_ids = [user.id, partner.id]
                         sendable_text = await _resolve_outbound_text(active_pool, turn_id, user, assistant_text, dyad_owner_ids)
                         already_sent = [part["content"] for part in sent_parts]
-                        if sendable_text and sendable_text not in already_sent:
+                        if sendable_text is None:
+                            await record_turn_event(
+                                active_pool,
+                                turn_id,
+                                "outbound.withheld",
+                                step=ctx.current_step,
+                                severity="warning",
+                                actor="delivery",
+                                message="Final outbound was not sendable after safety checks.",
+                                metadata={"reason": "safety_check"},
+                            )
+                        elif sendable_text and sendable_text not in already_sent:
                             if await _newer_inbound_exists(
                                 active_pool,
                                 user,
@@ -785,6 +858,16 @@ async def _run_agentic(
                                     active_pool,
                                     turn_id,
                                     "Final outbound skipped because a newer inbound message arrived before send.",
+                                )
+                                await record_turn_event(
+                                    active_pool,
+                                    turn_id,
+                                    "outbound.withheld",
+                                    step=ctx.current_step,
+                                    severity="warning",
+                                    actor="delivery",
+                                    message="Final outbound skipped because a newer inbound arrived.",
+                                    metadata={"reason": "newer_inbound_before_send"},
                                 )
                                 assistant_text = ""
                             else:
@@ -820,9 +903,27 @@ async def _run_agentic(
                                         turn_id,
                                         "Final outbound skipped because a newer inbound message arrived during paced send.",
                                     )
+                                    await record_turn_event(
+                                        active_pool,
+                                        turn_id,
+                                        "outbound.withheld",
+                                        step=ctx.current_step,
+                                        severity="warning",
+                                        actor="delivery",
+                                        message="Final outbound skipped because a newer inbound arrived during paced send.",
+                                        metadata={"reason": "newer_inbound_during_send"},
+                                    )
                                     assistant_text = ""
                                 else:
                                     await _record_turn_final_output(active_pool, turn_id, final_output_message_id)
+                                    await record_turn_event(
+                                        active_pool,
+                                        turn_id,
+                                        "outbound.sent",
+                                        step=ctx.current_step,
+                                        actor="delivery",
+                                        metadata={"message_id": final_output_message_id, "send_kind": "final"},
+                                    )
                                     await claim_onboarding_welcome(active_pool, user.id)
                                     assistant_text = sendable_text
                                     responded_to_user = True

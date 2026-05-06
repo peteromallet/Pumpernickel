@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -47,6 +47,7 @@ from tool_schemas import (
     ScheduleCheckinInput,
     ScheduleDelay,
     ScheduleTaskInput,
+    LocalScheduleTime,
     SearchMessagesInput,
     SearchEmojisInput,
     SendBridgeCandidateInput,
@@ -335,6 +336,38 @@ async def test_scheduled_task_tools_accept_relative_delay(tool_ctx):
     scheduled_for = tool_ctx.pool.scheduled_jobs[created.job_id]["scheduled_for"]
 
     assert before + timedelta(days=2) <= scheduled_for <= datetime.now(UTC) + timedelta(days=2, seconds=1)
+
+
+async def test_scheduled_task_and_update_accept_local_berlin_clock_time(tool_ctx):
+    berlin_user = User(tool_ctx.user.id, tool_ctx.user.name, tool_ctx.user.phone, "Europe/Berlin")
+    berlin_ctx = TurnContext(
+        tool_ctx.turn_id,
+        tool_ctx.pool,
+        berlin_user,
+        tool_ctx.partner,
+        tool_ctx.triggering_message_ids,
+        current_step=tool_ctx.current_step,
+    )
+
+    created = await write_tools.schedule_task(
+        berlin_ctx,
+        ScheduleTaskInput(
+            brief="Internal agent task for 9pm Berlin.",
+            local_when=LocalScheduleTime(date=date(2036, 5, 6), time=time(21, 0)),
+        ),
+    )
+
+    assert tool_ctx.pool.scheduled_jobs[created.job_id]["scheduled_for"] == datetime(2036, 5, 6, 19, 0, tzinfo=UTC)
+
+    updated = await write_tools.update_scheduled_task(
+        berlin_ctx,
+        UpdateScheduledTaskInput(
+            task_id=created.task_id,
+            local_when=LocalScheduleTime(date=date(2036, 5, 7), time=time(9, 30), timezone="Europe/Berlin"),
+        ),
+    )
+
+    assert updated.scheduled_for == datetime(2036, 5, 7, 7, 30, tzinfo=UTC)
 
 
 async def test_scheduled_task_current_task_update_and_cancel_mutate_current_row(tool_ctx):
@@ -1176,6 +1209,36 @@ async def test_schedule_checkin_accepts_relative_delay(tool_ctx):
     assert before + timedelta(days=2) <= scheduled_for <= datetime.now(UTC) + timedelta(days=2, seconds=1)
 
 
+async def test_schedule_checkin_accepts_local_berlin_clock_time(tool_ctx):
+    berlin_user = User(tool_ctx.user.id, tool_ctx.user.name, tool_ctx.user.phone, "Europe/Berlin")
+    berlin_ctx = TurnContext(
+        tool_ctx.turn_id,
+        tool_ctx.pool,
+        berlin_user,
+        tool_ctx.partner,
+        tool_ctx.triggering_message_ids,
+        current_step=tool_ctx.current_step,
+    )
+
+    exact_2026_conversion = write_tools._local_when_to_utc(
+        berlin_ctx,
+        LocalScheduleTime(date=date(2026, 5, 6), time=time(21, 0)),
+    )
+    assert exact_2026_conversion == datetime(2026, 5, 6, 19, 0, tzinfo=UTC)
+
+    result = await write_tools.schedule_checkin(
+        berlin_ctx,
+        ScheduleCheckinInput(
+            user_id=berlin_user.id,
+            local_when=LocalScheduleTime(date=date(2036, 5, 6), time=time(21, 0)),
+            about_what="the 9pm conversation",
+            reason="user asked for a check-in at local 9pm",
+        ),
+    )
+
+    assert tool_ctx.pool.scheduled_jobs[result.job_id]["scheduled_for"] == datetime(2036, 5, 6, 19, 0, tzinfo=UTC)
+
+
 async def test_schedule_checkin_rejects_naive_datetime(tool_ctx):
     with pytest.raises(ValueError):
         ScheduleCheckinInput(
@@ -1661,6 +1724,22 @@ async def test_get_bot_actions_includes_trigger_and_outbound_content(tool_ctx):
         triggering_message_ids=[inbound_id],
     )
     tool_ctx.pool.tool_calls.append({"turn_id": tool_ctx.turn_id, "tool_name": "escalate_to_partner", "arguments": {}, "result": {}, "called_at": datetime.now(UTC), "duration_ms": 1})
+    tool_ctx.pool.turn_audit_events.append(
+        {
+            "id": uuid4(),
+            "turn_id": tool_ctx.turn_id,
+            "event_seq": 1,
+            "event_type": "outbound.sent",
+            "step": "respond",
+            "severity": "info",
+            "occurred_at": datetime.now(UTC),
+            "duration_ms": 2,
+            "actor": "delivery",
+            "message": None,
+            "metadata": {"message_id": outbound_id},
+            "sensitive_metadata_encrypted": b"raw ciphertext",
+        }
+    )
 
     result = await call_tool("get_bot_actions", {"target_type": "escalation"}, tool_ctx)
 
@@ -1668,6 +1747,8 @@ async def test_get_bot_actions_includes_trigger_and_outbound_content(tool_ctx):
     assert action["triggering_content"] == "why did you tell her that?"
     assert action["final_outbound_content"] == "because you asked me to"
     assert action["tool_calls"][0]["tool_name"] == "escalate_to_partner"
+    assert any(event["event_type"] == "outbound.sent" for event in action["audit_events"])
+    assert "raw ciphertext" not in str(action["audit_events"])
 
 
 async def test_get_bot_actions_filters_distillation_target(tool_ctx):

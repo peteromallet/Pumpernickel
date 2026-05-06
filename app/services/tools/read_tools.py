@@ -792,7 +792,30 @@ async def get_bot_actions(ctx: TurnContext, args: GetBotActionsInput) -> GetBotA
                COALESCE(
                  jsonb_agg(to_jsonb(tc) ORDER BY tc.called_at) FILTER (WHERE tc.id IS NOT NULL),
                  '[]'::jsonb
-               ) AS tool_calls
+               ) AS tool_calls,
+               COALESCE(
+                 (
+                   SELECT jsonb_agg(
+                     jsonb_build_object(
+                       'id', tae.id,
+                       'turn_id', tae.turn_id,
+                       'event_seq', tae.event_seq,
+                       'event_type', tae.event_type,
+                       'step', tae.step,
+                       'severity', tae.severity,
+                       'occurred_at', tae.occurred_at,
+                       'duration_ms', tae.duration_ms,
+                       'actor', tae.actor,
+                       'message', tae.message,
+                       'metadata', tae.metadata
+                     )
+                     ORDER BY tae.event_seq
+                   )
+                   FROM turn_audit_events tae
+                   WHERE tae.turn_id = bt.id
+                 ),
+                 '[]'::jsonb
+               ) AS audit_events
         FROM bot_turns bt
         LEFT JOIN messages tm ON tm.id = bt.triggered_by_message_id
         LEFT JOIN messages om ON om.id = bt.final_output_message_id
@@ -816,6 +839,7 @@ async def get_bot_actions(ctx: TurnContext, args: GetBotActionsInput) -> GetBotA
                 final_outbound_content=row["final_outbound_content"],
                 reasoning=row["reasoning"],
                 tool_calls=list(row["tool_calls"] or []),
+                audit_events=list(row.get("audit_events") or []),
             )
             for row in rows
         ]

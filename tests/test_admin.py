@@ -93,6 +93,22 @@ def test_admin_pages_and_turn_detail_render_escaped_read_only(monkeypatch) -> No
         "tool_call_count": 1,
     }
     pool.tool_calls.append({"turn_id": turn_id, "tool_name": "log_feedback", "arguments": {}, "result": {}, "called_at": datetime.now(UTC), "duration_ms": 1})
+    pool.turn_audit_events.append(
+        {
+            "id": uuid4(),
+            "turn_id": turn_id,
+            "event_seq": 1,
+            "event_type": "turn.opened",
+            "step": None,
+            "severity": "info",
+            "occurred_at": datetime.now(UTC),
+            "duration_ms": None,
+            "actor": "system",
+            "message": None,
+            "metadata": {"triggering_message_count": 1},
+            "sensitive_metadata_encrypted": b"encrypted raw text",
+        }
+    )
     client = _client(monkeypatch, pool)
 
     for path in ["/admin", "/admin/turns", f"/admin/turns/{turn_id}", "/admin/messages", "/admin/spend", "/admin/audit"]:
@@ -104,6 +120,8 @@ def test_admin_pages_and_turn_detail_render_escaped_read_only(monkeypatch) -> No
     assert "prompt_snapshot" in detail.text
     assert "because" in detail.text
     assert "log_feedback" in detail.text
+    assert "turn.opened" in detail.text
+    assert "encrypted raw text" not in detail.text
     assert "&lt;script&gt;bad()&lt;/script&gt;" in client.get("/admin/messages", auth=("admin", "correct-password")).text
     get_settings.cache_clear()
 

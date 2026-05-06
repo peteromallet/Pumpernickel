@@ -156,6 +156,26 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
     assert turn["completed_at"] is not None
     assert "reason note" in turn["reasoning"]
     assert "write note" in turn["reasoning"]
+    audit_events = [
+        (event["event_seq"], event["event_type"], event["step"], event["metadata"])
+        for event in fake_pool.turn_audit_events
+        if event["turn_id"] == turn["id"]
+    ]
+    assert [event_type for _, event_type, _, _ in audit_events] == [
+        "turn.opened",
+        "step.started",
+        "step.completed",
+        "step.started",
+        "step.completed",
+        "outbound.sent",
+        "step.started",
+        "step.completed",
+        "step.started",
+        "step.completed",
+        "turn.completed",
+    ]
+    assert [seq for seq, _, _, _ in audit_events] == list(range(1, len(audit_events) + 1))
+    assert not any("I hear you" in str(metadata) for _, _, _, metadata in audit_events)
 
 
 async def test_run_agentic_turn_with_metadata_seeds_compact_pacing_context(fake_pool, app_env, monkeypatch):
@@ -575,6 +595,91 @@ async def test_run_agentic_send_message_part_is_visible_to_record_step(fake_pool
     assert "You actually sent 2 messages" in schedule_seed[0]
     assert "1. That sounds bleak." in schedule_seed[0]
     assert "2. What feels most impossible about it tonight?" in schedule_seed[0]
+    assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
+    get_settings.cache_clear()
+
+
+async def test_run_agentic_suppresses_residual_text_after_send_message_part(fake_pool, app_env, monkeypatch):
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    monkeypatch.setenv("DISCORD_MULTI_MESSAGE_DELAY_S", "0")
+    get_settings.cache_clear()
+    user = User(uuid4(), "Maya", "456", "UTC")
+    partner = User(uuid4(), "Ben", "789", "UTC")
+    fake_pool.users[user.id] = {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "timezone": user.timezone,
+        "onboarding_state": "pending",
+    }
+    fake_pool.users[partner.id] = {
+        "id": partner.id,
+        "name": partner.name,
+        "phone": partner.phone,
+        "timezone": partner.timezone,
+        "onboarding_state": "pending",
+    }
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "Can you schedule a message for me at 9pm to have a conversation about this?",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "discord-in-schedule",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    sent = []
+
+    async def fake_discord_send(to, body, *, send_typing_indicator=True):
+        sent.append((to, body, send_typing_indicator))
+        return {"messages": [{"id": f"discord-out-{len(sent)}"}]}
+
+    async def fake_final_send(*args, **kwargs):
+        raise AssertionError("residual final assistant text should not be sent")
+
+    async def fake_run_step(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages, **kwargs):
+        if ctx.current_step == "respond":
+            result = await call_tool(
+                "send_message_part",
+                {"content": "I'll check in with you at 9pm tonight and we can talk through it properly then."},
+                ctx,
+            )
+            assert result["status"] == "sent"
+            return "Now at the schedule step.", [{"role": "assistant", "content": "process leak"}], 1
+        return "", [], 0
+
+    monkeypatch.setattr(agentic, "run_step", fake_run_step)
+    monkeypatch.setattr(agentic, "send_outbound", fake_final_send)
+    monkeypatch.setattr("app.services.discord.send_text", fake_discord_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user)
+
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert sent == [
+        (
+            "456",
+            "I'll check in with you at 9pm tonight and we can talk through it properly then.",
+            True,
+        )
+    ]
+    assert fake_pool.messages[turn["final_output_message_id"]]["content"] == (
+        "I'll check in with you at 9pm tonight and we can talk through it properly then."
+    )
+    assert (
+        "Suppressed final respond text because send_message_part already delivered user-visible text."
+        in turn["reasoning"]
+    )
     assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
     get_settings.cache_clear()
 

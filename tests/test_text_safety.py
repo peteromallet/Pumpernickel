@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services.text_safety import (
     clean_user_facing_text,
     looks_like_internal_process_text,
@@ -70,4 +72,21 @@ def test_clean_user_facing_text_drops_whole_paragraph_with_internal_line():
 
 def test_clean_user_facing_text_id_reference_alone_is_internal():
     text = "Update memory `abcdef12` and move on."
+    assert clean_user_facing_text(text) == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Now at the schedule step.",
+        "Current step: schedule",
+        "Next step: record",
+        "Turn plan: respond -> schedule -> done",
+        "Read step complete.",
+        "Respond step: send the reply.",
+        "Record step: no durable update needed.",
+        "Consult step skipped.",
+    ],
+)
+def test_clean_user_facing_text_drops_internal_orchestration_narration(text):
     assert clean_user_facing_text(text) == ""

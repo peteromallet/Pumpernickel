@@ -7,6 +7,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel
 
@@ -58,6 +59,7 @@ from tool_schemas import (
     LogFeedbackOutput,
     LogObservationInput,
     LogObservationOutput,
+    LocalScheduleTime,
     ReactToMessageInput,
     ReactToMessageOutput,
     ReviseDistillationInput,
@@ -1174,7 +1176,7 @@ async def lift_oob(ctx: TurnContext, args: LiftOOBInput) -> LiftOOBOutput:
 
 async def schedule_checkin(ctx: TurnContext, args: ScheduleCheckinInput) -> ScheduleCheckinOutput:
     started = _start()
-    scheduled_for = _scheduled_for_from_when_or_delay(args.when, args.delay)
+    scheduled_for = _scheduled_for_from_schedule_fields(ctx, args.when, args.delay, args.local_when)
     old, row = await schedule_checkin_record(
         ctx.pool,
         args.user_id,
@@ -1226,9 +1228,34 @@ def _delay_delta(delay: ScheduleDelay) -> timedelta:
     return timedelta(weeks=delay.weeks, days=delay.days, hours=delay.hours, minutes=delay.minutes)
 
 
-def _scheduled_for_from_when_or_delay(when: datetime | None, delay: ScheduleDelay | None) -> datetime:
+def _timezone_for_local_schedule(ctx: TurnContext, timezone_name: str | None) -> ZoneInfo:
+    requested = timezone_name or getattr(ctx.user, "timezone", None) or "UTC"
+    try:
+        return ZoneInfo(str(requested))
+    except ZoneInfoNotFoundError as exc:
+        raise ToolCallRejected({"error": "invalid_timezone", "timezone": str(requested)}) from exc
+
+
+def _local_when_to_utc(ctx: TurnContext, local_when: LocalScheduleTime) -> datetime:
+    tz = _timezone_for_local_schedule(ctx, local_when.timezone)
+    local_dt = datetime.combine(local_when.date, local_when.time).replace(tzinfo=tz)
+    return local_dt.astimezone(UTC)
+
+
+def _scheduled_for_from_local_when(ctx: TurnContext, local_when: LocalScheduleTime) -> datetime:
+    return _future_utc(_local_when_to_utc(ctx, local_when), field_name="local_when")
+
+
+def _scheduled_for_from_schedule_fields(
+    ctx: TurnContext,
+    when: datetime | None,
+    delay: ScheduleDelay | None,
+    local_when: LocalScheduleTime | None,
+) -> datetime:
     if delay is not None:
         return datetime.now(UTC) + _delay_delta(delay)
+    if local_when is not None:
+        return _scheduled_for_from_local_when(ctx, local_when)
     if when is None:
         raise ToolCallRejected({"error": "missing_schedule_time", "field": "when"})
     return _future_utc(when)
@@ -1305,7 +1332,7 @@ async def schedule_task(ctx: TurnContext, args: ScheduleTaskInput) -> ScheduleTa
     started = _start()
     task_id = uuid4()
     recurrence = _scheduled_task_recurrence_payload(args.recurrence)
-    scheduled_for = _scheduled_for_from_when_or_delay(args.when, args.delay)
+    scheduled_for = _scheduled_for_from_schedule_fields(ctx, args.when, args.delay, args.local_when)
     context = _scheduled_task_context(task_id=task_id, brief=args.brief, recurrence=recurrence)
     row = await ctx.pool.fetchrow(
         """
@@ -1336,8 +1363,8 @@ async def update_scheduled_task(ctx: TurnContext, args: UpdateScheduledTaskInput
     started = _start()
     target_job_id, target_task_id = _scheduled_task_target(args, ctx)
     scheduled_for = (
-        _scheduled_for_from_when_or_delay(args.when, args.delay)
-        if args.when is not None or args.delay is not None
+        _scheduled_for_from_schedule_fields(ctx, args.when, args.delay, args.local_when)
+        if args.when is not None or args.delay is not None or args.local_when is not None
         else None
     )
     context_patch: dict[str, Any] = {}
