@@ -23,6 +23,7 @@ from app.models.user import User
 from app.services.turn_context import TurnContext
 from app.services.inbound import ResolvedScope
 from tests._scope_helpers import (
+    _bot_spec_mediator,
     make_mediator_ctx,
     make_resolved_scope,
     StampingFakePool,
@@ -121,7 +122,7 @@ class TestStampingScopeColumns:
 
     def test_turn_context_has_all_scope_fields(self):
         """TurnContext has bot_id, bot_spec, dyad_id, primary_topic_id, etc."""
-        ctx = make_mediator_ctx()
+        ctx = make_mediator_ctx(bot_spec=_bot_spec_mediator())
         assert ctx.bot_id == "mediator"
         assert ctx.bot_spec is not None
         assert ctx.primary_topic_id is not None
@@ -140,7 +141,7 @@ class TestStampingScopeColumns:
 
     def test_consult_perspective_copies_scope(self):
         """consult_perspective.py:105 copies scope verbatim from parent ctx."""
-        ctx = make_mediator_ctx()
+        ctx = make_mediator_ctx(bot_spec=_bot_spec_mediator())
         # Simulate the copy-pattern used in consult_perspective.py
         sub_ctx = TurnContext(
             turn_id=uuid4(),
@@ -167,7 +168,7 @@ class TestStampingScopeColumns:
 
     def test_bridge_candidates_dyad_id(self):
         """bridge_candidates uses ctx.dyad_id, not ctx.binding_id."""
-        ctx = make_mediator_ctx()
+        ctx = make_mediator_ctx(bot_spec=_bot_spec_mediator())
         # The plan specifies dyad_id=ctx.dyad_id for bridge_candidates
         dyad = ctx.dyad_id
         binding = ctx.binding_id
@@ -184,7 +185,7 @@ class TestBotTurnsStamping:
 
     def test_bot_turns_has_version_columns(self):
         """bot_turns INSERT in agentic.py:483 includes bot_spec_version, etc."""
-        ctx = make_mediator_ctx()
+        ctx = make_mediator_ctx(bot_spec=_bot_spec_mediator())
         bot_spec_ver = _compute_bot_spec_version(ctx.bot_spec)
         # hot_context_builder_version comes from ctx.bot_spec
         hcbv = ctx.bot_spec.hot_context_builder_version
@@ -214,7 +215,7 @@ class TestDeferredTurnStamping:
 
     def test_deferred_turn_context_has_bot_id(self):
         """The context_payload for deferred turns includes bot_id/topic_id."""
-        ctx = make_mediator_ctx()
+        ctx = make_mediator_ctx(bot_spec=_bot_spec_mediator())
         # In _defer_for_text_cap, context_payload includes bot_id when set
         context_payload = {
             "triggering_message_ids": [str(ctx.triggering_message_ids[0])],

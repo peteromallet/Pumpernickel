@@ -1340,6 +1340,20 @@ class FakePool:
                 and (bot_id_filter is None or row.get("bot_id") == bot_id_filter or row.get("bot_id") is None)
                 for row in self.messages.values()
             )
+        if compact.startswith("SELECT m.whatsapp_message_id FROM messages m JOIN user_identities ui ON ui.user_id = m.sender_id"):
+            identifier = args[0]
+            rows = [
+                message
+                for message in self.messages.values()
+                if message.get("direction") == "inbound"
+                and message.get("whatsapp_message_id") is not None
+                # In test FakePool, user_identities rows mirror users.phone,
+                # so fall through to matching the identifier against users.
+                and self.users.get(message.get("sender_id"), {}).get("phone") == identifier
+            ]
+            if not rows:
+                return None
+            return max(rows, key=lambda row: row["sent_at"])["whatsapp_message_id"]
         if compact.startswith("SELECT m.whatsapp_message_id FROM messages m JOIN users u ON u.id = m.sender_id"):
             phone = args[0]
             rows = [

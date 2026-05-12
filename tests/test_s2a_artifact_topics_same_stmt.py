@@ -11,7 +11,7 @@ import pytest
 from uuid import uuid4
 
 from tests.conftest import FakePool
-from tests._scope_helpers import StampingFakePool, make_mediator_ctx
+from tests._scope_helpers import StampingFakePool, _bot_spec_mediator, make_mediator_ctx
 
 ARTIFACT_TABLES = [
     "memories",
@@ -85,7 +85,7 @@ class TestArtifactTopicsRealPaths:
         """add_memory in write_tools.py includes INSERT INTO artifact_topics in CTE."""
         real_pool = FakePool()
         pool = StampingFakePool(real_pool)
-        ctx = make_mediator_ctx(pool=pool)
+        ctx = make_mediator_ctx(bot_spec=_bot_spec_mediator(), pool=pool)
         about_user = ctx.partner
 
         # The add_memory function uses the CTE pattern.

@@ -1,17 +1,19 @@
-"""Dual-key BurstCoalescer tests.
+"""S2b coalescer tests: bot_id-required contract.
 
-Verifies:
-- (user_id, bot_id) composite keys flush correctly
-- (user_id, None) legacy keys flush correctly
-- Composite-first lookup, legacy fallback
-- TODO(S2b) markers present
+Verifies the post-S2b contract:
+- add() raises TypeError when bot_id is omitted
+- CompositeKey is tuple[UUID, str] (non-nullable)
+- Composite-key lookup works in _fire_batch
+- No legacy (user_id, None) fallback exists
+- No TODO(S2b) markers remain
 """
 
 from __future__ import annotations
 
 import asyncio
+from uuid import UUID, uuid4
+
 import pytest
-from uuid import uuid4
 
 from app.services.debouncer import BurstCoalescer, CompositeKey
 from app.models.user import User
@@ -25,41 +27,40 @@ def _user(uid=None):
     return User(id=uid or uuid4(), name="Test", phone="1", timezone="UTC")
 
 
-class TestDualKeyComposite:
-    """Composite key (user_id, bot_id) works correctly."""
+class TestCoalescerBotIdRequired:
+    """Bot ID required contract — omission raises TypeError."""
 
     @pytest.mark.asyncio
-    async def test_add_with_bot_id(self):
-        """add() with bot_id uses composite key."""
-        called = []
-        async def on_burst(msg_ids, user):
-            called.append((msg_ids, user))
-
-        coalescer = BurstCoalescer(on_burst, debounce_seconds=0.01, max_seconds=0.02)
-        user = _user()
-        msg_id = uuid4()
-
-        await coalescer.add(user.id, msg_id, user, bot_id="custom_bot")
-        await asyncio.sleep(0.05)
-        await coalescer._fire(user.id)
-        await asyncio.sleep(0.05)
-
-    @pytest.mark.asyncio
-    async def test_add_with_none_bot_id(self):
-        """add() without bot_id uses legacy (user_id, None) key."""
+    async def test_add_requires_bot_id(self):
+        """add() without bot_id keyword raises TypeError."""
         coalescer = BurstCoalescer(_noop, debounce_seconds=0.01, max_seconds=0.02)
         user = _user()
         msg_id = uuid4()
 
-        await coalescer.add(user.id, msg_id, user, bot_id=None)
-        # The key should be (user_id, None)
-        keys = list(coalescer._bursts.keys())
-        assert any(k[1] is None for k in keys), f"Expected legacy key (None), got {keys}"
+        with pytest.raises(TypeError):
+            await coalescer.add(user.id, msg_id, user)
 
     @pytest.mark.asyncio
-    async def test_composite_first_lookup(self):
-        """Composite-first lookup finds (user_id, bot_id) keys."""
+    async def test_composite_key_is_tuple_uuid_str(self):
+        """CompositeKey is tuple[UUID, str] — no None in type."""
+        coalescer = BurstCoalescer(_noop, debounce_seconds=0.01, max_seconds=0.02)
+        user = _user()
+        msg_id = uuid4()
+
+        await coalescer.add(user.id, msg_id, user, bot_id="custom_bot")
+        keys = list(coalescer._bursts.keys())
+        assert keys, "Expected at least one key"
+        for k in keys:
+            assert isinstance(k, tuple), f"Expected tuple key, got {type(k)}"
+            assert len(k) == 2, f"Expected 2-tuple, got len {len(k)}"
+            assert isinstance(k[0], UUID), f"Expected UUID, got {type(k[0])}"
+            assert isinstance(k[1], str), f"Expected str bot_id, got {type(k[1])}"
+
+    @pytest.mark.asyncio
+    async def test_fire_batch_finds_composite_key(self):
+        """_fire_batch finds and fires bursts via composite-key lookup."""
         called = []
+
         async def on_burst(msg_ids, user):
             called.append(msg_ids)
 
@@ -71,48 +72,26 @@ class TestDualKeyComposite:
         await asyncio.sleep(0.05)
         await coalescer._fire(user.id)
         await asyncio.sleep(0.05)
-        # The composite key (user.id, 'bot_a') should have been found
-        # and the burst fired.
 
-    @pytest.mark.asyncio
-    async def test_legacy_fallback(self):
-        """When no composite key matches, legacy (user_id, None) is tried."""
-        called = []
-        async def on_burst(msg_ids, user):
-            called.append(msg_ids)
+        assert called == [[msg_id]], f"Expected [[msg_id]], got {called}"
 
-        coalescer = BurstCoalescer(on_burst, debounce_seconds=0.01, max_seconds=0.02)
-        user = _user()
-        msg_id = uuid4()
-
-        # Add with bot_id=None (legacy)
-        await coalescer.add(user.id, msg_id, user, bot_id=None)
-        await asyncio.sleep(0.05)
-        await coalescer._fire(user.id)
-        await asyncio.sleep(0.05)
-
-    @pytest.mark.asyncio
-    async def test_both_keys_coexist(self):
-        """Both (user_id, 'bot_a') and (user_id, None) can exist simultaneously."""
-        coalescer = BurstCoalescer(_noop, debounce_seconds=0.01, max_seconds=0.02)
-        user = _user()
-
-        await coalescer.add(user.id, uuid4(), user, bot_id="bot_a")
-        await coalescer.add(user.id, uuid4(), user, bot_id=None)
-
-        keys = list(coalescer._bursts.keys())
-        has_bot_a = any(k == (user.id, "bot_a") for k in keys)
-        has_none = any(k == (user.id, None) for k in keys)
-        assert has_bot_a, f"Expected (user_id, 'bot_a') key, got {keys}"
-        assert has_none, f"Expected (user_id, None) key, got {keys}"
-
-
-class TestDualKeyTodoMarkers:
-    """TODO(S2b) markers exist for legacy-fallback sites."""
-
-    def test_debouncer_has_todo_s2b(self):
-        """debouncer.py contains TODO(S2b) comments."""
+    def test_no_legacy_fallback(self):
+        """No legacy (user_id, None) fallback in debouncer.py source."""
         content = open("app/services/debouncer.py").read()
-        assert "# TODO(S2b): drop legacy (user_id, None) fallback" in content, (
-            "debouncer.py must have TODO(S2b) markers for legacy fallback removal"
+        assert "# --- Legacy fallback: (user_id, None) ---" not in content, (
+            "debouncer.py must not contain legacy fallback block"
+        )
+        assert "Legacy fallback" not in content, (
+            "debouncer.py must not contain legacy fallback comment"
+        )
+        # Confirm no legacy lookup in _fire_batch (no key with None bot_id)
+        assert "# --- Legacy" not in content, (
+            "debouncer.py must not contain legacy section headers"
+        )
+
+    def test_no_todo_s2b_markers(self):
+        """debouncer.py contains zero TODO(S2b) markers."""
+        content = open("app/services/debouncer.py").read()
+        assert "TODO(S2b)" not in content, (
+            "debouncer.py must have zero TODO(S2b) markers"
         )

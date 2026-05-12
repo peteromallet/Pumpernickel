@@ -624,7 +624,7 @@ async def _newer_inbound_exists(
     triggering_message_ids: list[UUID],
     *,
     fallback_started_at: datetime | None = None,
-    bot_id: str | None = None,
+    bot_id: str,
 ) -> bool:
     boundary = fallback_started_at
     if triggering_message_ids:
@@ -646,7 +646,7 @@ async def _newer_inbound_exists(
                   AND sender_id=$1
                   AND sent_at > $2
                   AND NOT (id = ANY($3::uuid[]))
-                  AND (bot_id = $4 OR bot_id IS NULL)
+                  AND bot_id = $4
             )
             """,
             user.id,

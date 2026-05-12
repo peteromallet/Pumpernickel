@@ -22,7 +22,7 @@ async def test_rapid_messages_coalesce_to_one_burst() -> None:
     coalescer = BurstCoalescer(callback, debounce_seconds=0.01, max_seconds=0.1)
     ids = [uuid4() for _ in range(5)]
     for message_id in ids:
-        await coalescer.add(user.id, message_id, user)
+        await coalescer.add(user.id, message_id, user, bot_id="mediator")
 
     await asyncio.sleep(0.03)
     assert calls == [(ids, user)]
@@ -37,12 +37,12 @@ async def test_max_window_forces_second_burst() -> None:
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
     coalescer = BurstCoalescer(callback, debounce_seconds=0.04, max_seconds=0.06)
     first = [uuid4(), uuid4()]
-    await coalescer.add(user.id, first[0], user)
+    await coalescer.add(user.id, first[0], user, bot_id="mediator")
     await asyncio.sleep(0.03)
-    await coalescer.add(user.id, first[1], user)
+    await coalescer.add(user.id, first[1], user, bot_id="mediator")
     await asyncio.sleep(0.05)
     second = uuid4()
-    await coalescer.add(user.id, second, user)
+    await coalescer.add(user.id, second, user, bot_id="mediator")
     await asyncio.sleep(0.06)
 
     assert calls == [first, [second]]
@@ -119,7 +119,7 @@ async def test_paced_answer_callback_receives_decision_and_source() -> None:
     )
     message_id = uuid4()
 
-    await coalescer.add(user.id, message_id, user, source="catch_up")
+    await coalescer.add(user.id, message_id, user, source="catch_up", bot_id="mediator")
     await asyncio.sleep(0.03)
 
     assert legacy_calls == []
@@ -155,7 +155,7 @@ async def test_live_typing_starts_during_coalescing_and_stops_before_answer() ->
     )
     message_id = uuid4()
 
-    await coalescer.add(user.id, message_id, user, source="live")
+    await coalescer.add(user.id, message_id, user, source="live", bot_id="mediator")
     await asyncio.sleep(0.03)
 
     assert typing_calls == [(user, False), (user, True)]
@@ -191,7 +191,7 @@ async def test_paced_burst_preserves_high_safety_source_semantics(sources: list[
     )
 
     for message_id, source in zip(ids, sources, strict=True):
-        await coalescer.add(user.id, message_id, user, source=source)
+        await coalescer.add(user.id, message_id, user, source=source, bot_id="mediator")
     await asyncio.sleep(0.03)
 
     assert pacer.calls == [(user, ids, expected_source)]
@@ -219,8 +219,8 @@ async def test_paced_wait_reschedules_without_losing_message_ids() -> None:
     )
     ids = [uuid4(), uuid4()]
 
-    await coalescer.add(user.id, ids[0], user)
-    await coalescer.add(user.id, ids[1], user)
+    await coalescer.add(user.id, ids[0], user, bot_id="mediator")
+    await coalescer.add(user.id, ids[1], user, bot_id="mediator")
     await asyncio.sleep(0.06)
 
     assert paced_calls == [(ids, user, second_decision)]
@@ -251,7 +251,7 @@ async def test_paced_react_or_silence_marks_processed_without_agentic_turn(fake_
         on_paced_reaction=paced_reaction,
     )
 
-    await coalescer.add(user.id, message_id, user)
+    await coalescer.add(user.id, message_id, user, bot_id="mediator")
     await asyncio.sleep(0.03)
 
     assert answer_calls == []

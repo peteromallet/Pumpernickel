@@ -32,14 +32,14 @@ def _bot_spec_mediator() -> BotSpec:
 
 
 def make_mediator_ctx(
-    bot_spec: BotSpec | None = None,
+    bot_spec: BotSpec,
     **overrides: Any,
 ) -> TurnContext:
     """Build a TurnContext with mediator defaults, including dyad_id.
 
     Override any field via keyword arguments.
     """
-    bs = bot_spec or _bot_spec_mediator()
+    bs = bot_spec
     user = User(
         id=uuid4(),
         name="TestUser",

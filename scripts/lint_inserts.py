@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Advisory INSERT linter for S2a — flags missing scope/artifact-topic columns.
+"""INSERT linter — flags missing bot_id/topic_id in scope-stamp tables and
+missing artifact_topics links for artifact tables.
 
 Walks ``app/`` files and scans SQL string literals for INSERT statements against
 scope-stamp tables (messages, bot_turns, scheduled_jobs, feedback,
@@ -12,9 +13,7 @@ Scope-stamp tables: flags INSERTs missing ``bot_id`` / ``topic_id`` (and
 Artifact tables: flags INSERTs lacking an ``INSERT INTO artifact_topics`` clause
 in the same SQL string (substring check, not structural).
 
-Exit code is *always* 0 in S2a (advisory-only).  S2b will make this blocking.
-
-# TODO(S2b): make blocking — exit with non-zero when violations exist.
+Exits non-zero when violations exist.
 
 Usage:
     python scripts/lint_inserts.py           # scan app/ directory
@@ -277,7 +276,7 @@ def scan_directory(root: Path) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Advisory INSERT linter for S2a — flags missing bot_id/topic_id "
+        description="INSERT linter — flags missing bot_id/topic_id "
         "in scope-stamp tables and missing artifact_topics links for artifact tables."
     )
     parser.add_argument(
@@ -288,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Suppress output; exit 0 unconditionally",
+        help="Suppress output",
     )
     return parser
 
@@ -304,9 +303,7 @@ def main() -> None:
         root = script_dir / args.dir
         if not root.is_dir():
             print(f"error: directory '{args.dir}' not found", file=sys.stderr)
-            # Advisory — exit 0 in S2a.
-            # TODO(S2b): make blocking — exit with non-zero.
-            sys.exit(0)
+            sys.exit(1)
 
     violations = scan_directory(root)
 
@@ -318,13 +315,11 @@ def main() -> None:
             print("lint_inserts: no violations found", file=sys.stderr)
         else:
             print(
-                f"lint_inserts: {len(violations)} violation(s) found (advisory — S2a)",
+                f"lint_inserts: {len(violations)} violation(s) found",
                 file=sys.stderr,
             )
 
-    # Always exit 0 in S2a (advisory).
-    # TODO(S2b): make blocking — sys.exit(1 if violations else 0)
-    sys.exit(0)
+    sys.exit(1 if violations else 0)
 
 
 if __name__ == "__main__":

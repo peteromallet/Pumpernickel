@@ -91,7 +91,7 @@ async def handle_voice(
             )
             await record_llm_cost(pool, "transcription", 0.001)
             if should_enqueue:
-                await coalescer.add(user.id, message_id, user, source="media")
+                await coalescer.add(user.id, message_id, user, source="media", bot_id='mediator')
             return
         except Exception as exc:
             last_error = exc

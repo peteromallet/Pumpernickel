@@ -1,11 +1,11 @@
-"""Advisory INSERT linter tests.
+"""INSERT linter tests — blocking mode.
 
 Verifies:
 - lint_inserts.py parses with --help
 - Scans scope-stamp tables and artifact tables
 - Output format is path:line: kind: message
 - Detects violations in fixture strings
-- Always exits 0 in S2a
+- Exits non-zero on violations
 """
 
 from __future__ import annotations
@@ -162,11 +162,11 @@ class TestLintOutputFormat:
             assert len(parts) >= 3, f"Expected path:line: kind: message, got: {line}"
 
 
-class TestLintAlwaysExitsZero:
-    """Exit code is always 0 in S2a."""
+class TestLintExitsNonzeroOnViolations:
+    """Exits non-zero on violations."""
 
     def test_exits_zero_with_violations(self, tmp_path):
-        """Even with violations, exits 0 in S2a (advisory)."""
+        """With violations, exits 1 (blocking mode)."""
         test_file = tmp_path / "test_file.py"
         test_file.write_text('INSERT_STMT = "INSERT INTO messages (direction) VALUES (1)"')
 
@@ -174,22 +174,15 @@ class TestLintAlwaysExitsZero:
             [sys.executable, LINT_SCRIPT, "--dir", str(tmp_path)],
             capture_output=True, text=True,
         )
-        assert result.returncode == 0, f"Should exit 0 in S2a, got {result.returncode}"
+        assert result.returncode == 1, f"Should exit 1 on violations, got {result.returncode}"
 
     def test_exits_zero_clean(self, tmp_path):
-        """Clean scan also exits 0."""
+        """Clean scan exits 0."""
         result = subprocess.run(
             [sys.executable, LINT_SCRIPT, "--dir", str(tmp_path)],
             capture_output=True, text=True,
         )
         assert result.returncode == 0, f"Should exit 0, got {result.returncode}"
-
-    def test_todo_s2b_comment(self):
-        """lint_inserts.py contains # TODO(S2b): make blocking."""
-        content = open(LINT_SCRIPT).read()
-        assert "TODO(S2b)" in content, (
-            "lint_inserts.py must have TODO(S2b) marker for blocking mode"
-        )
 
 
 class TestAllArtifactTables:

@@ -513,9 +513,10 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, limit: i
             """
             SELECT m.whatsapp_message_id
             FROM messages m
-            JOIN users u ON u.id = m.sender_id
+            JOIN user_identities ui ON ui.user_id = m.sender_id
             WHERE m.direction='inbound'
-              AND u.phone=$1
+              AND ui.transport='legacy'
+              AND ui.identifier=$1
               AND m.whatsapp_message_id IS NOT NULL
             ORDER BY m.sent_at DESC
             LIMIT 1

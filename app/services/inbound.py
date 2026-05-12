@@ -109,21 +109,18 @@ async def _handle_reaction(
                      extra={"bot_id": bot_id or "mediator", "topic_id": str(topic_id) if topic_id else None})
         return
     emoji = reaction.get("emoji")
-    # NOTE: bot_id/topic_id kwargs are accepted and wired but the INSERT keeps
-    # NULL literals for now — FakePool (conftest.py, locked dirty file) only
-    # handles 4- or 6-arg feedback INSERTs with fixed positions.  In production
-    # (real asyncpg) swapping NULL→$5,$6 activates the stamping.
-    # TODO(S2b): activate after FakePool extension or conftest.py unlock.
     await pool.fetchrow(
         """
         INSERT INTO feedback (from_user_id, target_type, target_id, sentiment, content, source, bot_id, topic_id)
-        VALUES ($1, 'message', $2, $3, $4, 'reaction', NULL, NULL)
+        VALUES ($1, 'message', $2, $3, $4, 'reaction', $5, $6)
         RETURNING id
         """,
         user_id,
         target_id,
         _reaction_sentiment(emoji),
         emoji,
+        bot_id,
+        topic_id,
     )
 
 

@@ -1,9 +1,10 @@
-"""Dual-key newer-inbound suppression tests.
+"""bot_id-only newer-inbound suppression tests.
 
 Verifies:
-- EXISTS query includes (bot_id = $ OR bot_id IS NULL) filter
-- The IS NULL half catches legacy boundary rows
-- Both agentic.py and read_tools.py suppression paths include the filter
+- EXISTS query includes `bot_id = $4` filter (bot_id IS NULL removed)
+- Both agentic.py and read_tools.py suppression paths use the bot_id-only filter
+- _newer_inbound_exists requires `bot_id: str` (no default, no None)
+- No `bot_id IS NULL` residues remain
 """
 
 from __future__ import annotations
@@ -11,59 +12,75 @@ from __future__ import annotations
 import pytest
 
 
-class TestSuppressionDualKeyExists:
-    """Verify the EXISTS subquery contains the dual-key filter."""
+class TestSuppressionBotIdOnlyFilter:
+    """Verify the EXISTS subquery contains the bot_id-only filter."""
 
     def test_agentic_suppression_has_bot_id_filter(self):
-        """agentic.py _newer_inbound_exists includes (bot_id = $4 OR bot_id IS NULL)."""
+        """agentic.py _newer_inbound_exists includes `bot_id = $4`, NOT `OR bot_id IS NULL`."""
         content = open("app/services/agentic.py").read()
-        assert "(bot_id = $4 OR bot_id IS NULL)" in content, (
-            "agentic.py suppression query must filter by bot_id OR bot_id IS NULL"
+        assert "bot_id = $4" in content, (
+            "agentic.py suppression query must filter by bot_id = $4"
+        )
+        assert "OR bot_id IS NULL" not in content, (
+            "agentic.py must NOT contain legacy OR bot_id IS NULL fallback"
         )
 
     def test_read_tools_suppression_has_bot_id_filter(self):
-        """read_tools.py incremental-send suppression includes the filter."""
+        """read_tools.py incremental-send suppression includes the bot_id-only filter."""
         content = open("app/services/tools/read_tools.py").read()
-        assert "(bot_id = $4 OR bot_id IS NULL)" in content or "(bot_id = $ N OR bot_id IS NULL)" in content, (
-            "read_tools.py suppression query must filter by bot_id OR bot_id IS NULL"
+        assert ("bot_id = $4" in content or "bot_id = $ N" in content), (
+            "read_tools.py suppression query must filter by bot_id"
+        )
+        assert "OR bot_id IS NULL" not in content, (
+            "read_tools.py must NOT contain legacy OR bot_id IS NULL fallback"
         )
 
-    def test_suppression_accepts_bot_id_parameter(self):
-        """_newer_inbound_exists in agentic.py accepts bot_id parameter."""
+    def test_suppression_requires_bot_id_parameter(self):
+        """_newer_inbound_exists in agentic.py requires `bot_id: str` (no default, no None)."""
         content = open("app/services/agentic.py").read()
-        assert "bot_id: str | None = None" in content, (
-            "_newer_inbound_exists must accept bot_id parameter"
+        # Find _newer_inbound_exists function signature specifically
+        lines = content.split("\n")
+        in_func = False
+        func_lines = []
+        for line in lines:
+            if "async def _newer_inbound_exists" in line:
+                in_func = True
+            if in_func:
+                func_lines.append(line)
+                if in_func and line.strip().endswith(":"):
+                    if not line.strip().startswith("async def"):
+                        break
+                    if len(func_lines) > 1 and func_lines[-1].strip() == ") -> bool:":
+                        break
+                    # Continue collecting until we see the end of the signature
+                    if line.strip() == ") -> bool:":
+                        break
+                if line.strip().endswith(") -> bool:") or line.strip() == ") -> bool:":
+                    break
+                if in_func and len(func_lines) > 10:
+                    break
+        func_sig = "\n".join(func_lines)
+        assert "bot_id: str" in func_sig, (
+            f"_newer_inbound_exists must require bot_id: str, got sig:\n{func_sig}"
+        )
+        assert "bot_id: str | None = None" not in func_sig, (
+            f"_newer_inbound_exists must NOT have a None default, got sig:\n{func_sig}"
+        )
+
+    def test_no_null_bot_id_filter(self):
+        """bot_id IS NULL must be absent from both agentic.py and read_tools.py."""
+        agentic_content = open("app/services/agentic.py").read()
+        read_tools_content = open("app/services/tools/read_tools.py").read()
+        assert "bot_id IS NULL" not in agentic_content, (
+            "agentic.py must NOT contain bot_id IS NULL"
+        )
+        assert "bot_id IS NULL" not in read_tools_content, (
+            "read_tools.py must NOT contain bot_id IS NULL"
         )
 
     def test_call_sites_pass_bot_id(self):
         """Call sites of _newer_inbound_exists pass bot_id=ctx.bot_id."""
         content = open("app/services/agentic.py").read()
-        # At least one call site passes bot_id
         assert "bot_id=ctx.bot_id" in content, (
             "call sites must pass bot_id=ctx.bot_id to _newer_inbound_exists"
-        )
-
-
-class TestLegacyBoundaryRows:
-    """IS NULL catches legacy rows written before the stamping deploy."""
-
-    def test_null_bot_id_is_caught(self):
-        """Messages with bot_id=NULL must be caught by the IS NULL filter."""
-        # This is a semantic test: the SQL filter (bot_id = $4 OR bot_id IS NULL)
-        # ensures that rows inserted before the stamping deploy (NULL bot_id)
-        # are still considered part of the suppression check.
-        #
-        # We verify this by checking the actual SQL pattern in the code.
-        content = open("app/services/agentic.py").read()
-        # The full pattern around the suppression query
-        assert "bot_id IS NULL" in content, (
-            "IS NULL is required to catch legacy boundary rows"
-        )
-
-    def test_both_bot_id_filter_arms_present(self):
-        """The filter has both bot_id= and bot_id IS NULL arms."""
-        content = open("app/services/agentic.py").read()
-        # Should find both parts of the OR
-        assert "bot_id =" in content and "bot_id IS NULL" in content, (
-            "Both arms of the dual-key filter must be present"
         )

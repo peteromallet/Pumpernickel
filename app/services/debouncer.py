@@ -11,9 +11,8 @@ from resident_chat_runtime.coalescing import AsyncBurstCoalescer, BurstBatch
 from app.models.user import User
 from app.services.pacer import PacingDecision
 
-# Composite key type for the dual-key transition:
-# (user_id, bot_id_or_None) — bot_id=None is the legacy key.
-CompositeKey = tuple[UUID, str | None]
+# Composite key type: (user_id, bot_id).  bot_id is always required.
+CompositeKey = tuple[UUID, str]
 
 
 @dataclass
@@ -21,8 +20,8 @@ class _Burst:
     message_ids: list[UUID]
     user: User
     first_seen_at: float
+    bot_id: str
     source: str = "live"
-    bot_id: str | None = None
 
 
 class BurstCoalescer:
@@ -55,7 +54,7 @@ class BurstCoalescer:
             max_delay=max_seconds,
         )
 
-    async def add(self, user_id: UUID, message_id: UUID, user: User, *, source: str = "live", bot_id: str | None = None) -> None:
+    async def add(self, user_id: UUID, message_id: UUID, user: User, *, source: str = "live", bot_id: str) -> None:
         key: CompositeKey = (user_id, bot_id)
         loop = asyncio.get_running_loop()
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -92,7 +91,7 @@ class BurstCoalescer:
         composite_key: CompositeKey | None = None
         burst: _Burst | None = None
         for (uid, _bot_id), candidate in list(self._bursts.items()):
-            if uid == user_id and _bot_id is not None:
+            if uid == user_id:
                 composite_key = (uid, _bot_id)
                 burst = candidate
                 break
@@ -104,15 +103,6 @@ class BurstCoalescer:
                 if burst is not None:
                     await self._handle_ready_burst(user_id, burst)
             return
-
-        # --- Legacy fallback: (user_id, None) ---
-        # TODO(S2b): drop legacy (user_id, None) fallback
-        legacy_key: CompositeKey = (user_id, None)
-        lock = self._locks.setdefault(legacy_key, asyncio.Lock())
-        async with lock:
-            burst = self._bursts.pop(legacy_key, None)
-            if burst is not None:
-                await self._handle_ready_burst(user_id, burst)
 
     def snapshot(self) -> dict[UUID, Any]:
         # Maintain backward compat: expose bursts keyed by user_id for callers
@@ -135,7 +125,6 @@ class BurstCoalescer:
         if decision.action == "wait":
             # Re-store under the burst's original composite key so the wait-task
             # can find it later.
-            # TODO(S2b): drop legacy (user_id, None) fallback
             rekey: CompositeKey = (user_id, burst.bot_id)
             self._bursts[rekey] = burst
             self._wait_tasks[rekey] = asyncio.create_task(self._fire_after_wait(rekey, max(0.0, decision.wait_s)))

@@ -170,7 +170,7 @@ async def _newer_inbound_exists(ctx: TurnContext) -> bool:
                   AND sender_id=$1
                   AND sent_at > $2
                   AND NOT (id = ANY($3::uuid[]))
-                  AND (bot_id = $4 OR bot_id IS NULL)
+                  AND bot_id = $4
             )
             """,
             ctx.user.id,
