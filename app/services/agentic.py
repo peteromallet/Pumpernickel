@@ -722,6 +722,7 @@ async def _run_agentic(
             hot_context = await build_hot_context_solo(
                 active_pool, user, triggering_message_ids, trigger_metadata,
                 primary_topic_id=primary_topic_id, bot_id=bot_spec.bot_id,
+                allow_cross_topic_peek=getattr(bot_spec.read_scopes, 'allow_cross_topic_peek', False),
             )
             rendered_hot_context = render_hot_context_solo(hot_context)
         else:
@@ -729,6 +730,8 @@ async def _run_agentic(
             hot_context = await build_hot_context(
                 active_pool, user, partner, triggering_message_ids, trigger_metadata,
                 primary_topic_id=primary_topic_id,
+                allow_cross_topic_peek=getattr(bot_spec.read_scopes, 'allow_cross_topic_peek', False),
+                allow_cross_topic_status_injection=getattr(bot_spec.read_scopes, 'allow_cross_topic_status_injection', False),
             )
             rendered_hot_context = render_hot_context(hot_context)
         system_prompt = bot_spec.render_system_prompt(
@@ -1110,8 +1113,7 @@ async def _run_agentic(
 
 async def run_agentic_turn(triggering_message_ids: list[UUID], user: User) -> None:
     if not triggering_message_ids:
-        # obs N/A: wrapper (no ctx)
-        logger.warning("run_agentic_turn called without triggering messages for user_id=%s", user.id)
+        logger.warning("run_agentic_turn called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
         return
     await _run_agentic(triggering_message_ids, user)
 
@@ -1125,8 +1127,7 @@ async def run_agentic_turn_with_metadata(
     before_paced_send: BeforePacedSend | None = None,
 ) -> None:
     if not triggering_message_ids:
-        # obs N/A: wrapper (no ctx)
-        logger.warning("run_agentic_turn_with_metadata called without triggering messages for user_id=%s", user.id)
+        logger.warning("run_agentic_turn_with_metadata called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
         return
     await _run_agentic(
         triggering_message_ids,
@@ -1148,8 +1149,7 @@ async def run_agentic_turn_with_pool(
     prompt_version: str,
 ) -> None:
     if not triggering_message_ids:
-        # obs N/A: wrapper (no ctx)
-        logger.warning("run_agentic_turn_with_pool called without triggering messages for user_id=%s", user.id)
+        logger.warning("run_agentic_turn_with_pool called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
         return
     await _run_agentic(triggering_message_ids, user, pool=pool, prompt_version=prompt_version)
 

@@ -108,3 +108,129 @@ def check_write_scope(ctx: Any) -> str | None:
     return (
         f"write_scope_denied: primary='{primary}' not in {sorted(topics)}"
     )
+
+
+# ── Multi-topic write helpers (S6) ──────────────────────────────────────────
+
+
+class ToolCallRejected(ValueError):
+    """Raised when a tool call fails scope/reason checks."""
+
+
+def resolve_write_topic_slugs(ctx: Any, requested: list[str] | None) -> list[str]:
+    """Resolve requested topic_slugs list for a write call.
+
+    * None → [ctx.primary_topic_slug] (default single-topic path).
+    * 'own' sentinel → ctx.primary_topic_slug.
+    * Deduplicates AFTER resolving 'own' (so ['own','career'] with
+      primary='career' → ['career']).
+    * None-permissive: when write_scopes is None, all slugs pass and
+      primary_topic_slug is not required (matches check_write_scope semantics).
+    * Otherwise, every slug must be in write_scopes.topics OR resolved via
+      'own' (slug == primary_topic_slug), raising ToolCallRejected on any
+      out-of-scope slug (NO silent drop).
+    """
+    primary = getattr(ctx, "primary_topic_slug", None)
+
+    # None-permissive: legacy fixtures without scopes
+    scopes = getattr(ctx, "write_scopes", None)
+    if scopes is None:
+        if requested is None:
+            if primary is not None:
+                return [primary]
+            return []
+        resolved: list[str] = []
+        for slug in requested:
+            resolved.append(primary if slug == "own" else slug)
+        seen: set[str] = set()
+        unique: list[str] = []
+        for slug in resolved:
+            if slug not in seen and slug is not None:
+                seen.add(slug)
+                unique.append(slug)
+        return unique
+
+    if primary is None:
+        raise ToolCallRejected("resolve_write_topic_slugs: ctx has no primary_topic_slug")
+
+    if requested is None:
+        return [primary]
+
+    # Resolve 'own' sentinel
+    resolved: list[str] = []
+    for slug in requested:
+        if slug == "own":
+            resolved.append(primary)
+        else:
+            resolved.append(slug)
+
+    # Deduplicate after resolution
+    seen: set[str] = set()
+    unique: list[str] = []
+    for slug in resolved:
+        if slug not in seen:
+            seen.add(slug)
+            unique.append(slug)
+
+    # Authorization check
+    scopes = getattr(ctx, "write_scopes", None)
+    if scopes is None:
+        return unique
+    topics = scopes.topics
+    if "all" in topics:
+        return unique
+
+    for slug in unique:
+        if slug in topics:
+            continue
+        if "own" in topics and slug == primary:
+            continue
+        raise ToolCallRejected(
+            f"write_scope_denied: topic_slug='{slug}' not in write_scopes.topics={sorted(topics)} "
+            f"(primary={primary})"
+        )
+
+    return unique
+
+
+def require_reason_for_cross_topic(
+    slugs: list[str],
+    primary: str,
+    reason: str | None,
+) -> None:
+    """Raise ToolCallRejected if this is a cross-topic write without a non-empty reason.
+
+    Cross-topic is defined as: (len(set(slugs)) > 1) OR slugs[0] != primary.
+    A reason that is None or whitespace-only is rejected.
+    """
+    if len(slugs) == 0:
+        return  # degenerate, should not happen
+    is_cross_topic = (len(set(slugs)) > 1) or (slugs[0] != primary)
+    if not is_cross_topic:
+        return
+    if reason is None or not reason.strip():
+        raise ToolCallRejected(
+            "cross_topic_write requires a non-empty reason; "
+            f"slugs={slugs}, primary={primary}, reason={reason!r}"
+        )
+
+
+async def resolve_topic_ids(
+    pool: Any,
+    slugs: list[str],
+) -> dict[str, Any]:
+    """Resolve topic slugs to {slug: id} dict, raising for any missing slug.
+
+    Returns a dict mapping each slug to the topic row dict (with 'id' and 'slug' keys).
+    """
+    rows = await pool.fetch(
+        "SELECT id, slug FROM mediator.topics WHERE slug = ANY($1::text[])",
+        slugs,
+    )
+    found: dict[str, Any] = {row["slug"]: row["id"] for row in rows}
+    missing = [s for s in slugs if s not in found]
+    if missing:
+        raise ToolCallRejected(
+            f"resolve_topic_ids: unknown topic slugs: {missing}"
+        )
+    return found

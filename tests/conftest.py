@@ -141,6 +141,12 @@ class FakePool:
         self.artifact_topics: dict[tuple[str, UUID], UUID] = {}
         # S4: topic_status rows keyed by (topic_id, dyad_id) or (topic_id, user_id)
         self.topic_status: dict[tuple[UUID, UUID], dict[str, Any]] = {}
+        # S6: user_bot_state rows keyed by (user_id, bot_id)
+        self.user_bot_state: dict[tuple[UUID, str], dict[str, Any]] = {}
+        # S6: topics rows keyed by slug
+        self.topics: dict[str, dict[str, Any]] = {}
+        # S6 T5: artifact_topics_rows recorded during multi-topic writes
+        self.artifact_topics_rows: list[dict[str, Any]] = []
 
     def link_topic(self, artifact_table: str, artifact_id: UUID, topic_id: UUID) -> None:
         """Register a topic link for an artifact row.
@@ -598,8 +604,8 @@ class FakePool:
             row["updated_at"] = datetime.now(UTC)
             return {**dict(row), "partner_path": row.get("partner_path", "message_partner")}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO memories"):
-            # (about_user_id, content, content_encrypted, related_theme_ids, bot_id, topic_id)
-            about_user_id, content, _content_encrypted, related_theme_ids, _bot_id, _topic_id = args
+            # (about_user_id, content, content_encrypted, related_theme_ids, bot_id, topic_id_list, reason)
+            about_user_id, content, _content_encrypted, related_theme_ids, _bot_id, topic_id_list, reason = args
             row = {
                 "id": uuid4(),
                 "about_user_id": about_user_id,
@@ -611,6 +617,13 @@ class FakePool:
                 "last_referenced_at": None,
             }
             self.memories[row["id"]] = row
+            for tid in list(topic_id_list or []):
+                self.artifact_topics_rows.append({
+                    "artifact_table": "memories",
+                    "artifact_id": row["id"],
+                    "topic_id": tid,
+                    "reason": reason,
+                })
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO memories (about_user_id"):
             # (about_user_id, content, content_encrypted, related_theme_ids)
@@ -649,7 +662,7 @@ class FakePool:
             self.memories[new["id"]] = new
             return {"new_id": new["id"], "old_id": old_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO themes"):
-            title, description, sentiment, health, _bot_id, _topic_id = args
+            title, description, sentiment, health, _bot_id, topic_id_list, reason = args
             row = {
                 "id": uuid4(),
                 "title": title,
@@ -661,6 +674,13 @@ class FakePool:
                 "last_active_at": datetime.now(UTC),
             }
             self.themes[row["id"]] = row
+            for tid in list(topic_id_list or []):
+                self.artifact_topics_rows.append({
+                    "artifact_table": "themes",
+                    "artifact_id": row["id"],
+                    "topic_id": tid,
+                    "reason": reason,
+                })
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO themes"):
             title, description, sentiment, health = args
@@ -681,7 +701,7 @@ class FakePool:
             self.themes.setdefault(theme_id, {"id": theme_id, "status": "active"})
             return {"id": theme_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO watch_items"):
-            owner_user_id, content, due_at, related_theme_ids, _bot_id, _topic_id = args
+            owner_user_id, content, due_at, related_theme_ids, _bot_id, topic_id_list, reason = args
             row = {
                 "id": uuid4(),
                 "owner_user_id": owner_user_id,
@@ -691,6 +711,13 @@ class FakePool:
                 "status": "open",
             }
             self.watch_items[row["id"]] = row
+            for tid in list(topic_id_list or []):
+                self.artifact_topics_rows.append({
+                    "artifact_table": "watch_items",
+                    "artifact_id": row["id"],
+                    "topic_id": tid,
+                    "reason": reason,
+                })
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO watch_items"):
             owner_user_id, content, due_at, related_theme_ids = args
@@ -714,8 +741,8 @@ class FakePool:
             self.watch_items.setdefault(watch_item_id, {"id": watch_item_id})
             return {"id": watch_item_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO observations"):
-            # (content, content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids, bot_id, topic_id)
-            content, _content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids, _bot_id, _topic_id = args
+            # (content, content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids, bot_id, topic_id_list, reason)
+            content, _content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids, _bot_id, topic_id_list, reason = args
             row = {
                 "id": uuid4(),
                 "content": content,
@@ -728,6 +755,13 @@ class FakePool:
                 "status": "active",
             }
             self.observations[row["id"]] = row
+            for tid in list(topic_id_list or []):
+                self.artifact_topics_rows.append({
+                    "artifact_table": "observations",
+                    "artifact_id": row["id"],
+                    "topic_id": tid,
+                    "reason": reason,
+                })
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO observations"):
             # (content, content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids)
@@ -772,7 +806,8 @@ class FakePool:
                 supporting_message_ids,
                 triggering_message_id,
                 _bot_id,
-                _topic_id,
+                topic_id_list,
+                reason,
             ) = args
             row = {
                 "id": uuid4(),
@@ -801,6 +836,13 @@ class FakePool:
                 "retired_at": None,
             }
             self.distillations[row["id"]] = row
+            for tid in list(topic_id_list or []):
+                self.artifact_topics_rows.append({
+                    "artifact_table": "distillations",
+                    "artifact_id": row["id"],
+                    "topic_id": tid,
+                    "reason": reason,
+                })
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO distillations"):
             (
@@ -943,8 +985,8 @@ class FakePool:
             old["updated_at"] = datetime.now(UTC)
             return {"new_id": new["id"], "old_id": old_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO out_of_bounds"):
-            # (owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at, bot_id, topic_id)
-            owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at, _bot_id, _topic_id = args
+            # (owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at, bot_id, topic_id_list, reason)
+            owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at, _bot_id, topic_id_list, reason = args
             row = {
                 "id": uuid4(),
                 "owner_id": owner_id,
@@ -956,6 +998,13 @@ class FakePool:
                 "status": "active",
             }
             self.out_of_bounds[row["id"]] = row
+            for tid in list(topic_id_list or []):
+                self.artifact_topics_rows.append({
+                    "artifact_table": "out_of_bounds",
+                    "artifact_id": row["id"],
+                    "topic_id": tid,
+                    "reason": reason,
+                })
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO out_of_bounds"):
             # (owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at)
@@ -1925,6 +1974,20 @@ class FakePool:
             return rows
         if "FROM scheduled_jobs" in compact:
             return sorted(self.scheduled_jobs.values(), key=lambda row: row["scheduled_for"], reverse=True)[:50]
+        if compact.startswith("SELECT user_id, bot_id, paused, updated_at, onboarding_state FROM mediator.user_bot_state"):
+            # S6: admin user-bot-pauses page. Return rows from self.user_bot_state dict.
+            rows = []
+            for key, row in self.user_bot_state.items():
+                _user_id, _bot_id = key
+                rows.append({
+                    "user_id": _user_id,
+                    "bot_id": _bot_id,
+                    "paused": row.get("paused", False),
+                    "updated_at": row.get("updated_at", datetime.now(UTC)),
+                    "onboarding_state": row.get("onboarding_state", "pending"),
+                })
+            rows.sort(key=lambda r: (r["bot_id"], str(r["user_id"])))
+            return rows
         if "FROM llm_spend_log" in compact:
             rows = []
             for provider, value in self.llm_spend_log.items():
@@ -1933,6 +1996,66 @@ class FakePool:
                 else:
                     rows.append({"provider": provider, "day": datetime.now(UTC).date(), "total_usd": value, "warned_80_at": None})
             return rows
+        if compact.startswith("SELECT id, topic_id, headline, body, last_updated_at FROM topic_status WHERE") and "topic_id <> $2" in compact:
+            # S6: fetch_cross_topic_status — filter by dyad_id or user_id, exclude topic_id.
+            scope_id = args[0]
+            exclude_topic_id = args[1]
+            cap = args[2]
+            rows = []
+            for key, row in self.topic_status.items():
+                _topic_id, _scope = key
+                if _topic_id == exclude_topic_id:
+                    continue
+                if _scope == scope_id:
+                    # Enrich with slug from topics dict
+                    slug = "unknown"
+                    for s, t in self.topics.items():
+                        if t["id"] == _topic_id:
+                            slug = s
+                            break
+                    enriched = dict(row)
+                    enriched["slug"] = slug
+                    rows.append(enriched)
+            rows.sort(key=lambda r: r.get("last_updated_at", datetime.min.replace(tzinfo=UTC)), reverse=True)
+            return rows[:cap]
+        if compact.startswith("SELECT t.id AS topic_id, t.slug, t.display_name, MAX(ts.last_updated_at) AS last_active_at FROM topics t JOIN topic_status ts ON ts.topic_id = t.id WHERE") and "topic_id <> $2" in compact:
+            # S6: peek_other_topics — filter by dyad_id or user_id, exclude topic_id, within window.
+            scope_id = args[0]
+            exclude_topic_id = args[1]
+            since = args[2]
+            cap = args[3]
+            rows = []
+            for key, row in self.topic_status.items():
+                _topic_id, _scope = key
+                if _topic_id == exclude_topic_id:
+                    continue
+                if _scope == scope_id:
+                    last = row.get("last_updated_at")
+                    if last is not None and last >= since:
+                        # Enrich with slug from topics dict
+                        slug = "unknown"
+                        display_name = "Unknown"
+                        for s, t in self.topics.items():
+                            if t["id"] == _topic_id:
+                                slug = s
+                                display_name = t.get("display_name", s)
+                                break
+                        rows.append({
+                            "topic_id": _topic_id,
+                            "slug": slug,
+                            "display_name": display_name,
+                            "last_active_at": last,
+                        })
+            rows.sort(key=lambda r: r.get("last_active_at", datetime.min.replace(tzinfo=UTC)), reverse=True)
+            return rows[:cap]
+        if compact.startswith("SELECT id, slug FROM") and "topics" in compact:
+            slugs = args[0]
+            result = []
+            for slug in slugs:
+                if slug not in self.topics:
+                    self.topics[slug] = {"id": uuid4(), "slug": slug, "display_name": slug.title()}
+                result.append({"id": self.topics[slug]["id"], "slug": slug})
+            return result
         raise AssertionError(f"unhandled fetch SQL: {compact}")
 
     async def execute(self, sql: str, *args) -> str:
@@ -2293,6 +2416,17 @@ class FakePool:
                     "duration_ms": duration_ms,
                 }
             )
+            return "INSERT 0 1"
+        if compact.startswith("INSERT INTO user_bot_state") or compact.startswith("INSERT INTO mediator.user_bot_state"):
+            # S6: set_user_bot_paused — store in self.user_bot_state keyed by (user_id, bot_id).
+            user_id, bot_id, paused = args[:3]
+            self.user_bot_state[(user_id, bot_id)] = {
+                "user_id": user_id,
+                "bot_id": bot_id,
+                "paused": paused,
+                "updated_at": datetime.now(UTC),
+                "onboarding_state": "pending",
+            }
             return "INSERT 0 1"
         if compact.startswith("DELETE FROM llm_spend_log"):
             self.llm_spend_log.clear()

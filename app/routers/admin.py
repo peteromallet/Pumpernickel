@@ -64,6 +64,7 @@ def _page(title: str, body: str) -> str:
             ("escalations", "Escalations"),
             ("evals", "Evals"),
             ("audit", "Audit"),
+            ("user-bot-pauses", "Pauses"),
         ]
     )
     return f"""<!doctype html>
@@ -366,6 +367,35 @@ async def user_bot_pause(
 ) -> dict[str, Any]:
     await set_user_bot_paused(pool, user_id, bot_id, paused)
     return {"user_id": str(user_id), "bot_id": bot_id, "paused": paused}
+
+
+@router.get("/admin/user-bot-pauses", response_class=HTMLResponse)
+async def user_bot_pauses(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin)) -> str:
+    rows = await _fetch(
+        pool,
+        "SELECT user_id, bot_id, paused, updated_at, onboarding_state FROM mediator.user_bot_state ORDER BY bot_id, user_id",
+    )
+    body = "<p>Toggle per-(user, bot) pause state.</p>"
+    if rows:
+        body += "<table><thead><tr><th>user_id</th><th>bot_id</th><th>paused</th><th>updated_at</th><th>onboarding_state</th><th>action</th></tr></thead><tbody>"
+        for row in rows:
+            body += (
+                "<tr>"
+                + "".join(f"<td>{_esc(row.get(col))}</td>" for col in ["user_id", "bot_id", "paused", "updated_at", "onboarding_state"])
+                + (
+                    f'<td><form method="post" action="/admin/user-bot-pause" style="display:inline">'
+                    f'<input type="hidden" name="user_id" value="{_esc(row["user_id"])}">'
+                    f'<input type="hidden" name="bot_id" value="{_esc(row["bot_id"])}">'
+                    f'<input type="hidden" name="paused" value="{str(not row["paused"]).lower()}">'
+                    f'<button type="submit">{"Pause" if not row["paused"] else "Resume"}</button>'
+                    f"</form></td>"
+                )
+                + "</tr>"
+            )
+        body += "</tbody></table>"
+    else:
+        body += "<p>No rows.</p>"
+    return _page("User-Bot Pauses", body)
 
 
 @router.get("/admin/audit", response_class=HTMLResponse)

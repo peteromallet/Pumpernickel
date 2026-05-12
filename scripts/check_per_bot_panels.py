@@ -53,9 +53,10 @@ async def _run(args: argparse.Namespace) -> int:
         if args.bot_id:
             params.append(args.bot_id)
 
+        # turn_audit_events: no top-level bot_id column; extract from metadata JSONB.
         events = await pool.fetch(
             f"""
-            SELECT COALESCE(bot_id, '<null>') AS bot_id, COUNT(*) AS event_count
+            SELECT COALESCE(metadata->>'bot_id', '<null>') AS bot_id, COUNT(*) AS event_count
             FROM turn_audit_events
             WHERE occurred_at >= now() - ($1 || ' hours')::interval
               {bot_filter}
@@ -64,12 +65,14 @@ async def _run(args: argparse.Namespace) -> int:
             """,
             *params,
         )
+        # tool_calls: no top-level bot_id column; JOIN through bot_turns.
         tool_calls = await pool.fetch(
             f"""
-            SELECT COALESCE(bot_id, '<null>') AS bot_id, COUNT(*) AS call_count
-            FROM tool_calls
-            WHERE called_at >= now() - ($1 || ' hours')::interval
-              {bot_filter}
+            SELECT COALESCE(bt.bot_id, '<null>') AS bot_id, COUNT(*) AS call_count
+            FROM tool_calls tc
+            JOIN bot_turns bt ON bt.id = tc.turn_id
+            WHERE tc.called_at >= now() - ($1 || ' hours')::interval
+              {bot_filter.replace('bot_id', 'bt.bot_id')}
             GROUP BY 1
             ORDER BY 1
             """,

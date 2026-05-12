@@ -846,6 +846,8 @@ class AddMemoryInput(BaseModel):
     about_user_id: UUID | None  # None = couple-level
     content: str
     related_theme_ids: list[UUID] = []
+    topic_slugs: list[str] | None = None
+    reason: str | None = None
 
 
 class AddMemoryOutput(WriteCreated):
@@ -885,6 +887,8 @@ class CreateThemeInput(BaseModel):
     health: ThemeHealth = ThemeHealth.tender
     seed_observation_ids: list[UUID] = []
     seed_memory_ids: list[UUID] = []
+    topic_slugs: list[str] | None = None
+    reason: str | None = None
 
 
 class CreateThemeOutput(WriteCreated):
@@ -916,6 +920,8 @@ class AddWatchItemInput(BaseModel):
     content: str
     due_at: datetime | None = None
     related_theme_ids: list[UUID] = []
+    topic_slugs: list[str] | None = None
+    reason: str | None = None
 
 
 class AddWatchItemOutput(WriteCreated):
@@ -959,6 +965,8 @@ class LogObservationInput(BaseModel):
         default=None,
         description="Optional inline score. If omitted, scoring runs as a separate Haiku call.",
     )
+    topic_slugs: list[str] | None = None
+    reason: str | None = None
 
 
 # Agent searches existing observations first and picks log vs update.
@@ -989,6 +997,8 @@ class AddDistillationInput(DistillationEvidenceMixin):
     shareable_summary: str | None = None
     source_user_ids: list[UUID] = Field(min_length=1)
     triggering_message_id: UUID | None = None
+    topic_slugs: list[str] | None = None
+    reason: str | None = None
 
     @model_validator(mode="after")
     def validate_distillation(self) -> "AddDistillationInput":
@@ -1074,6 +1084,8 @@ class AddOOBInput(BaseModel):
     shareable_context: str | None = None
     severity: OOBSeverity
     review_at: datetime | None = None
+    topic_slugs: list[str] | None = None
+    reason: str | None = None
 
 
 class AddOOBOutput(WriteCreated):

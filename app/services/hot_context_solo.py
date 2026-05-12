@@ -16,6 +16,7 @@ from app.models.user import User
 from app.services.text_safety import clean_user_facing_text, looks_like_internal_process_text
 from app.services.time_context import add_calendar_months, temporal_reference, timezone_or_utc
 from app.services.tools.common import media_analysis_text
+from app.services.hot_context import peek_other_topics
 from app.services.topic_filter import join_artifact_topics
 
 
@@ -37,6 +38,7 @@ class HotContextSolo:
     bridge_candidates: list[dict[str, Any]] = field(default_factory=list)
     recent_reactions: list[dict[str, Any]] = field(default_factory=list)
     topic_status: dict[str, Any] | None = None
+    cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -194,6 +196,7 @@ async def build_hot_context_solo(
     *,
     primary_topic_id: UUID,
     bot_id: str,
+    allow_cross_topic_peek: bool = False,
 ) -> HotContextSolo:
     """Build hot context for a solo bot turn.
 
@@ -518,6 +521,16 @@ async def build_hot_context_solo(
         )
     ]
 
+    cross_topic_peek: list[dict[str, Any]] = []
+    if allow_cross_topic_peek:
+        peek_since = now_utc - timedelta(days=14)
+        cross_topic_peek = await peek_other_topics(
+            pool,
+            dyad_id=None,
+            user_id=user.id,
+            exclude_topic_id=primary_topic_id,
+            since=peek_since,
+        )
     return HotContextSolo(
         current_user=current_user,
         partner_user=partner_user,
@@ -533,6 +546,7 @@ async def build_hot_context_solo(
         recent_reactions=recent_reactions,
         recent_messages=recent_messages,
         topic_status=topic_status,
+        cross_topic_peek=cross_topic_peek,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
             **(trigger_metadata or {}),
@@ -607,12 +621,21 @@ def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], cl
             lines.append(f"- body: {_clip(body_text, clip_limit)}")
         lines.append(f"- last_updated_at: {_clip(ts_iso, clip_limit)}")
 
-    # Peek block — explicit empty for solo
-    lines += [
-        "",
-        "## Peek (other topics)",
-        "- (none — solo bot, single topic)",
-    ]
+    # Cross-topic peek for solo
+    if hc.cross_topic_peek:
+        lines += ["", "## Cross-topic activity (peek)"]
+        for item in hc.cross_topic_peek:
+            last_active = item.get("last_active_at")
+            last_iso = last_active.isoformat() if hasattr(last_active, "isoformat") else last_active
+            lines.append(
+                f"- {_clip(item.get('slug'), clip_limit)} ({_clip(item.get('display_name'), clip_limit)}): last_active={_clip(last_iso, clip_limit)}"
+            )
+    else:
+        lines += [
+            "",
+            "## Peek (other topics)",
+            "- (none — solo bot, single topic)",
+        ]
 
     lines += [
         "",
@@ -718,6 +741,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         recent_reactions=list(hc.recent_reactions),
         recent_messages=list(hc.recent_messages),
         topic_status=hc.topic_status,
+        cross_topic_peek=list(hc.cross_topic_peek),
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
     )

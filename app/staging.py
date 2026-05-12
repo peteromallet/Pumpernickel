@@ -44,7 +44,7 @@ async def _replay(pool: Any, prompt_version: str, since: str, user_id: str) -> N
     )
     settings = get_settings()
     for row in rows:
-        hot_context = await build_hot_context(pool, user, partner, [row["id"]], {"kind": "staging_replay"}, primary_topic_id=get_relationship_topic_id())
+        hot_context = await build_hot_context(pool, user, partner, [row["id"]], {"kind": "staging_replay"}, primary_topic_id=get_relationship_topic_id(), allow_cross_topic_peek=True, allow_cross_topic_status_injection=True)
         system_prompt = render_system_prompt(
             settings.assistant_name,
             user.name,

@@ -39,6 +39,8 @@ class HotContext:
     bridge_candidates: list[dict[str, Any]] = field(default_factory=list)
     recent_reactions: list[dict[str, Any]] = field(default_factory=list)
     topic_status: dict[str, Any] | None = None
+    cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
+    cross_topic_status: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -310,6 +312,8 @@ async def build_hot_context(
     *,
     primary_topic_id: UUID | None = None,
     dyad_id: UUID | None = None,
+    allow_cross_topic_peek: bool = False,
+    allow_cross_topic_status_injection: bool = False,
 ) -> HotContext:
     primary_topic = primary_topic_id or get_relationship_topic_id()
     if primary_topic is None:
@@ -650,6 +654,24 @@ async def build_hot_context(
             )
         )
     ]
+    cross_topic_peek: list[dict[str, Any]] = []
+    if allow_cross_topic_peek:
+        peek_since = now_utc - timedelta(days=14)
+        cross_topic_peek = await peek_other_topics(
+            pool,
+            dyad_id=dyad_id,
+            user_id=user.id,
+            exclude_topic_id=primary_topic,
+            since=peek_since,
+        )
+    cross_topic_status: list[dict[str, Any]] = []
+    if allow_cross_topic_status_injection:
+        cross_topic_status = await fetch_cross_topic_status(
+            pool,
+            dyad_id=dyad_id,
+            user_id=user.id,
+            exclude_topic_id=primary_topic,
+        )
     return HotContext(
         current_user=current_user,
         partner_user=partner_user,
@@ -665,6 +687,8 @@ async def build_hot_context(
         recent_reactions=recent_reactions,
         recent_messages=recent_messages,
         topic_status=topic_status,
+        cross_topic_peek=cross_topic_peek,
+        cross_topic_status=cross_topic_status,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
             **(trigger_metadata or {}),
@@ -781,6 +805,23 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
         if body_text:
             lines.append(f"- body: {_clip(body_text, clip_limit)}")
         lines.append(f"- last_updated_at: {_clip(ts_iso, clip_limit)}")
+    if hc.cross_topic_peek:
+        lines += ["", "## Cross-topic activity (peek)"]
+        for item in hc.cross_topic_peek:
+            last_active = item.get("last_active_at")
+            last_iso = last_active.isoformat() if hasattr(last_active, "isoformat") else last_active
+            lines.append(
+                f"- {_clip(item.get('slug'), clip_limit)} ({_clip(item.get('display_name'), clip_limit)}): last_active={_clip(last_iso, clip_limit)}"
+            )
+    if hc.cross_topic_status:
+        lines += ["", "## Cross-topic status (injected)"]
+        for item in hc.cross_topic_status:
+            lines.append(
+                f"- headline: {_clip(item.get('headline'), clip_limit)}"
+            )
+            body_text = item.get("body") or ""
+            if body_text:
+                lines.append(f"  body: {_clip(body_text, clip_limit)}")
     lines += [
         "",
         "## Active OOB (severity)",
@@ -883,6 +924,8 @@ def render_hot_context(hc: HotContext) -> str:
         recent_reactions=list(hc.recent_reactions),
         recent_messages=list(hc.recent_messages),
         topic_status=hc.topic_status,
+        cross_topic_peek=list(hc.cross_topic_peek),
+        cross_topic_status=list(hc.cross_topic_status),
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
     )

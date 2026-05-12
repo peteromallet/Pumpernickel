@@ -20,10 +20,15 @@ from app.services.messaging import send_outbound, _append_turn_reasoning, _call_
 from app.services import discord, scoring
 from app.services.templates import TemplateCall
 from app.services.time_context import temporal_reference
-from app.services.turn_context import TurnContext
+from app.services.turn_context import TurnContext, obs_fields
 from app.services.scheduled_task_recurrence import normalize_recurrence
 from app.services.tools.common import current_scheduled_task
-from app.services.tools.scope_guard import check_write_scope
+from app.services.tools.scope_guard import (
+    check_write_scope,
+    resolve_write_topic_slugs,
+    require_reason_for_cross_topic,
+    resolve_topic_ids,
+)
 from app.services.topic_filter import join_artifact_topics
 from tool_schemas import (
     SetTopicStatusInput,
@@ -755,6 +760,10 @@ async def add_memory(ctx: TurnContext, args: AddMemoryInput) -> AddMemoryOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
+    topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+    require_reason_for_cross_topic(topic_slugs, ctx.primary_topic_slug, args.reason)
+    topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+    topic_id_list = [topic_id_map[slug] for slug in topic_slugs]
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -762,20 +771,19 @@ async def add_memory(ctx: TurnContext, args: AddMemoryInput) -> AddMemoryOutput:
             INSERT INTO memories (about_user_id, content, content_encrypted, related_theme_ids, recorded_by_bot_id)
             VALUES ($1, $2, $3, $4, $5)
             RETURNING id
-        ),
-        topic_link AS (
-            INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status)
-            SELECT 'memories', new_artifact.id, $6, $5, 'active'
-            FROM new_artifact
         )
-        SELECT id FROM new_artifact
+        INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status, reason)
+        SELECT 'memories', new_artifact.id, t.tid, $5, 'active', $7
+        FROM new_artifact CROSS JOIN unnest($6::uuid[]) AS t(tid)
+        RETURNING artifact_id AS id
         """,
         args.about_user_id,
         args.content,
         encrypt_value(args.content),
         args.related_theme_ids,
         ctx.bot_id,
-        ctx.primary_topic_id,
+        topic_id_list,
+        args.reason,
     )
     result = AddMemoryOutput(id=row["id"])
     await _log_tool_call(ctx, "add_memory", args, started, result)
@@ -849,6 +857,10 @@ async def create_theme(ctx: TurnContext, args: CreateThemeInput) -> CreateThemeO
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
+    topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+    require_reason_for_cross_topic(topic_slugs, ctx.primary_topic_slug, args.reason)
+    topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+    topic_id_list = [topic_id_map[slug] for slug in topic_slugs]
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -856,20 +868,19 @@ async def create_theme(ctx: TurnContext, args: CreateThemeInput) -> CreateThemeO
             INSERT INTO themes (title, description, sentiment, health, last_reinforced_at, recorded_by_bot_id)
             VALUES ($1, $2, $3, $4, now(), $5)
             RETURNING id
-        ),
-        topic_link AS (
-            INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status)
-            SELECT 'themes', new_artifact.id, $6, $5, 'active'
-            FROM new_artifact
         )
-        SELECT id FROM new_artifact
+        INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status, reason)
+        SELECT 'themes', new_artifact.id, t.tid, $5, 'active', $7
+        FROM new_artifact CROSS JOIN unnest($6::uuid[]) AS t(tid)
+        RETURNING artifact_id AS id
         """,
         args.title,
         args.description,
         args.sentiment.value,
         args.health.value,
         ctx.bot_id,
-        ctx.primary_topic_id,
+        topic_id_list,
+        args.reason,
     )
     result = CreateThemeOutput(id=row["id"])
     await _log_tool_call(ctx, "create_theme", args, started, result)
@@ -901,6 +912,10 @@ async def add_watch_item(ctx: TurnContext, args: AddWatchItemInput) -> AddWatchI
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
+    topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+    require_reason_for_cross_topic(topic_slugs, ctx.primary_topic_slug, args.reason)
+    topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+    topic_id_list = [topic_id_map[slug] for slug in topic_slugs]
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -908,20 +923,19 @@ async def add_watch_item(ctx: TurnContext, args: AddWatchItemInput) -> AddWatchI
             INSERT INTO watch_items (owner_user_id, content, due_at, related_theme_ids, recorded_by_bot_id)
             VALUES ($1, $2, $3, $4, $5)
             RETURNING id
-        ),
-        topic_link AS (
-            INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status)
-            SELECT 'watch_items', new_artifact.id, $6, $5, 'active'
-            FROM new_artifact
         )
-        SELECT id FROM new_artifact
+        INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status, reason)
+        SELECT 'watch_items', new_artifact.id, t.tid, $5, 'active', $7
+        FROM new_artifact CROSS JOIN unnest($6::uuid[]) AS t(tid)
+        RETURNING artifact_id AS id
         """,
         args.owner_user_id,
         args.content,
         args.due_at,
         args.related_theme_ids,
         ctx.bot_id,
-        ctx.primary_topic_id,
+        topic_id_list,
+        args.reason,
     )
     if args.due_at is not None:
         await _schedule_context_job(
@@ -1002,6 +1016,10 @@ async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObs
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
+    topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+    require_reason_for_cross_topic(topic_slugs, ctx.primary_topic_slug, args.reason)
+    topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+    topic_id_list = [topic_id_map[slug] for slug in topic_slugs]
     started = _start()
     significance = args.significance
     supporting_message_ids = args.supporting_message_ids or ctx.triggering_message_ids
@@ -1018,13 +1036,11 @@ async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObs
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
             RETURNING id
-        ),
-        topic_link AS (
-            INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status)
-            SELECT 'observations', new_artifact.id, $10, $9, 'active'
-            FROM new_artifact
         )
-        SELECT id FROM new_artifact
+        INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status, reason)
+        SELECT 'observations', new_artifact.id, t.tid, $9, 'active', $11
+        FROM new_artifact CROSS JOIN unnest($10::uuid[]) AS t(tid)
+        RETURNING artifact_id AS id
         """,
         args.content,
         encrypt_value(args.content),
@@ -1035,7 +1051,8 @@ async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObs
         args.related_theme_ids,
         supporting_message_ids,
         ctx.bot_id,
-        ctx.primary_topic_id,
+        topic_id_list,
+        args.reason,
     )
     result = LogObservationOutput(id=row["id"])
     await _log_tool_call(ctx, "log_observation", logged_args, started, result)
@@ -1068,6 +1085,10 @@ async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddD
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
+    topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+    require_reason_for_cross_topic(topic_slugs, ctx.primary_topic_slug, args.reason)
+    topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+    topic_id_list = [topic_id_map[slug] for slug in topic_slugs]
     started = _start()
     supporting_message_ids = _default_supporting_message_ids(ctx, args.supporting_message_ids)
     logged_args = args.model_copy(update={"supporting_message_ids": supporting_message_ids})
@@ -1097,13 +1118,11 @@ async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddD
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid[], $9::uuid[], $10::uuid[], $11::uuid[], $12::uuid[], $13, $14)
             RETURNING id
-        ),
-        topic_link AS (
-            INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status)
-            SELECT 'distillations', new_artifact.id, $15, $14, 'active'
-            FROM new_artifact
         )
-        SELECT id FROM new_artifact
+        INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status, reason)
+        SELECT 'distillations', new_artifact.id, t.tid, $14, 'active', $16
+        FROM new_artifact CROSS JOIN unnest($15::uuid[]) AS t(tid)
+        RETURNING artifact_id AS id
         """,
         args.content,
         encrypt_value(args.content),
@@ -1119,7 +1138,8 @@ async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddD
         supporting_message_ids,
         triggering_message_id,
         ctx.bot_id,
-        ctx.primary_topic_id,
+        topic_id_list,
+        args.reason,
     )
     result = AddDistillationOutput(id=row["id"])
     await _log_tool_call(ctx, "add_distillation", logged_args, started, result)
@@ -1294,6 +1314,10 @@ async def add_oob(ctx: TurnContext, args: AddOOBInput) -> AddOOBOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
+    topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+    require_reason_for_cross_topic(topic_slugs, ctx.primary_topic_slug, args.reason)
+    topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+    topic_id_list = [topic_id_map[slug] for slug in topic_slugs]
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -1303,13 +1327,11 @@ async def add_oob(ctx: TurnContext, args: AddOOBInput) -> AddOOBOutput:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING id
-        ),
-        topic_link AS (
-            INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status)
-            SELECT 'out_of_bounds', new_artifact.id, $8, $7, 'active'
-            FROM new_artifact
         )
-        SELECT id FROM new_artifact
+        INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status, reason)
+        SELECT 'out_of_bounds', new_artifact.id, t.tid, $7, 'active', $9
+        FROM new_artifact CROSS JOIN unnest($8::uuid[]) AS t(tid)
+        RETURNING artifact_id AS id
         """,
         args.owner_id,
         args.sensitive_core,
@@ -1318,7 +1340,8 @@ async def add_oob(ctx: TurnContext, args: AddOOBInput) -> AddOOBOutput:
         args.severity.value,
         args.review_at,
         ctx.bot_id,
-        ctx.primary_topic_id,
+        topic_id_list,
+        args.reason,
     )
     if args.review_at is not None:
         await _schedule_context_job(
@@ -1711,7 +1734,7 @@ async def cancel_scheduled_task(ctx: TurnContext, args: CancelScheduledTaskInput
 async def escalate_to_partner(ctx: TurnContext, args: EscalateToPartnerInput) -> EscalateToPartnerOutput:
     started = _start()
     if args.from_user_id != ctx.user.id or args.to_user_id != ctx.partner.id:
-        logger.warning("escalate_to_partner overriding model-supplied IDs for turn_id=%s", ctx.turn_id)
+        logger.warning("escalate_to_partner overriding model-supplied IDs for turn_id=%s", ctx.turn_id, extra=obs_fields(ctx))
     allowed_by_crisis = ctx.trigger_charge == "crisis"
     allowed_by_explicit_request = ctx.explicit_partner_alert_requested
     if not allowed_by_crisis and not allowed_by_explicit_request:
