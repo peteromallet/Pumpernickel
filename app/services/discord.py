@@ -516,7 +516,7 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, limit: i
             JOIN user_identities ui ON ui.user_id = m.sender_id
             WHERE m.direction='inbound'
               AND ui.transport='legacy'
-              AND ui.identifier=$1
+              AND ui.address=$1
               AND m.whatsapp_message_id IS NOT NULL
             ORDER BY m.sent_at DESC
             LIMIT 1
