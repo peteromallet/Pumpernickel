@@ -9,8 +9,10 @@ from typing import Any, NamedTuple
 
 import anthropic
 
+from app.bots.registry import get_relationship_topic_id
 from app.config import get_settings
 from app.services.spend import is_under_cap, record_llm_cost
+from app.services.topic_filter import join_artifact_topics
 
 logger = logging.getLogger(__name__)
 
@@ -127,19 +129,24 @@ async def rescore_observations(
     *,
     prompt_version_threshold: str = SCORING_PROMPT_VERSION,
     client: Any | None = None,
+    topic_id: UUID | None = None,
 ) -> RescoreReport:
     """Manually re-score observations with missing, failed, flagged, or older prompt versions."""
+    topic = topic_id or get_relationship_topic_id()
+    if topic is None:
+        raise RuntimeError("rescore_observations: no topic_id provided and relationship topic not available")
     rows = await pool.fetch(
-        """
+        f"""
         SELECT id, content
         FROM observations
-        WHERE scoring_prompt_version IS NULL
+        {join_artifact_topics('o', '$2')}
+        WHERE (scoring_prompt_version IS NULL
            OR scoring_prompt_version < $1
            OR scoring_prompt_version LIKE '%failed'
-           OR needs_rescoring = true
+           OR needs_rescoring = true)
         ORDER BY created_at
         """,
-        prompt_version_threshold,
+        prompt_version_threshold, topic,
     )
     rescored = 0
     still_failed = 0

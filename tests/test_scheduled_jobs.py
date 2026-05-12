@@ -340,7 +340,7 @@ async def test_weekly_summary_sends_template_runs_decay_and_reseeds(fake_pool, m
         sent.append((user, content, template_fallback))
         return uuid4()
 
-    async def fake_decay(pool):
+    async def fake_decay(pool, **kwargs):
         decayed.append(pool)
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.send_outbound", fake_send)

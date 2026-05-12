@@ -18,9 +18,11 @@ from uuid import UUID
 
 import anthropic
 
+from app.bots.registry import get_relationship_topic_id
 from app.config import get_settings
 from app.services.scoring import _record_response_cost as _record_haiku_response_cost
 from app.services.spend import is_under_cap, record_llm_cost
+from app.services.topic_filter import join_artifact_topics
 from tool_schemas import CheckOOBOutput, OOBTopicCluster, OOBVerdict, SummarizeOOBTopicsOutput
 
 logger = logging.getLogger(__name__)
@@ -109,18 +111,19 @@ def _protected_owner_ids(recipient_id: UUID, protected_owner_ids: list[UUID] | N
     return list(dict.fromkeys(protected_owner_ids))
 
 
-async def _active_oob_entries(pool: Any, owner_ids: list[UUID]) -> list[dict[str, Any]]:
+async def _active_oob_entries(pool: Any, owner_ids: list[UUID], *, topic_id: UUID) -> list[dict[str, Any]]:
     if not owner_ids:
         return []
     rows = await pool.fetch(
-        """
+        f"""
         SELECT id, sensitive_core, shareable_context, severity
         FROM out_of_bounds
+        {join_artifact_topics('x', '$2')}
         WHERE owner_id = ANY($1::uuid[])
           AND status = 'active'
         ORDER BY created_at DESC
         """,
-        owner_ids,
+        owner_ids, topic_id,
     )
     return [
         {
@@ -172,14 +175,18 @@ async def check_oob_with_policy(
     protected_owner_ids: list[UUID] | None = None,
     sender_intent: str | None = None,
     client: Any | None = None,
+    topic_id: UUID | None = None,
 ) -> CheckOOBOutput:
     """Check outbound text against active OOB for protected owners.
 
     By default, only the recipient's OOB is protected to preserve existing
     caller behavior. Final outbound paths can pass both dyad owner ids.
     """
+    topic = topic_id or get_relationship_topic_id()
+    if topic is None:
+        raise RuntimeError("check_oob_with_policy: no topic_id provided and relationship topic not available")
     owner_ids = _protected_owner_ids(recipient_id, protected_owner_ids)
-    entries = await _active_oob_entries(pool, owner_ids)
+    entries = await _active_oob_entries(pool, owner_ids, topic_id=topic)
     if not entries:
         return CheckOOBOutput(
             verdict=OOBVerdict.ok,
@@ -316,9 +323,13 @@ async def summarize_partner_oob(
     *,
     owner_id: UUID,
     client: Any | None = None,
+    topic_id: UUID | None = None,
 ) -> SummarizeOOBTopicsOutput:
     """Return non-identifying counts and broad topic clusters for active OOB entries."""
-    entries = await _active_oob_entries(pool, [owner_id])
+    topic = topic_id or get_relationship_topic_id()
+    if topic is None:
+        raise RuntimeError("summarize_partner_oob: no topic_id provided and relationship topic not available")
+    entries = await _active_oob_entries(pool, [owner_id], topic_id=topic)
     if not entries:
         return SummarizeOOBTopicsOutput(total_count=0, clusters=[], narrative="no active out-of-bounds entries")
 

@@ -24,7 +24,7 @@ from app.services.crypto import encrypt_value
 from app.services.text_safety import clean_user_facing_text
 from app.services.tools.registry import STEP_ALLOWED_TOOLS, call_tool, to_anthropic_tools
 from app.services.turn_audit import record_turn_event
-from app.services.turn_plan import TurnPlan, make_turn_plan, orient_summary, pick_default_skeleton
+from app.services.turn_plan import make_turn_plan, orient_summary, pick_default_skeleton
 from app.services.turn_context import BeforePacedSend, TurnContext, obs_fields, partner_of
 
 import tool_schemas as _tool_schemas_module
@@ -716,7 +716,7 @@ async def _run_agentic(
     responded_to_user = False
     try:
         partner = await partner_of(active_pool, user)
-        hot_context = await build_hot_context(active_pool, user, partner, triggering_message_ids, trigger_metadata)
+        hot_context = await build_hot_context(active_pool, user, partner, triggering_message_ids, trigger_metadata, primary_topic_id=get_relationship_topic_id())
         rendered_hot_context = render_hot_context(hot_context)
         system_prompt = bot_spec.render_system_prompt(
             assistant_name=settings.assistant_name,

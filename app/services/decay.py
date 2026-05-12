@@ -1,11 +1,23 @@
-"""Plan 5 decay housekeeping."""
+"""Plan 5 decay housekeeping.
+
+Per-topic policy (Sprint 3 decision, locked):
+  Decay is scoped per-topic, not global.  A coach's career observations
+  should not decay because a mediator hasn't reinforced them.  Each bot /
+  job decides its own scope, and decay only touches artifact rows whose
+  ``artifact_topics`` row matches the current scope's topic_id.  Global
+  decay of untagged rows would silently corrupt cross-bot separation and
+  is explicitly prohibited.  Multi-topic writes (and therefore multi-topic
+  decay) are deferred to Sprint 6.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
+from app.bots.registry import get_relationship_topic_id
 from app.services.scoring import RescoreReport, rescore_observations
 
 
@@ -28,6 +40,7 @@ async def run_decay_housekeeping(
     *,
     now: datetime | None = None,
     scoring_client: Any | None = None,
+    topic_id: UUID | None = None,
 ) -> DecayReport:
     """Apply time-based decay and rescore stale observation scores.
 
@@ -35,61 +48,89 @@ async def run_decay_housekeeping(
     decay never consults theme/message activity timestamps.
     """
 
+    topic = topic_id or get_relationship_topic_id()
+    if topic is None:
+        raise RuntimeError("run_decay_housekeeping: no topic_id provided and relationship topic not available")
     now = now or _utc_now()
     themes_dormant = await pool.execute(
         """
         UPDATE themes
         SET status = 'dormant',
             updated_at = $1
-        WHERE status = 'active'
-          AND COALESCE(last_reinforced_at, first_seen_at) <= $1::timestamptz - interval '6 weeks'
+        FROM artifact_topics at
+        WHERE at.artifact_table = 'themes'
+          AND at.artifact_id = themes.id
+          AND at.topic_id = $2
+          AND at.status = 'active'
+          AND themes.status = 'active'
+          AND COALESCE(themes.last_reinforced_at, themes.first_seen_at) <= $1::timestamptz - interval '6 weeks'
         """,
-        now,
+        now, topic,
     )
     themes_resolved = await pool.execute(
         """
         UPDATE themes
         SET status = 'resolved_by_time',
             updated_at = $1
-        WHERE status = 'dormant'
-          AND updated_at <= $1::timestamptz - interval '4 months'
+        FROM artifact_topics at
+        WHERE at.artifact_table = 'themes'
+          AND at.artifact_id = themes.id
+          AND at.topic_id = $2
+          AND at.status = 'active'
+          AND themes.status = 'dormant'
+          AND themes.updated_at <= $1::timestamptz - interval '4 months'
         """,
-        now,
+        now, topic,
     )
     observations_stale = await pool.execute(
         """
         UPDATE observations
         SET status = 'stale'
-        WHERE status = 'active'
-          AND COALESCE(last_reinforced_at, created_at) <= $1::timestamptz - interval '6 months'
+        FROM artifact_topics at
+        WHERE at.artifact_table = 'observations'
+          AND at.artifact_id = observations.id
+          AND at.topic_id = $2
+          AND at.status = 'active'
+          AND observations.status = 'active'
+          AND COALESCE(observations.last_reinforced_at, observations.created_at) <= $1::timestamptz - interval '6 months'
         """,
-        now,
+        now, topic,
     )
     observations_confidence = await pool.execute(
         """
         UPDATE observations
-        SET confidence = CASE confidence
+        SET confidence = CASE observations.confidence
             WHEN 'high' THEN 'medium'
             WHEN 'medium' THEN 'low'
-            ELSE confidence
+            ELSE observations.confidence
         END
-        WHERE status = 'active'
-          AND COALESCE(last_reinforced_at, created_at) <= $1::timestamptz - interval '3 months'
-          AND COALESCE(last_reinforced_at, created_at) > $1::timestamptz - interval '6 months'
-          AND confidence IN ('high', 'medium')
+        FROM artifact_topics at
+        WHERE at.artifact_table = 'observations'
+          AND at.artifact_id = observations.id
+          AND at.topic_id = $2
+          AND at.status = 'active'
+          AND observations.status = 'active'
+          AND COALESCE(observations.last_reinforced_at, observations.created_at) <= $1::timestamptz - interval '3 months'
+          AND COALESCE(observations.last_reinforced_at, observations.created_at) > $1::timestamptz - interval '6 months'
+          AND observations.confidence IN ('high', 'medium')
         """,
-        now,
+        now, topic,
     )
     watch_items_expired = await pool.execute(
         """
         UPDATE watch_items
         SET status = 'expired'
-        WHERE status = 'open'
-          AND due_at IS NOT NULL
-          AND addressed_at IS NULL
-          AND due_at <= $1::timestamptz - interval '30 days'
+        FROM artifact_topics at
+        WHERE at.artifact_table = 'watch_items'
+          AND at.artifact_id = watch_items.id
+          AND at.topic_id = $2
+          AND at.status = 'active'
+          AND watch_items.status = 'open'
+          AND watch_items.due_at IS NOT NULL
+          AND watch_items.addressed_at IS NULL
+          AND watch_items.due_at <= $1::timestamptz - interval '30 days'
         """,
-        now,
+        now, topic,
     )
     rescore_report = await rescore_observations(pool, client=scoring_client)
     return DecayReport(

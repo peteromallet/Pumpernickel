@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from app.bots.registry import get_relationship_topic_id
 from app.config import get_settings
 from app.models.user import User
 from app.services.cross_thread_privacy import (
@@ -17,6 +18,7 @@ from app.services.cross_thread_privacy import (
 from app.services.text_safety import clean_user_facing_text, looks_like_internal_process_text
 from app.services.time_context import add_calendar_months, temporal_reference, timezone_or_utc
 from app.services.tools.common import media_analysis_text
+from app.services.topic_filter import join_artifact_topics
 
 
 @dataclass
@@ -176,7 +178,12 @@ async def build_hot_context(
     partner: User,
     triggering_message_ids: list[UUID],
     trigger_metadata: dict[str, Any] | None = None,
+    *,
+    primary_topic_id: UUID | None = None,
 ) -> HotContext:
+    primary_topic = primary_topic_id or get_relationship_topic_id()
+    if primary_topic is None:
+        raise RuntimeError("build_hot_context: no primary_topic_id provided and relationship topic not available")
     current_user = await _user_profile(pool, user)
     partner_user = await _user_profile(pool, partner)
     now_utc = datetime.now(UTC)
@@ -225,13 +232,14 @@ async def build_hot_context(
             "review_at_time": _time_context(row["review_at"], user_timezone, now_utc),
         }
         for row in await pool.fetch(
-            """
+            f"""
             SELECT id, owner_id, shareable_context, severity, review_at
             FROM out_of_bounds
+            {join_artifact_topics('x', '$2')}
             WHERE status = 'active' AND owner_id = ANY($1::uuid[])
             ORDER BY CASE severity WHEN 'hard' THEN 1 WHEN 'firm' THEN 2 ELSE 3 END, created_at DESC
             """,
-            [user.id, partner.id],
+            [user.id, partner.id, primary_topic],
         )
     ]
     memories = [
@@ -246,15 +254,16 @@ async def build_hot_context(
             "created_at_time": _time_context(row["created_at"], user_timezone, now_utc),
         }
         for row in await pool.fetch(
-            """
-            SELECT id, about_user_id, content, COALESCE(related_theme_ids, '{}'::uuid[]) AS related_theme_ids,
+            f"""
+            SELECT id, about_user_id, content, COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
                    last_referenced_at, created_at
             FROM memories
+            {join_artifact_topics('m', '$2')}
             WHERE status = 'active' AND (about_user_id = ANY($1::uuid[]) OR about_user_id IS NULL)
             ORDER BY COALESCE(last_referenced_at, created_at) DESC
             LIMIT 80
             """,
-            [user.id, partner.id],
+            [user.id, partner.id, primary_topic],
         )
     ]
     active_themes = [
@@ -271,13 +280,15 @@ async def build_hot_context(
             "last_active_at_time": _time_context(row["last_active_at"], user_timezone, now_utc),
         }
         for row in await pool.fetch(
-            """
+            f"""
             SELECT id, title, description, status, sentiment, health, last_reinforced_at, last_active_at
             FROM themes
+            {join_artifact_topics('t', '$1')}
             WHERE status = 'active'
             ORDER BY COALESCE(last_reinforced_at, first_seen_at) DESC
             LIMIT 10
-            """
+            """,
+            [primary_topic]
         )
     ]
     open_watch_items = [
@@ -290,13 +301,14 @@ async def build_hot_context(
             "related_theme_ids": _clean_list(row["related_theme_ids"]),
         }
         for row in await pool.fetch(
-            """
-            SELECT id, owner_user_id, content, due_at, COALESCE(related_theme_ids, '{}'::uuid[]) AS related_theme_ids
+            f"""
+            SELECT id, owner_user_id, content, due_at, COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids
             FROM watch_items
+            {join_artifact_topics('w', '$2')}
             WHERE status = 'open' AND owner_user_id = $1
             ORDER BY COALESCE(due_at, created_at) ASC
             """,
-            user.id,
+            user.id, primary_topic,
         )
     ]
     observations = [
@@ -313,16 +325,18 @@ async def build_hot_context(
             "created_at_time": _time_context(row["created_at"], user_timezone, now_utc),
         }
         for row in await pool.fetch(
-            """
+            f"""
             SELECT id, about_user_id, content, confidence, significance,
-                   COALESCE(related_theme_ids, '{}'::uuid[]) AS related_theme_ids,
+                   COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
                    last_reinforced_at, created_at
             FROM observations
+            {join_artifact_topics('o', '$1')}
             WHERE status = 'active' AND significance >= 3
             ORDER BY recency_weighted_score(significance, last_reinforced_at, created_at) DESC NULLS LAST,
                      COALESCE(last_reinforced_at, created_at) DESC
             LIMIT 80
-            """
+            """,
+            [primary_topic]
         )
     ]
     message_rows = await pool.fetch(
@@ -342,21 +356,22 @@ async def build_hot_context(
         partner.id: normalize_sharing_default(partner_user.get("cross_thread_sharing_default")),
     }
     distillation_rows = await pool.fetch(
-        """
+        f"""
         SELECT id, content, confidence, status, sensitivity, visibility, shareable_summary,
-               COALESCE(source_user_ids, '{}'::uuid[]) AS source_user_ids,
-               COALESCE(related_memory_ids, '{}'::uuid[]) AS related_memory_ids,
-               COALESCE(related_observation_ids, '{}'::uuid[]) AS related_observation_ids,
-               COALESCE(related_theme_ids, '{}'::uuid[]) AS related_theme_ids,
-               COALESCE(supporting_message_ids, '{}'::uuid[]) AS supporting_message_ids,
+               COALESCE(source_user_ids, '{{}}'::uuid[]) AS source_user_ids,
+               COALESCE(related_memory_ids, '{{}}'::uuid[]) AS related_memory_ids,
+               COALESCE(related_observation_ids, '{{}}'::uuid[]) AS related_observation_ids,
+               COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+               COALESCE(supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
                revision_note, revision_count, updated_at, created_at
         FROM distillations
+        {join_artifact_topics('d', '$2')}
         WHERE status = 'active'
           AND source_user_ids && $1::uuid[]
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 12
         """,
-        [user.id, partner.id],
+        [user.id, partner.id, primary_topic],
     )
     distillations: list[dict[str, Any]] = []
     for row in distillation_rows:

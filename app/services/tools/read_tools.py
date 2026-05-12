@@ -26,6 +26,7 @@ from app.services.tools.common import (
     value,
     watch_item_row,
 )
+from app.services.topic_filter import join_artifact_topics
 from tool_schemas import (
     BotAction,
     BridgeCandidate,
@@ -524,11 +525,12 @@ async def list_themes(ctx: TurnContext, args: ListThemesInput) -> ListThemesOutp
         f"""
         SELECT id, title, status, sentiment, health, last_reinforced_at, last_active_at
         FROM themes
+        {join_artifact_topics('t', '$2')}
         {status_clause}
         ORDER BY {order_by}, title ASC
         LIMIT $1
         """,
-        args.limit,
+        args.limit, ctx.primary_topic_id,
     )
     return ListThemesOutput(themes=[theme_summary(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
 
@@ -536,23 +538,24 @@ async def list_themes(ctx: TurnContext, args: ListThemesInput) -> ListThemesOutp
 async def get_theme(ctx: TurnContext, args: GetThemeInput) -> GetThemeOutput:
     logger.info("read tool get_theme turn_id=%s", ctx.turn_id)
     row = await ctx.pool.fetchrow(
-        """
+        f"""
         SELECT id, title, description, status, sentiment, health, first_seen_at,
                last_reinforced_at, last_active_at
         FROM themes
+        {join_artifact_topics('t', '$2')}
         WHERE id = $1
         """,
-        args.theme_id,
+        args.theme_id, ctx.primary_topic_id,
     )
     if row is None:
         return GetThemeOutput(theme=None)
     memory_rows = await ctx.pool.fetch(
-        "SELECT id FROM memories WHERE $1 = ANY(COALESCE(related_theme_ids, '{}'::uuid[]))",
-        args.theme_id,
+        f"SELECT id FROM memories {join_artifact_topics('m', '$2')} WHERE $1 = ANY(COALESCE(related_theme_ids, '{{}}'::uuid[]))",
+        args.theme_id, ctx.primary_topic_id,
     )
     observation_rows = await ctx.pool.fetch(
-        "SELECT id FROM observations WHERE $1 = ANY(COALESCE(related_theme_ids, '{}'::uuid[]))",
-        args.theme_id,
+        f"SELECT id FROM observations {join_artifact_topics('o', '$2')} WHERE $1 = ANY(COALESCE(related_theme_ids, '{{}}'::uuid[]))",
+        args.theme_id, ctx.primary_topic_id,
     )
     return GetThemeOutput(
         theme=ThemeDetail(
@@ -584,11 +587,12 @@ async def get_memories(ctx: TurnContext, args: GetMemoriesInput) -> GetMemoriesO
         SELECT id, about_user_id, content, status, COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
                created_at, last_referenced_at
         FROM memories
+        {join_artifact_topics('m', f'${len(params) + 1}')}
         WHERE {' AND '.join(clauses)}
         ORDER BY COALESCE(last_referenced_at, created_at) DESC
         LIMIT ${len(params)}
         """,
-        *params,
+        *params, ctx.primary_topic_id,
     )
     return GetMemoriesOutput(memories=[memory_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
 
@@ -612,10 +616,11 @@ async def list_watch_items(ctx: TurnContext, args: ListWatchItemsInput) -> ListW
         SELECT id, owner_user_id, content, due_at, status, addressing_note, created_at, addressed_at,
                COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids
         FROM watch_items
+        {join_artifact_topics('w', f'${len(params) + 1}')}
         {where}
         ORDER BY COALESCE(due_at, created_at) ASC
         """,
-        *params,
+        *params, ctx.primary_topic_id,
     )
     return ListWatchItemsOutput(items=[watch_item_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
 
@@ -641,12 +646,13 @@ async def get_observations(ctx: TurnContext, args: GetObservationsInput) -> GetO
                COALESCE(supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
                created_at, last_reinforced_at, surfaced_count
         FROM observations
+        {join_artifact_topics('o', f'${len(params) + 1}')}
         WHERE {' AND '.join(clauses)}
         ORDER BY recency_weighted_score(significance, last_reinforced_at, created_at) DESC NULLS LAST,
                  COALESCE(last_reinforced_at, created_at) DESC
         LIMIT ${len(params)}
         """,
-        *params,
+        *params, ctx.primary_topic_id,
     )
     return GetObservationsOutput(observations=[observation_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
 
@@ -693,11 +699,12 @@ async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> Ge
                revision_note, revision_count,
                created_at, updated_at, revised_at, retired_at
         FROM distillations
+        {join_artifact_topics('d', f'${len(params) + 1}')}
         WHERE {' AND '.join(clauses)}
         ORDER BY updated_at DESC, created_at DESC
         LIMIT ${len(params)}
         """,
-        *params,
+        *params, ctx.primary_topic_id,
     )
     sharing_defaults = {
         ctx.user.id: normalize_sharing_default(ctx.user.cross_thread_sharing_default),
@@ -741,10 +748,11 @@ async def get_oob(ctx: TurnContext, args: GetOOBInput) -> GetOOBOutput:
         f"""
         SELECT id, owner_id, shareable_context, severity, status, created_at, review_at
         FROM out_of_bounds
+        {join_artifact_topics('x', f'${len(params) + 1}')}
         {where}
         ORDER BY created_at DESC
         """,
-        *params,
+        *params, ctx.primary_topic_id,
     )
     return GetOOBOutput(entries=[oob_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
 
@@ -762,7 +770,7 @@ async def check_oob(ctx: TurnContext, args: CheckOOBInput) -> CheckOOBOutput:
 
 async def summarize_oob_topics(ctx: TurnContext, args: SummarizeOOBTopicsInput) -> SummarizeOOBTopicsOutput:
     logger.info("read tool summarize_oob_topics turn_id=%s", ctx.turn_id)
-    return await summarize_partner_oob(ctx.pool, owner_id=args.owner_id)
+    return await summarize_partner_oob(ctx.pool, owner_id=args.owner_id, topic_id=ctx.primary_topic_id)
 
 
 async def get_self_model(ctx: TurnContext, args: GetSelfModelInput) -> GetSelfModelOutput:

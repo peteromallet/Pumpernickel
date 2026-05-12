@@ -174,11 +174,13 @@ async def messages(pool: Any = Depends(get_pool), _: None = Depends(authenticate
 
 @router.get("/admin/themes", response_class=HTMLResponse)
 async def themes(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin)) -> str:
+    # allowlisted: admin operator view
     return await _simple_page("Themes", pool, "SELECT id, title, description, status, sentiment, health, last_active_at, last_reinforced_at FROM themes ORDER BY last_active_at DESC LIMIT 100", ["id", "title", "description", "status", "sentiment", "health", "last_active_at", "last_reinforced_at"])
 
 
 @router.get("/admin/memories", response_class=HTMLResponse)
 async def memories(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin), user_id: str | None = None, status_filter: str | None = Query(default=None, alias="status")) -> str:
+    # allowlisted: admin operator view
     rows = await _fetch(pool, "SELECT id, about_user_id, content, status, supersedes_memory_id, created_at, last_referenced_at FROM memories ORDER BY created_at DESC LIMIT 100")
     if user_id:
         rows = [row for row in rows if str(row.get("about_user_id")) == user_id]
@@ -189,6 +191,7 @@ async def memories(pool: Any = Depends(get_pool), _: None = Depends(authenticate
 
 @router.get("/admin/watch-items", response_class=HTMLResponse)
 async def watch_items(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin), owner: str | None = None, status_filter: str | None = Query(default=None, alias="status")) -> str:
+    # allowlisted: admin operator view
     rows = await _fetch(pool, "SELECT id, owner_user_id, content, due_at, status, addressing_note, addressed_at, created_at FROM watch_items ORDER BY COALESCE(due_at, created_at) DESC LIMIT 100")
     if owner:
         rows = [row for row in rows if str(row.get("owner_user_id")) == owner]
@@ -199,6 +202,7 @@ async def watch_items(pool: Any = Depends(get_pool), _: None = Depends(authentic
 
 @router.get("/admin/observations", response_class=HTMLResponse)
 async def observations(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin), min_significance: int = 0) -> str:
+    # allowlisted: admin operator view
     rows = await _fetch(pool, "SELECT id, about_user_id, content, confidence, significance, status, supporting_message_ids, created_at, last_reinforced_at FROM observations ORDER BY created_at DESC LIMIT 100")
     rows = [row for row in rows if (row.get("significance") or 0) >= min_significance]
     return _page("Observations", _table(rows, ["id", "about_user_id", "content", "confidence", "significance", "status", "supporting_message_ids", "created_at", "last_reinforced_at"]))
@@ -213,7 +217,7 @@ async def distillations(pool: Any = Depends(get_pool), _: None = Depends(authent
                source_user_ids, related_memory_ids, related_observation_ids, related_theme_ids,
                supporting_message_ids, supersedes_distillation_id, superseded_by_distillation_id,
                revision_note, revision_count, created_at, updated_at, revised_at, retired_at
-        FROM distillations
+        FROM distillations  # allowlisted: admin operator view
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 100
         """,
@@ -265,7 +269,7 @@ async def oob(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admi
         pool,
         """
         SELECT id, owner_id, shareable_context, severity, status, review_at, created_at
-        FROM out_of_bounds
+        FROM out_of_bounds  # allowlisted: admin operator view
         ORDER BY created_at DESC
         LIMIT 100
         """,

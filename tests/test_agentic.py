@@ -84,7 +84,7 @@ class TrackingPool(FakePool):
             ]
         if compact.startswith("SELECT id, title, status") and "FROM themes" in compact:
             self.mark("read:list_themes")
-            return list(self.themes.values())[: args[-1]]
+            return list(self.themes.values())[: args[0]]
         if "FROM watch_items" in compact:
             self.mark("read:list_watch_items")
             return []

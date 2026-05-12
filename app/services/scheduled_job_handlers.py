@@ -18,6 +18,7 @@ from app.services.messaging import send_outbound
 from app.services.scheduled_task_recurrence import next_occurrence_utc, recurrence_after_fire
 from app.services.templates import TemplateCall
 from app.bots.registry import get_relationship_topic_id
+from app.services.topic_filter import join_artifact_topics
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class ScheduledJobHandlers:
     async def handle_weekly_summary(self, job: dict[str, Any]) -> None:
         user_row = await self._fetch_user_schedule(job["user_id"])
         user = _user_from_row(user_row)
-        summary = await self._weekly_summary_counts(user.id)
+        summary = await self._weekly_summary_counts(user.id, topic_id=job.get('topic_id') or get_relationship_topic_id())
         content = (
             f"Hi {user.name}, this week we had {summary['conversation_count']} conversations "
             f"and touched on {summary['ongoing_count']} ongoing things. Want to talk through anything? Just ask."
@@ -122,7 +123,7 @@ class ScheduledJobHandlers:
     async def handle_watch_item_due(self, job: dict[str, Any]) -> None:
         user = await fetch_user_by_id(self.pool, job["user_id"])
         context = job.get("context") or {}
-        watch_item = await self._fetch_watch_item(context.get("watch_item_id"))
+        watch_item = await self._fetch_watch_item(context.get("watch_item_id"), topic_id=job.get('topic_id') or get_relationship_topic_id())
         metadata = {
             "kind": "watch_item_due",
             "context": {
@@ -245,9 +246,9 @@ class ScheduledJobHandlers:
             raise ValueError(f"user not found for scheduled job: {user_id}")
         return dict(row)
 
-    async def _weekly_summary_counts(self, user_id: UUID) -> dict[str, int]:
+    async def _weekly_summary_counts(self, user_id: UUID, *, topic_id: UUID) -> dict[str, int]:
         row = await self.pool.fetchrow(
-            """
+            f"""
             SELECT
                 (
                     SELECT COUNT(*)
@@ -257,28 +258,29 @@ class ScheduledJobHandlers:
                       AND (sender_id = $1 OR recipient_id = $1)
                 )::int AS conversation_count,
                 (
-                    (SELECT COUNT(*) FROM themes WHERE status = 'active')
+                    (SELECT COUNT(*) FROM themes {join_artifact_topics('t', '$3')} WHERE t.status = 'active')
                     +
-                    (SELECT COUNT(*) FROM watch_items WHERE owner_user_id = $1 AND status = 'open')
+                    (SELECT COUNT(*) FROM watch_items {join_artifact_topics('w', '$4')} WHERE w.owner_user_id = $2 AND w.status = 'open')
                 )::int AS ongoing_count
             """,
-            user_id,
+            user_id, user_id, topic_id, topic_id,
         )
         return {
             "conversation_count": int(row["conversation_count"] or 0),
             "ongoing_count": int(row["ongoing_count"] or 0),
         }
 
-    async def _fetch_watch_item(self, watch_item_id: Any) -> dict[str, Any] | None:
+    async def _fetch_watch_item(self, watch_item_id: Any, *, topic_id: UUID) -> dict[str, Any] | None:
         if watch_item_id is None:
             return None
         row = await self.pool.fetchrow(
-            """
+            f"""
             SELECT id, owner_user_id, content, due_at, status
             FROM watch_items
+            {join_artifact_topics('w', '$2')}
             WHERE id = $1
             """,
-            watch_item_id,
+            watch_item_id, topic_id,
         )
         return dict(row) if row is not None else None
 

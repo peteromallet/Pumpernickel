@@ -3,7 +3,7 @@ import types
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 from collections.abc import AsyncIterator
 
 import pytest
@@ -51,6 +51,20 @@ REQUIRED_ENV = {
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _seed_relationship_topic_id() -> None:
+    """Seed the relationship topic id so get_relationship_topic_id() returns a
+    stable UUID in every test without requiring a real DB round-trip.
+
+    T5 (Step 4.1): this autouse session-scoped fixture is what keeps existing
+    tests green after T4 adds topic_id default-resolution to build_hot_context,
+    run_decay_housekeeping, check_oob_with_policy, summarize_partner_oob, and
+    rescore_observations.
+    """
+    import app.bots.registry as _reg
+    _reg._RELATIONSHIP_TOPIC_ID = UUID("00000000-0000-4000-8000-000000000001")
 
 
 @pytest.fixture
@@ -124,6 +138,28 @@ class FakePool:
         self.eval_results = {}
         self.system_state = {"global_pause": {"key": "global_pause", "paused_at": None, "value": {}}}
         self.feedback = {}
+        self.artifact_topics: dict[tuple[str, UUID], UUID] = {}
+
+    def link_topic(self, artifact_table: str, artifact_id: UUID, topic_id: UUID) -> None:
+        """Register a topic link for an artifact row.
+
+        Called by tests that need the FakePool to enforce per-topic scoping
+        (decay, hot-context property tests, etc.).  Rows without a link_topic
+        entry fall back to global behaviour per _row_matches_topic.
+        """
+        self.artifact_topics[(artifact_table, artifact_id)] = topic_id
+
+    def _row_matches_topic(self, table: str, row_id: UUID, topic_id: UUID) -> bool:
+        """True when *row_id* belongs to *topic_id*, or when no link exists.
+
+        Backward-compat fallback: rows without a link_topic entry update globally.
+        New tests asserting per-topic decay MUST call pool.link_topic for every
+        seeded artifact, or the scoping bug they're checking will silently pass.
+        """
+        key = (table, row_id)
+        if key in self.artifact_topics:
+            return self.artifact_topics[key] == topic_id
+        return True
 
     def acquire(self) -> FakeAcquireContext:
         return FakeAcquireContext(self)
@@ -847,7 +883,7 @@ class FakePool:
                 row["retired_at"] = row.get("retired_at") or datetime.now(UTC)
             row["updated_at"] = datetime.now(UTC)
             return {"id": distillation_id}
-        if compact.startswith("WITH old AS ( SELECT id, revision_count FROM distillations"):
+        if "WITH old AS (" in compact and "revision_count FROM distillations" in compact:
             (
                 old_id,
                 new_content,
@@ -1214,7 +1250,7 @@ class FakePool:
                 if item.get("owner_user_id") == user_id and item.get("status", "open") == "open"
             )
             return {"conversation_count": conversation_count, "ongoing_count": ongoing_count}
-        if compact.startswith("SELECT id, owner_user_id, content, due_at, status FROM watch_items WHERE id"):
+        if 'FROM watch_items' in compact and 'owner_user_id' in compact and 'due_at' in compact and 'WHERE id' in compact:
             return self.watch_items.get(args[0])
         if compact.startswith("INSERT INTO feedback"):
             if len(args) >= 8:
@@ -1366,9 +1402,9 @@ class FakePool:
             if not rows:
                 return None
             return max(rows, key=lambda row: row["sent_at"])["whatsapp_message_id"]
-        if compact.startswith("SELECT owner_user_id FROM watch_items WHERE id"):
+        if 'SELECT owner_user_id' in compact and 'FROM watch_items' in compact and 'WHERE' in compact:
             return self.watch_items[args[0]]["owner_user_id"]
-        if compact.startswith("SELECT owner_id FROM out_of_bounds WHERE id"):
+        if 'SELECT owner_id' in compact and 'FROM out_of_bounds' in compact and 'WHERE' in compact:
             return self.out_of_bounds[args[0]]["owner_id"]
         if compact.startswith("SELECT id FROM messages WHERE whatsapp_message_id"):
             wa_id = args[0]
@@ -1383,6 +1419,14 @@ class FakePool:
             return None
         if compact.startswith("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id"):
             return self.bot_turns[args[0]].get("reasoning") or ""
+        if compact.startswith("SELECT 1 FROM distillations d JOIN artifact_topics"):
+            row_id = args[0]
+            topic_id = args[1]
+            if row_id in self.distillations:
+                d_row = self.distillations[row_id]
+                if d_row.get("status") == "active" and self._row_matches_topic('distillations', row_id, topic_id):
+                    return 1
+            return None
         raise AssertionError(f"unhandled fetchval SQL: {compact}")
 
     async def fetch(self, sql: str, *args):
@@ -1400,13 +1444,13 @@ class FakePool:
         if compact.startswith("SELECT id FROM messages WHERE id = ANY"):
             wanted = set(args[0])
             return [{"id": row["id"]} for row in self.messages.values() if row["id"] in wanted]
-        if compact.startswith("SELECT id FROM themes WHERE id = ANY"):
+        if 'FROM themes' in compact and 'WHERE id = ANY' in compact and 'SELECT id' in compact[:25]:
             wanted = set(args[0])
             return [{"id": row["id"]} for row in self.themes.values() if row["id"] in wanted]
-        if compact.startswith("SELECT id FROM observations WHERE id = ANY"):
+        if 'FROM observations' in compact and 'WHERE id = ANY' in compact and 'SELECT id' in compact[:25]:
             wanted = set(args[0])
             return [{"id": row["id"]} for row in self.observations.values() if row["id"] in wanted]
-        if compact.startswith("SELECT id FROM memories WHERE id = ANY"):
+        if 'FROM memories' in compact and 'WHERE id = ANY' in compact and 'SELECT id' in compact[:25]:
             wanted = set(args[0])
             return [{"id": row["id"]} for row in self.memories.values() if row["id"] in wanted]
         if compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id <>"):
@@ -1477,6 +1521,7 @@ class FakePool:
             ]
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return rows[:limit]
+        # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM out_of_bounds" in compact:
             owner_filter = None
             if "owner_id = ANY" in compact:
@@ -1498,6 +1543,7 @@ class FakePool:
                 if row.get("status", "active") == "active"
                 and (owner_filter is None or row["owner_id"] in owner_filter)
             ]
+        # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM memories" in compact:
             return [
                 {
@@ -1514,6 +1560,7 @@ class FakePool:
             ]
         if "FROM themes" in compact:
             return list(self.themes.values())[:10]
+        # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM watch_items" in compact:
             return [
                 {
@@ -1530,6 +1577,7 @@ class FakePool:
                 for row in self.watch_items.values()
                 if row.get("status", "open") == "open" and (not args or row.get("owner_user_id") == args[0])
             ]
+        # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM observations" in compact:
             if "SELECT id, content" in compact and "scoring_prompt_version" in compact:
                 threshold = args[0]
@@ -1557,6 +1605,7 @@ class FakePool:
                 for row in self.observations.values()
                 if row.get("status", "active") == "active" and row.get("significance", 0) >= 3
             ]
+        # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM distillations" in compact:
             return [
                 {
@@ -2114,28 +2163,38 @@ class FakePool:
             return "UPDATE 1"
         if compact.startswith("UPDATE themes SET status = 'dormant'"):
             now = args[0]
+            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
             for theme in self.themes.values():
                 last = theme.get("last_reinforced_at") or theme.get("first_seen_at")
                 if theme.get("status") == "active" and last is not None and last <= now - timedelta(weeks=6):
+                    if topic_id is not None and not self._row_matches_topic('themes', theme['id'], topic_id):
+                        continue
                     theme["status"] = "dormant"
                     theme["updated_at"] = now
             return "UPDATE 1"
         if compact.startswith("UPDATE themes SET status = 'resolved_by_time'"):
             now = args[0]
+            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
             for theme in self.themes.values():
                 if theme.get("status") == "dormant" and theme.get("updated_at") is not None and theme["updated_at"] <= now - timedelta(days=120):
+                    if topic_id is not None and not self._row_matches_topic('themes', theme['id'], topic_id):
+                        continue
                     theme["status"] = "resolved_by_time"
                     theme["updated_at"] = now
             return "UPDATE 1"
         if compact.startswith("UPDATE observations SET status = 'stale'"):
             now = args[0]
+            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
             for observation in self.observations.values():
                 last = observation.get("last_reinforced_at") or observation.get("created_at")
                 if observation.get("status") == "active" and last is not None and last <= now - timedelta(days=183):
+                    if topic_id is not None and not self._row_matches_topic('observations', observation['id'], topic_id):
+                        continue
                     observation["status"] = "stale"
             return "UPDATE 1"
-        if compact.startswith("UPDATE observations SET confidence = CASE confidence"):
+        if compact.startswith("UPDATE observations SET confidence = CASE observations.confidence") or compact.startswith("UPDATE observations SET confidence = CASE confidence"):
             now = args[0]
+            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
             for observation in self.observations.values():
                 last = observation.get("last_reinforced_at") or observation.get("created_at")
                 if (
@@ -2145,10 +2204,13 @@ class FakePool:
                     and last > now - timedelta(days=183)
                     and observation.get("confidence") in {"high", "medium"}
                 ):
+                    if topic_id is not None and not self._row_matches_topic('observations', observation['id'], topic_id):
+                        continue
                     observation["confidence"] = "medium" if observation["confidence"] == "high" else "low"
             return "UPDATE 1"
         if compact.startswith("UPDATE watch_items SET status = 'expired'"):
             now = args[0]
+            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
             for item in self.watch_items.values():
                 if (
                     item.get("status") == "open"
@@ -2156,6 +2218,8 @@ class FakePool:
                     and item.get("addressed_at") is None
                     and item["due_at"] <= now - timedelta(days=30)
                 ):
+                    if topic_id is not None and not self._row_matches_topic('watch_items', item['id'], topic_id):
+                        continue
                     item["status"] = "expired"
             return "UPDATE 1"
         if compact.startswith("UPDATE messages SET content='[deleted]'"):

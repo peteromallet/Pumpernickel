@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from app.bots.registry import get_relationship_topic_id
 from app.config import get_settings
 from app.db import db_lifespan
-from app.models.user import User, fetch_user_by_id
+from app.models.user import fetch_user_by_id
 from app.services.hot_context import build_hot_context, render_hot_context
 from app.services.prompts import render_system_prompt
 from app.services.turn_context import partner_of
@@ -43,7 +44,7 @@ async def _replay(pool: Any, prompt_version: str, since: str, user_id: str) -> N
     )
     settings = get_settings()
     for row in rows:
-        hot_context = await build_hot_context(pool, user, partner, [row["id"]], {"kind": "staging_replay"})
+        hot_context = await build_hot_context(pool, user, partner, [row["id"]], {"kind": "staging_replay"}, primary_topic_id=get_relationship_topic_id())
         system_prompt = render_system_prompt(
             settings.assistant_name,
             user.name,

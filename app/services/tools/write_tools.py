@@ -23,6 +23,7 @@ from app.services.time_context import temporal_reference
 from app.services.turn_context import TurnContext
 from app.services.scheduled_task_recurrence import normalize_recurrence
 from app.services.tools.common import current_scheduled_task
+from app.services.topic_filter import join_artifact_topics
 from tool_schemas import (
     AddDistillationInput,
     AddDistillationOutput,
@@ -609,7 +610,11 @@ async def _require_existing_distillation_links(
                 list(dyad_ids),
             )
         else:
-            rows = await ctx.pool.fetch(f"SELECT id FROM {table} WHERE id = ANY($1::uuid[])", ids)
+            alias = {'memories': 'm', 'observations': 'o', 'themes': 't'}.get(table, table[:1])
+            rows = await ctx.pool.fetch(
+                f"SELECT id FROM {table} {join_artifact_topics(alias, '$2')} WHERE id = ANY($1::uuid[])",
+                ids, ctx.primary_topic_id,
+            )
         found = {row["id"] for row in rows}
         missing = [row_id for row_id in ids if row_id not in found]
         if missing:
@@ -886,7 +891,10 @@ async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> Upd
     params.append(args.watch_item_id)
     row = await ctx.pool.fetchrow(f"UPDATE watch_items SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
     if args.due_at is not None:
-        owner_user_id = await ctx.pool.fetchval("SELECT owner_user_id FROM watch_items WHERE id=$1", args.watch_item_id)
+        owner_user_id = await ctx.pool.fetchval(
+            f"SELECT owner_user_id FROM watch_items {join_artifact_topics('w', '$2')} WHERE id=$1",
+            args.watch_item_id, ctx.primary_topic_id,
+        )
         await _schedule_context_job(
             ctx.pool,
             user_id=owner_user_id,
@@ -1109,15 +1117,28 @@ async def revise_distillation(ctx: TurnContext, args: ReviseDistillationInput) -
     except ToolCallRejected as exc:
         await _log_tool_call(ctx, "revise_distillation", logged_args, started, exc.result)
         raise
+    # Topic-scoped pre-check: ensure the old distillation belongs to this topic
+    exists = await ctx.pool.fetchval(
+        f"SELECT 1 FROM distillations d {join_artifact_topics('d', '$2')} WHERE d.id = $1 AND d.status = 'active'",
+        args.old_distillation_id, ctx.primary_topic_id,
+    )
+    if not exists:
+        raise ToolCallRejected(
+            {
+                "error": "distillation_revision_rejected",
+                "reason": "old_distillation_id was not found, is not active, or is not scoped to this topic",
+            }
+        )
     triggering_message_id = args.triggering_message_id
     if triggering_message_id is None and supporting_message_ids:
         triggering_message_id = supporting_message_ids[0]
     row = await ctx.pool.fetchrow(
-        """
+        f"""
         WITH old AS (
-            SELECT id, revision_count
-            FROM distillations
-            WHERE id=$1 AND status='active'
+            SELECT d.id, d.revision_count
+            FROM distillations d
+            JOIN artifact_topics _at_d ON _at_d.artifact_table='distillations' AND _at_d.artifact_id=d.id AND _at_d.topic_id=$17 AND _at_d.status='active'
+            WHERE d.id=$1 AND d.status='active'
         ),
         new AS (
             INSERT INTO distillations (
@@ -1243,7 +1264,10 @@ async def update_oob(ctx: TurnContext, args: UpdateOOBInput) -> UpdateOOBOutput:
     params.append(args.oob_id)
     row = await ctx.pool.fetchrow(f"UPDATE out_of_bounds SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
     if args.review_at is not None:
-        owner_id = await ctx.pool.fetchval("SELECT owner_id FROM out_of_bounds WHERE id=$1", args.oob_id)
+        owner_id = await ctx.pool.fetchval(
+            f"SELECT owner_id FROM out_of_bounds {join_artifact_topics('x', '$2')} WHERE id=$1",
+            args.oob_id, ctx.primary_topic_id,
+        )
         await _schedule_context_job(
             ctx.pool,
             user_id=owner_id,
