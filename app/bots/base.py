@@ -16,20 +16,28 @@ PromptRenderer = Callable[..., str]
 
 @dataclass(frozen=True)
 class ReadScopes:
-    """Reading permissions for a bot across topics.
+    """Reading permissions for a bot across topics (§6).
 
-    allow_cross_topic_status_injection: if True, the bot may include
-    topic_status rows from other topics when rendering context. Matches §6.3.
+    topics: set of topic slugs the bot may read directly. The sentinel
+    'own' means the bot's primary topic (resolved at gate time against
+    ctx.primary_topic_slug). 'all' means cross-topic reads are allowed.
     """
 
+    topics: frozenset[str] = field(default_factory=lambda: frozenset({"own"}))
+    allow_cross_topic_peek: bool = False
     allow_cross_topic_status_injection: bool = False
 
 
 @dataclass(frozen=True)
 class WriteScopes:
-    """Writing permissions for a bot. Shape TBD — placeholder for S2+."""
+    """Writing permissions for a bot across topics (§6).
 
-    pass
+    topics: set of topic slugs the bot may write to. 'own' resolves to
+    primary_topic_slug. 'all' is reserved for cross-topic writes (S6).
+    """
+
+    topics: frozenset[str] = field(default_factory=lambda: frozenset({"own"}))
+    require_reason_for_cross_topic: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,7 +54,9 @@ class BotSpec:
     participants_shape: str = "dyad"
     read_scopes: ReadScopes = field(default_factory=ReadScopes)
     write_scopes: WriteScopes = field(default_factory=WriteScopes)
-    bot_spec_version: str = "1.0.0"
+    cross_topic_policy: str | None = None
+    tool_allowlist: frozenset[str] | None = None
+    bot_spec_version: str = "1.1.0"
     hot_context_builder_version: str = "1.0.0"
     tool_schema_version: str = "1.0.0"
 

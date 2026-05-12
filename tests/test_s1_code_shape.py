@@ -147,7 +147,7 @@ def test_bot_spec_defaults():
     assert spec.participants_shape == "dyad"
     assert isinstance(spec.read_scopes, ReadScopes)
     assert isinstance(spec.write_scopes, WriteScopes)
-    assert spec.bot_spec_version == "1.0.0"
+    assert spec.bot_spec_version == "1.1.0"
     assert spec.hot_context_builder_version == "1.0.0"
     assert spec.tool_schema_version == "1.0.0"
 

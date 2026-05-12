@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from uuid import UUID
 
@@ -17,12 +18,34 @@ BOT_SPECS: dict[str, BotSpec] = {
     MEDIATOR_BOT.bot_id: MEDIATOR_BOT,
 }
 
+_STAGING_BOTS_REGISTERED = False
+
+
+def _maybe_register_staging_bots() -> None:
+    """Register staging-only bots (coach) lazily.
+
+    Called from get_bot_spec on first access. Lazy registration avoids a
+    circular import: coach.build_coach_spec() pulls TOOL_DISPATCH which
+    transitively imports messaging/hooks/app.bots.registry — so doing it at
+    module-import time deadlocks under STAGING=1.
+    """
+    global _STAGING_BOTS_REGISTERED
+    if _STAGING_BOTS_REGISTERED:
+        return
+    _STAGING_BOTS_REGISTERED = True
+    if os.environ.get("STAGING", "").lower() in {"1", "true", "yes"}:
+        from app.bots.coach import build_coach_spec
+
+        coach = build_coach_spec()
+        BOT_SPECS[coach.bot_id] = coach
+
 
 class UnknownBotSpec(ValueError):
     pass
 
 
 def get_bot_spec(bot_id: str) -> BotSpec:
+    _maybe_register_staging_bots()
     try:
         return BOT_SPECS[bot_id]
     except KeyError as exc:
@@ -67,8 +90,16 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
         display_name=display_name,
         primary_topic_slug="relationship",
         participants_shape="dyad",
-        read_scopes=ReadScopes(),
-        write_scopes=WriteScopes(),
+        read_scopes=ReadScopes(
+            topics=frozenset({"own"}),
+            allow_cross_topic_peek=True,
+            allow_cross_topic_status_injection=True,
+        ),
+        write_scopes=WriteScopes(
+            topics=frozenset({"relationship"}),
+            require_reason_for_cross_topic=True,
+        ),
+        cross_topic_policy="peek",
         # Preserve version fields so anything the in-code MEDIATOR_BOT
         # already had set survives the rebuild.
         bot_spec_version=MEDIATOR_BOT.bot_spec_version,

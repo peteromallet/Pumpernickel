@@ -139,6 +139,8 @@ class FakePool:
         self.system_state = {"global_pause": {"key": "global_pause", "paused_at": None, "value": {}}}
         self.feedback = {}
         self.artifact_topics: dict[tuple[str, UUID], UUID] = {}
+        # S4: topic_status rows keyed by (topic_id, dyad_id) or (topic_id, user_id)
+        self.topic_status: dict[tuple[UUID, UUID], dict[str, Any]] = {}
 
     def link_topic(self, artifact_table: str, artifact_id: UUID, topic_id: UUID) -> None:
         """Register a topic link for an artifact row.
@@ -1334,6 +1336,12 @@ class FakePool:
             }
             self.pacing_events[row["id"]] = row
             return {"id": row["id"]}
+        if compact.startswith("SELECT id, headline, body, last_updated_at FROM topic_status WHERE topic_id"):
+            # S4: topic_status fetch. FakePool stores rows in self.topic_status keyed by (topic_id, dyad_id|user_id).
+            topic_id = args[0]
+            scope_id = args[1]
+            row = self.topic_status.get((topic_id, scope_id))
+            return dict(row) if row else None
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):

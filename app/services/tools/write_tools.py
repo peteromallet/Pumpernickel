@@ -23,8 +23,11 @@ from app.services.time_context import temporal_reference
 from app.services.turn_context import TurnContext
 from app.services.scheduled_task_recurrence import normalize_recurrence
 from app.services.tools.common import current_scheduled_task
+from app.services.tools.scope_guard import check_write_scope
 from app.services.topic_filter import join_artifact_topics
 from tool_schemas import (
+    SetTopicStatusInput,
+    SetTopicStatusOutput,
     AddDistillationInput,
     AddDistillationOutput,
     AddMemoryInput,
@@ -197,6 +200,9 @@ async def _schedule_context_job(
 
 
 async def update_user_style_notes(ctx: TurnContext, args: UpdateUserStyleNotesInput) -> UpdateUserStyleNotesOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         "UPDATE users SET style_notes=$1 WHERE id=$2 RETURNING id AS user_id, now() AS updated_at",
@@ -212,6 +218,9 @@ async def update_cross_thread_sharing_default(
     ctx: TurnContext,
     args: UpdateCrossThreadSharingDefaultInput,
 ) -> UpdateCrossThreadSharingDefaultOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     if args.user_id != ctx.user.id:
         result = {
@@ -248,6 +257,9 @@ async def create_bridge_candidate(
     ctx: TurnContext,
     args: CreateBridgeCandidateInput,
 ) -> CreateBridgeCandidateOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     if args.partner_path == BridgeCandidatePartnerPath.do_not_bridge:
         if args.status is not None and args.status != BridgeCandidateStatus.declined:
@@ -345,6 +357,9 @@ async def update_bridge_candidate(
     ctx: TurnContext,
     args: UpdateBridgeCandidateInput,
 ) -> UpdateBridgeCandidateOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     existing = await _fetch_bridge_candidate_row(ctx, args.candidate_id)
     if existing is None:
@@ -447,6 +462,9 @@ async def send_bridge_candidate(
     ctx: TurnContext,
     args: SendBridgeCandidateInput,
 ) -> SendBridgeCandidateOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     existing = await _fetch_bridge_candidate_row(ctx, args.candidate_id)
     if existing is None or existing["source_user_id"] != ctx.user.id:
@@ -708,6 +726,9 @@ def _bridge_candidate_for_context(ctx: TurnContext, row: Any) -> BridgeCandidate
 
 
 async def add_memory(ctx: TurnContext, args: AddMemoryInput) -> AddMemoryOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -736,6 +757,9 @@ async def add_memory(ctx: TurnContext, args: AddMemoryInput) -> AddMemoryOutput:
 
 
 async def update_memory(ctx: TurnContext, args: UpdateMemoryInput) -> UpdateMemoryOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     sets: list[str] = []
     params: list[Any] = []
@@ -760,6 +784,9 @@ async def update_memory(ctx: TurnContext, args: UpdateMemoryInput) -> UpdateMemo
 
 
 async def supersede_memory(ctx: TurnContext, args: SupersedeMemoryInput) -> SupersedeMemoryOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -793,6 +820,9 @@ async def supersede_memory(ctx: TurnContext, args: SupersedeMemoryInput) -> Supe
 
 
 async def create_theme(ctx: TurnContext, args: CreateThemeInput) -> CreateThemeOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -821,6 +851,9 @@ async def create_theme(ctx: TurnContext, args: CreateThemeInput) -> CreateThemeO
 
 
 async def update_theme(ctx: TurnContext, args: UpdateThemeInput) -> UpdateThemeOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     sets = ["updated_at=now()"]
     params: list[Any] = []
@@ -839,6 +872,9 @@ async def update_theme(ctx: TurnContext, args: UpdateThemeInput) -> UpdateThemeO
 
 
 async def add_watch_item(ctx: TurnContext, args: AddWatchItemInput) -> AddWatchItemOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -878,6 +914,9 @@ async def add_watch_item(ctx: TurnContext, args: AddWatchItemInput) -> AddWatchI
 
 
 async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> UpdateWatchItemOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     sets: list[str] = []
     params: list[Any] = []
@@ -911,6 +950,9 @@ async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> Upd
 
 
 async def address_watch_item(ctx: TurnContext, args: AddressWatchItemInput) -> AddressWatchItemOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -928,6 +970,9 @@ async def address_watch_item(ctx: TurnContext, args: AddressWatchItemInput) -> A
 
 
 async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObservationOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     significance = args.significance
     supporting_message_ids = args.supporting_message_ids or ctx.triggering_message_ids
@@ -969,6 +1014,9 @@ async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObs
 
 
 async def update_observation(ctx: TurnContext, args: UpdateObservationInput) -> UpdateObservationOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     sets = ["last_reinforced_at=now()"]
     params: list[Any] = []
@@ -988,6 +1036,9 @@ async def update_observation(ctx: TurnContext, args: UpdateObservationInput) -> 
 
 
 async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddDistillationOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     supporting_message_ids = _default_supporting_message_ids(ctx, args.supporting_message_ids)
     logged_args = args.model_copy(update={"supporting_message_ids": supporting_message_ids})
@@ -1047,6 +1098,9 @@ async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddD
 
 
 async def update_distillation(ctx: TurnContext, args: UpdateDistillationInput) -> UpdateDistillationOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     try:
         await _require_existing_distillation_links(
@@ -1102,6 +1156,9 @@ async def update_distillation(ctx: TurnContext, args: UpdateDistillationInput) -
 
 
 async def revise_distillation(ctx: TurnContext, args: ReviseDistillationInput) -> ReviseDistillationOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     supporting_message_ids = _default_supporting_message_ids(ctx, args.supporting_message_ids)
     logged_args = args.model_copy(update={"supporting_message_ids": supporting_message_ids})
@@ -1205,6 +1262,9 @@ async def revise_distillation(ctx: TurnContext, args: ReviseDistillationInput) -
 
 
 async def add_oob(ctx: TurnContext, args: AddOOBInput) -> AddOOBOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -1248,6 +1308,9 @@ async def add_oob(ctx: TurnContext, args: AddOOBInput) -> AddOOBOutput:
 
 
 async def update_oob(ctx: TurnContext, args: UpdateOOBInput) -> UpdateOOBOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     sets: list[str] = []
     params: list[Any] = []
@@ -1284,6 +1347,9 @@ async def update_oob(ctx: TurnContext, args: UpdateOOBInput) -> UpdateOOBOutput:
 
 
 async def lift_oob(ctx: TurnContext, args: LiftOOBInput) -> LiftOOBOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     row = await ctx.pool.fetchrow(
         "UPDATE out_of_bounds SET status='lifted' WHERE id=$1 RETURNING id, now() AS lifted_at",
@@ -1295,6 +1361,9 @@ async def lift_oob(ctx: TurnContext, args: LiftOOBInput) -> LiftOOBOutput:
 
 
 async def schedule_checkin(ctx: TurnContext, args: ScheduleCheckinInput) -> ScheduleCheckinOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
     started = _start()
     scheduled_for = _scheduled_for_from_schedule_fields(ctx, args.when, args.delay, args.local_when)
     old, row = await schedule_checkin_record(
@@ -1898,4 +1967,65 @@ async def log_feedback(ctx: TurnContext, args: LogFeedbackInput) -> LogFeedbackO
     )
     result = LogFeedbackOutput(id=row["id"])
     await _log_tool_call(ctx, "log_feedback", args, started, result)
+    return result
+
+
+async def set_topic_status(ctx: TurnContext, args: SetTopicStatusInput) -> SetTopicStatusOutput:
+    """Upsert the bot-authored status row for this topic+scope (§7).
+
+    First-line write-scope check; XOR validation on scope/user_id/dyad_id;
+    upsert preserves last_updated_by_bot_id (NOT NULL per migrations/0022:18).
+    Returns updated_at = row['last_updated_at'].isoformat() on the output.
+    """
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+    started = _start()
+    if args.scope == "user":
+        if args.user_id is None:
+            raise ToolCallRejected({"error": "set_topic_status: scope=user requires user_id"})
+        row = await ctx.pool.fetchrow(
+            """
+            INSERT INTO topic_status (topic_id, user_id, headline, body, last_updated_by_bot_id)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (topic_id, user_id) WHERE user_id IS NOT NULL
+            DO UPDATE SET headline = EXCLUDED.headline,
+                          body = EXCLUDED.body,
+                          last_updated_at = now(),
+                          last_updated_by_bot_id = EXCLUDED.last_updated_by_bot_id
+            RETURNING id, headline, body, last_updated_at
+            """,
+            ctx.primary_topic_id,
+            args.user_id,
+            args.headline,
+            args.body,
+            ctx.bot_id,
+        )
+    else:
+        if ctx.dyad_id is None:
+            raise ToolCallRejected({"error": "set_topic_status: scope=dyad requires ctx.dyad_id"})
+        row = await ctx.pool.fetchrow(
+            """
+            INSERT INTO topic_status (topic_id, dyad_id, headline, body, last_updated_by_bot_id)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (topic_id, dyad_id) WHERE dyad_id IS NOT NULL
+            DO UPDATE SET headline = EXCLUDED.headline,
+                          body = EXCLUDED.body,
+                          last_updated_at = now(),
+                          last_updated_by_bot_id = EXCLUDED.last_updated_by_bot_id
+            RETURNING id, headline, body, last_updated_at
+            """,
+            ctx.primary_topic_id,
+            ctx.dyad_id,
+            args.headline,
+            args.body,
+            ctx.bot_id,
+        )
+    result = SetTopicStatusOutput(
+        status_id=row["id"],
+        headline=row["headline"],
+        body=row["body"],
+        updated_at=row["last_updated_at"].isoformat() if row["last_updated_at"] else None,
+    )
+    await _log_tool_call(ctx, "set_topic_status", args, started, result)
     return result

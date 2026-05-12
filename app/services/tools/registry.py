@@ -14,7 +14,15 @@ from app.services.turn_plan import TurnStep
 from app.services.turn_context import TurnContext
 from app.services.tools import read_tools, write_tools
 from app.services.tools.write_tools import ToolCallRejected
-from tool_schemas import TOOL_REGISTRY, UpdateTurnPlanInput, UpdateTurnPlanOutput
+from tool_schemas import (
+    TOOL_REGISTRY,
+    SetTopicStatusInput,
+    SetTopicStatusOutput,
+    UpdateTurnPlanInput,
+    UpdateTurnPlanOutput,
+)
+
+TOOL_REGISTRY["set_topic_status"] = (SetTopicStatusInput, SetTopicStatusOutput)
 
 ToolFn = Callable[[TurnContext, BaseModel], Awaitable[BaseModel]]
 
@@ -97,6 +105,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "react_to_message": "Add one precise Unicode emoji reaction to a visible Discord message when an emoji is the most natural response or useful alongside a short reply. Call `search_emojis` first when the right reaction is not obvious; choose precise, emotionally apt, sometimes unusual emoji over generic 👍/❤️/👋. Do not overuse, and do not choose cute or obscure emoji when the moment is serious.",
     "explain_media_item": "Explain a stored image and persist the explanation into message memory so `search_messages` can find it later. Use when a stored image needs a fresh durable explanation.",
     "log_feedback": "Record user feedback about a message, turn, or general behavior; do not convert every emotional reaction into feedback.",
+    "set_topic_status": "Update or replace the current status for this topic. Headline ≤ 80 chars, body ≤ 300 chars. Use at most once per turn during the record step when status has materially changed.",
 }
 
 
@@ -152,6 +161,7 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "react_to_message": write_tools.react_to_message,
     "explain_media_item": write_tools.explain_media_item,
     "log_feedback": write_tools.log_feedback,
+    "set_topic_status": write_tools.set_topic_status,
 }
 
 READ_PHASE_TOOLS = {
@@ -208,6 +218,7 @@ WRITE_PHASE_TOOLS = {
     "react_to_message",
     "explain_media_item",
     "log_feedback",
+    "set_topic_status",
 }
 
 CONSULT_PHASE_TOOLS = READ_PHASE_TOOLS - {"send_message_part", "consult_perspective"}
@@ -268,7 +279,10 @@ def to_anthropic_tools(allowed: set[str]) -> list[dict[str, Any]]:
 
 
 def _step_allowed(ctx: TurnContext) -> set[str]:
-    return set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | ALWAYS_ALLOWED_TOOLS
+    allowed = set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | ALWAYS_ALLOWED_TOOLS
+    if ctx.bot_spec is not None and ctx.bot_spec.tool_allowlist is not None:
+        allowed &= ctx.bot_spec.tool_allowlist | ALWAYS_ALLOWED_TOOLS
+    return allowed
 
 
 def _inject_consult_defaults(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> dict[str, Any]:

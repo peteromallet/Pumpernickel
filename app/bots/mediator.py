@@ -11,7 +11,7 @@ import json
 from typing import Any
 from uuid import UUID
 
-from app.bots.base import BotSpec
+from app.bots.base import BotSpec, ReadScopes, WriteScopes
 from app.services.prompts import render_system_prompt
 from app.services.turn_plan import TurnPlan
 
@@ -75,6 +75,8 @@ MEDIATOR_RECORD_INSTRUCTION = (
     "Record step: record any state changes (memories, observations, distillations, theme updates, "
     "watch items, bridge candidates, style notes, feedback, OOB updates) that are justified by this turn. "
     "Read before durable writes when needed. "
+    "If this turn has materially shifted the relationship's current state, call set_topic_status at most "
+    "once with a short headline (≤80 chars) and optional body (≤300 chars). Otherwise omit it. "
     "If no durable update is justified, return an empty assistant response with no tool calls; the runner will advance automatically. "
     "Do not produce user-facing text."
 )
@@ -100,4 +102,14 @@ MEDIATOR_BOT = MediatorBotSpec(
     bot_id="mediator",
     prompt_renderer=render_system_prompt,
     step_instructions=MEDIATOR_STEP_INSTRUCTIONS,
+    cross_topic_policy="peek",
+    read_scopes=ReadScopes(
+        topics=frozenset({"own"}),
+        allow_cross_topic_peek=True,
+        allow_cross_topic_status_injection=True,
+    ),
+    write_scopes=WriteScopes(
+        topics=frozenset({"relationship"}),
+        require_reason_for_cross_topic=True,
+    ),
 )

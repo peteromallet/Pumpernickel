@@ -32,6 +32,26 @@ async def is_paused(pool: Any) -> bool:
     return paused_at is not None
 
 
+async def set_user_bot_paused(pool: Any, user_id: UUID, bot_id: str, paused: bool) -> None:
+    """Upsert the per-(user, bot) pause flag.
+
+    S4: WRITE-path for per-(user, bot) pause (read-path landed in S2a).
+    No model-callable tool in S4 — admin endpoint only.
+    """
+    await pool.execute(
+        """
+        INSERT INTO user_bot_state (user_id, bot_id, paused, updated_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (user_id, bot_id) DO UPDATE
+        SET paused = EXCLUDED.paused,
+            updated_at = now()
+        """,
+        user_id,
+        bot_id,
+        paused,
+    )
+
+
 async def user_bot_paused(pool: Any, user_id: UUID, bot_id: str) -> bool:
     """Return True if per-(user, bot) pause is active.
 

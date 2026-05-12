@@ -15,6 +15,7 @@ from app.services.messaging import send_outbound_part
 from app.services.oob_check import check_oob_with_policy, summarize_partner_oob
 from app.services.text_safety import clean_user_facing_text, looks_like_internal_process_text
 from app.services.time_context import local_day_bounds_utc, temporal_reference
+from app.services.tools.scope_guard import check_read_scope
 from app.services.tools.common import (
     add_date_range,
     distillation_row,
@@ -353,6 +354,9 @@ async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> Search
 
 async def list_bridge_candidates(ctx: TurnContext, args: ListBridgeCandidatesInput) -> ListBridgeCandidatesOutput:
     logger.info("read tool list_bridge_candidates turn_id=%s", ctx.turn_id)
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return ListBridgeCandidatesOutput(is_error=True, error=_err, candidates=[], truncated=False)
     rows = await ctx.pool.fetch(
         """
         SELECT id, source_user_id, target_user_id, kind, status, sensitivity, partner_path,
@@ -515,6 +519,9 @@ def _message_thread_owner_id(row: Any) -> Any:
 
 async def list_themes(ctx: TurnContext, args: ListThemesInput) -> ListThemesOutput:
     logger.info("read tool list_themes turn_id=%s", ctx.turn_id)
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return ListThemesOutput(is_error=True, error=_err, themes=[])
     order_by = {
         "last_reinforced": "COALESCE(last_reinforced_at, first_seen_at) DESC",
         "last_active": "last_active_at DESC",
@@ -537,6 +544,9 @@ async def list_themes(ctx: TurnContext, args: ListThemesInput) -> ListThemesOutp
 
 async def get_theme(ctx: TurnContext, args: GetThemeInput) -> GetThemeOutput:
     logger.info("read tool get_theme turn_id=%s", ctx.turn_id)
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return GetThemeOutput(is_error=True, error=_err, theme=None)
     row = await ctx.pool.fetchrow(
         f"""
         SELECT id, title, description, status, sentiment, health, first_seen_at,
@@ -571,6 +581,9 @@ async def get_theme(ctx: TurnContext, args: GetThemeInput) -> GetThemeOutput:
 
 async def get_memories(ctx: TurnContext, args: GetMemoriesInput) -> GetMemoriesOutput:
     logger.info("read tool get_memories turn_id=%s", ctx.turn_id)
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return GetMemoriesOutput(is_error=True, error=_err, memories=[])
     clauses = ["status = $1"]
     params: list[Any] = [args.status.value]
     if args.couple_only:
@@ -599,6 +612,9 @@ async def get_memories(ctx: TurnContext, args: GetMemoriesInput) -> GetMemoriesO
 
 async def list_watch_items(ctx: TurnContext, args: ListWatchItemsInput) -> ListWatchItemsOutput:
     logger.info("read tool list_watch_items turn_id=%s", ctx.turn_id)
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return ListWatchItemsOutput(is_error=True, error=_err, items=[])
     clauses: list[str] = []
     params: list[Any] = []
     if args.owner_user_id is not None:
@@ -627,6 +643,9 @@ async def list_watch_items(ctx: TurnContext, args: ListWatchItemsInput) -> ListW
 
 async def get_observations(ctx: TurnContext, args: GetObservationsInput) -> GetObservationsOutput:
     logger.info("read tool get_observations turn_id=%s", ctx.turn_id)
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return GetObservationsOutput(is_error=True, error=_err, observations=[])
     clauses = ["status = $1"]
     params: list[Any] = [args.status.value]
     if args.theme_id is not None:
@@ -658,6 +677,9 @@ async def get_observations(ctx: TurnContext, args: GetObservationsInput) -> GetO
 
 
 async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> GetDistillationsOutput:
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return GetDistillationsOutput(is_error=True, error=_err, distillations=[])
     logger.info("read tool get_distillations turn_id=%s", ctx.turn_id)
     clauses = ["status = $1"]
     params: list[Any] = [args.status.value]
@@ -735,6 +757,9 @@ async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> Ge
 
 
 async def get_oob(ctx: TurnContext, args: GetOOBInput) -> GetOOBOutput:
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return GetOOBOutput(is_error=True, error=_err, entries=[])
     logger.info("read tool get_oob turn_id=%s", ctx.turn_id)
     clauses: list[str] = []
     params: list[Any] = []
@@ -769,11 +794,17 @@ async def check_oob(ctx: TurnContext, args: CheckOOBInput) -> CheckOOBOutput:
 
 
 async def summarize_oob_topics(ctx: TurnContext, args: SummarizeOOBTopicsInput) -> SummarizeOOBTopicsOutput:
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return SummarizeOOBTopicsOutput(is_error=True, error=_err, total_count=0, clusters=[], narrative="")
     logger.info("read tool summarize_oob_topics turn_id=%s", ctx.turn_id)
     return await summarize_partner_oob(ctx.pool, owner_id=args.owner_id, topic_id=ctx.primary_topic_id)
 
 
 async def get_self_model(ctx: TurnContext, args: GetSelfModelInput) -> GetSelfModelOutput:
+    _err = check_read_scope(ctx, args.scope)
+    if _err is not None:
+        return GetSelfModelOutput(is_error=True, error=_err, model=None)
     logger.info("read tool get_self_model turn_id=%s", ctx.turn_id)
     user_row = await ctx.pool.fetchrow(
         "SELECT id, name, COALESCE(style_notes, '') AS style_notes FROM users WHERE id = $1",

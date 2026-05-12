@@ -38,6 +38,7 @@ class HotContext:
     distillations: list[dict[str, Any]] = field(default_factory=list)
     bridge_candidates: list[dict[str, Any]] = field(default_factory=list)
     recent_reactions: list[dict[str, Any]] = field(default_factory=list)
+    topic_status: dict[str, Any] | None = None
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -172,6 +173,134 @@ async def _user_profile(pool: Any, user: User) -> dict[str, Any]:
     return _row_dict(row)
 
 
+async def fetch_cross_topic_status(
+    pool: Any,
+    *,
+    dyad_id: UUID | None,
+    user_id: UUID,
+    exclude_topic_id: UUID,
+    cap: int = 5,
+) -> list[dict[str, Any]]:
+    """Fetch the most-recently-updated topic_status rows from OTHER topics.
+
+    Per §16.5 lock decision D: cap N=5. Used by allow_cross_topic_status_injection.
+    With one topic in play, this returns []; no header is rendered.
+    """
+    if dyad_id is not None:
+        rows = await pool.fetch(
+            """
+            SELECT id, topic_id, headline, body, last_updated_at
+            FROM topic_status
+            WHERE dyad_id = $1 AND topic_id <> $2
+            ORDER BY last_updated_at DESC
+            LIMIT $3
+            """,
+            dyad_id,
+            exclude_topic_id,
+            cap,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, topic_id, headline, body, last_updated_at
+            FROM topic_status
+            WHERE user_id = $1 AND topic_id <> $2
+            ORDER BY last_updated_at DESC
+            LIMIT $3
+            """,
+            user_id,
+            exclude_topic_id,
+            cap,
+        )
+    return [dict(row) for row in rows]
+
+
+async def peek_other_topics(
+    pool: Any,
+    *,
+    dyad_id: UUID | None,
+    user_id: UUID,
+    exclude_topic_id: UUID,
+    since: datetime,
+    cap: int = 5,
+) -> list[dict[str, Any]]:
+    """Fetch recently-active OTHER topics for the dyad/user (peek window).
+
+    Per §16.5 lock decision A: 14-day window (caller passes `since`).
+    Per §16.5 lock decision D: cap N=5.
+    Returns [] with one topic in play.
+    """
+    if dyad_id is not None:
+        rows = await pool.fetch(
+            """
+            SELECT t.id AS topic_id, t.slug, t.display_name, MAX(ts.last_updated_at) AS last_active_at
+            FROM topics t
+            JOIN topic_status ts ON ts.topic_id = t.id
+            WHERE ts.dyad_id = $1
+              AND ts.topic_id <> $2
+              AND ts.last_updated_at >= $3
+            GROUP BY t.id, t.slug, t.display_name
+            ORDER BY MAX(ts.last_updated_at) DESC
+            LIMIT $4
+            """,
+            dyad_id,
+            exclude_topic_id,
+            since,
+            cap,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT t.id AS topic_id, t.slug, t.display_name, MAX(ts.last_updated_at) AS last_active_at
+            FROM topics t
+            JOIN topic_status ts ON ts.topic_id = t.id
+            WHERE ts.user_id = $1
+              AND ts.topic_id <> $2
+              AND ts.last_updated_at >= $3
+            GROUP BY t.id, t.slug, t.display_name
+            ORDER BY MAX(ts.last_updated_at) DESC
+            LIMIT $4
+            """,
+            user_id,
+            exclude_topic_id,
+            since,
+            cap,
+        )
+    return [dict(row) for row in rows]
+
+
+async def _fetch_topic_status(
+    pool: Any,
+    *,
+    topic_id: UUID,
+    user_id: UUID,
+    dyad_id: UUID | None,
+) -> dict[str, Any] | None:
+    """Fetch the topic_status row for this scope; dyad row wins when dyad_id set."""
+    if dyad_id is not None:
+        row = await pool.fetchrow(
+            """
+            SELECT id, headline, body, last_updated_at
+            FROM topic_status
+            WHERE topic_id = $1 AND dyad_id = $2
+            """,
+            topic_id,
+            dyad_id,
+        )
+        if row is not None:
+            return dict(row)
+    row = await pool.fetchrow(
+        """
+        SELECT id, headline, body, last_updated_at
+        FROM topic_status
+        WHERE topic_id = $1 AND user_id = $2
+        """,
+        topic_id,
+        user_id,
+    )
+    return dict(row) if row is not None else None
+
+
 async def build_hot_context(
     pool: Any,
     user: User,
@@ -180,10 +309,12 @@ async def build_hot_context(
     trigger_metadata: dict[str, Any] | None = None,
     *,
     primary_topic_id: UUID | None = None,
+    dyad_id: UUID | None = None,
 ) -> HotContext:
     primary_topic = primary_topic_id or get_relationship_topic_id()
     if primary_topic is None:
         raise RuntimeError("build_hot_context: no primary_topic_id provided and relationship topic not available")
+    topic_status = await _fetch_topic_status(pool, topic_id=primary_topic, user_id=user.id, dyad_id=dyad_id)
     current_user = await _user_profile(pool, user)
     partner_user = await _user_profile(pool, partner)
     now_utc = datetime.now(UTC)
@@ -533,6 +664,7 @@ async def build_hot_context(
         bridge_candidates=bridge_candidates,
         recent_reactions=recent_reactions,
         recent_messages=recent_messages,
+        topic_status=topic_status,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
             **(trigger_metadata or {}),
@@ -637,6 +769,18 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
             f"- inbound_messages: {_clip(hc.conversation_load.get('inbound_count', 0), clip_limit)}",
             f"- outbound_messages: {_clip(hc.conversation_load.get('outbound_count', 0), clip_limit)}",
         ]
+    if hc.topic_status:
+        ts_updated = hc.topic_status.get("last_updated_at")
+        ts_iso = ts_updated.isoformat() if hasattr(ts_updated, "isoformat") else ts_updated
+        lines += [
+            "",
+            "## Topic status",
+            f"- headline: {_clip(hc.topic_status.get('headline'), clip_limit)}",
+        ]
+        body_text = hc.topic_status.get("body") or ""
+        if body_text:
+            lines.append(f"- body: {_clip(body_text, clip_limit)}")
+        lines.append(f"- last_updated_at: {_clip(ts_iso, clip_limit)}")
     lines += [
         "",
         "## Active OOB (severity)",
@@ -738,6 +882,7 @@ def render_hot_context(hc: HotContext) -> str:
         bridge_candidates=list(hc.bridge_candidates),
         recent_reactions=list(hc.recent_reactions),
         recent_messages=list(hc.recent_messages),
+        topic_status=hc.topic_status,
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
     )

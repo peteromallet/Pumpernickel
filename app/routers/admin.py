@@ -9,12 +9,13 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, status
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from app.config import get_settings
 from app.db import get_pool
+from app.services.system_state import set_user_bot_paused
 from evals.results import list_eval_results, list_eval_runs
 
 
@@ -353,6 +354,18 @@ async def eval_detail(run_id: str, pool: Any = Depends(get_pool), _: None = Depe
             "</article>"
         )
     return _page("Eval Detail", "".join(sections))
+
+
+@router.post("/admin/user-bot-pause", response_class=JSONResponse)
+async def user_bot_pause(
+    user_id: UUID = Form(...),
+    bot_id: str = Form(...),
+    paused: bool = Form(...),
+    pool: Any = Depends(get_pool),
+    _: None = Depends(authenticate_admin),
+) -> dict[str, Any]:
+    await set_user_bot_paused(pool, user_id, bot_id, paused)
+    return {"user_id": str(user_id), "bot_id": bot_id, "paused": paused}
 
 
 @router.get("/admin/audit", response_class=HTMLResponse)

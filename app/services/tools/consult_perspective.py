@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from app.config import get_settings
 from app.services.agentic import BoundedLoopExceeded, SpendCapExceeded, run_step
 from app.services.tools.registry import CONSULT_PHASE_TOOLS
-from app.services.turn_context import TurnContext
+from app.services.turn_context import TurnContext, replace_ctx
 from tool_schemas import ConsultPerspectiveInput, ConsultPerspectiveOutput, PerspectiveTemplate
 
 
@@ -102,32 +102,15 @@ async def consult_perspective(
     settings = get_settings()
     template_used = _template_used(args)
     perspective_body = _resolve_perspective(args)
-    consult_ctx = TurnContext(
-        turn_id=ctx.turn_id,
-        pool=ctx.pool,
-        user=ctx.user,
-        partner=ctx.partner,
-        triggering_message_ids=list(ctx.triggering_message_ids),
-        bot_id=ctx.bot_id,
-        bot_spec=ctx.bot_spec,
-        binding_id=ctx.binding_id,
-        dyad_id=ctx.dyad_id,
-        participants_shape=ctx.participants_shape,
-        primary_topic_id=ctx.primary_topic_id,
-        primary_topic_slug=ctx.primary_topic_slug,
-        channel_id=ctx.channel_id,
+    consult_ctx = replace_ctx(
+        ctx,
         current_step="consult",
-        turn_plan=ctx.turn_plan,
-        tool_call_log=ctx.tool_call_log,
-        trigger_charge=ctx.trigger_charge,
-        explicit_partner_alert_requested=ctx.explicit_partner_alert_requested,
-        turn_started_at=ctx.turn_started_at,
         incremental_sending_enabled=False,
-        protected_owner_ids=list(ctx.protected_owner_ids or []),
         send_typing_indicator=False,
         before_paced_send=None,
         sent_message_parts=[],
-        hot_context_rendered=ctx.hot_context_rendered,
+        triggering_message_ids=list(ctx.triggering_message_ids),
+        protected_owner_ids=list(ctx.protected_owner_ids or []),
         trigger_metadata={**dict(ctx.trigger_metadata), "_inside_consult": True},
     )
     seed_payload: dict[str, Any] = {

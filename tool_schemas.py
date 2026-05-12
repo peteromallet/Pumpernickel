@@ -325,6 +325,7 @@ class ThemeSortBy(str, Enum):
 
 
 class ListThemesInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     active_only: bool = True
     sort_by: ThemeSortBy = ThemeSortBy.last_reinforced
     limit: int = Field(default=50, ge=1, le=200)
@@ -343,10 +344,13 @@ class ThemeSummary(BaseModel):
 
 
 class ListThemesOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     themes: list[ThemeSummary]
 
 
 class GetThemeInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     theme_id: UUID
 
 
@@ -359,6 +363,8 @@ class ThemeDetail(ThemeSummary):
 
 
 class GetThemeOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     theme: ThemeDetail | None  # None if not found
 
 
@@ -366,6 +372,7 @@ class GetThemeOutput(BaseModel):
 
 
 class GetMemoriesInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     about_user_id: UUID | None = Field(
         default=None,
         description="None means 'any', including couple-level. Pass an explicit sentinel if you want couple-only.",
@@ -389,6 +396,8 @@ class MemoryRow(BaseModel):
 
 
 class GetMemoriesOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     memories: list[MemoryRow]
 
 
@@ -396,6 +405,7 @@ class GetMemoriesOutput(BaseModel):
 
 
 class ListWatchItemsInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     owner_user_id: UUID | None = None
     status: WatchStatus | None = WatchStatus.open
     due_before: datetime | None = None
@@ -417,6 +427,8 @@ class WatchItemRow(BaseModel):
 
 
 class ListWatchItemsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     items: list[WatchItemRow]
 
 
@@ -424,6 +436,7 @@ class ListWatchItemsOutput(BaseModel):
 
 
 class GetObservationsInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     theme_id: UUID | None = None
     status: ObservationStatus = ObservationStatus.active
     about_user_id: UUID | None = None
@@ -448,6 +461,8 @@ class ObservationRow(BaseModel):
 
 
 class GetObservationsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     observations: list[ObservationRow]
 
 
@@ -512,6 +527,7 @@ class DistillationRow(DistillationEvidenceMixin):
 
 
 class GetDistillationsInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     status: DistillationStatus = DistillationStatus.active
     source_user_id: UUID | None = Field(
         default=None,
@@ -529,6 +545,8 @@ class GetDistillationsInput(BaseModel):
 
 
 class GetDistillationsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     distillations: list[DistillationRow]
 
 
@@ -536,6 +554,7 @@ class GetDistillationsOutput(BaseModel):
 
 
 class GetOOBInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     owner_id: UUID | None = None  # None = both partners
     include_lifted: bool = False
 
@@ -554,6 +573,8 @@ class OOBRow(BaseModel):
 
 
 class GetOOBOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     entries: list[OOBRow]
 
 
@@ -561,6 +582,7 @@ class GetOOBOutput(BaseModel):
 
 
 class SummarizeOOBTopicsInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     owner_id: UUID = Field(description="The partner whose active OOB topic categories should be summarized.")
 
 
@@ -570,6 +592,8 @@ class OOBTopicCluster(BaseModel):
 
 
 class SummarizeOOBTopicsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     total_count: int
     clusters: list[OOBTopicCluster]
     narrative: str
@@ -619,6 +643,7 @@ class CheckOOBOutput(BaseModel):
 
 
 class GetSelfModelInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     user_id: UUID
 
 
@@ -633,6 +658,8 @@ class SelfModel(BaseModel):
 
 
 class GetSelfModelOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     model: SelfModel
 
 
@@ -762,6 +789,7 @@ class CreateBridgeCandidateOutput(BaseModel):
 
 
 class ListBridgeCandidatesInput(BaseModel):
+    scope: Literal["own", "all"] = "own"
     source_user_id: UUID | None = None
     target_user_id: UUID | None = None
     status: BridgeCandidateStatus | None = None
@@ -770,6 +798,8 @@ class ListBridgeCandidatesInput(BaseModel):
 
 
 class ListBridgeCandidatesOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
     candidates: list[BridgeCandidate]
     truncated: bool = False
 
@@ -1552,6 +1582,27 @@ class UpdateTurnPlanOutput(BaseModel):
 # Tool registry
 # ---------------------------------------------------------------------------
 #
+# ---------------------------------------------------------------------------
+# set_topic_status (S4)
+# ---------------------------------------------------------------------------
+
+
+class SetTopicStatusInput(BaseModel):
+    scope: Literal["user", "dyad"]
+    user_id: UUID | None = None
+    headline: str = Field(max_length=80)
+    body: str = Field(default="", max_length=300)
+
+
+class SetTopicStatusOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    status_id: UUID | None = None
+    headline: str | None = None
+    body: str | None = None
+    updated_at: str | None = None
+
+
 # Single source of truth mapping tool name -> (input model, output model).
 # The orchestrator uses this to validate LLM-produced tool calls and to render
 # the JSON schema list passed to the Anthropic API.

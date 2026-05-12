@@ -1,6 +1,6 @@
 """Per-turn context shared by the agentic loop and tool implementations."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from uuid import UUID
@@ -75,3 +75,13 @@ async def partner_of(pool: Any, user: User) -> User:
         raise ValueError(f"expected exactly one partner for user {user.id}, found {len(rows)}")
     row = rows[0]
     return User(id=row["id"], name=row["name"], phone=row["phone"], timezone=row["timezone"])
+
+
+def replace_ctx(ctx: TurnContext, **overrides: Any) -> TurnContext:
+    """Clone a TurnContext with field overrides via dataclasses.replace.
+
+    Use this instead of constructing a new TurnContext when forking the
+    context for a sub-flow (e.g. consult_perspective) so newly added fields
+    are not silently dropped.
+    """
+    return replace(ctx, **overrides)
