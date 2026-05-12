@@ -1,0 +1,15 @@
+-- ============================================================
+-- Rollback for 0033_pregnancy_topic.sql
+-- ============================================================
+-- Intentionally OMITS topic deletion.
+-- Rationale: deleting the 'pregnancy' topic row would fail with a foreign-key
+-- violation if any row in user_bot_state, topic_status, scheduled_jobs, or
+-- any artifact table references it. Rather than CASCADE-deleting user data,
+-- leave the topic row in place — it is inert without a bound bot.
+--
+-- If a true teardown is required, use the full teardown.sql script or manually:
+--   DELETE FROM mediator.topics WHERE slug = 'pregnancy';
+--   -- only after removing all dependent rows.
+-- ============================================================
+
+-- No operation: topic row is intentionally left in place (see comment above).

@@ -2,11 +2,13 @@
 """Observability sanity: group turn_audit_events and tool_calls by bot_id.
 
 S2a added per-bot split panes; this script is the code-level check that the
-panels still render correctly for a second (staging-only) bot. It connects to
+panels still render correctly for a third (staging-only) bot. It connects to
 DATABASE_URL with statement_cache_size=0 (Supabase pooler is transaction-mode
 on port 6543, see S1 lesson #3) and prints two tables: events grouped by
 bot_id and tool_calls grouped by bot_id, both windowed over a recent
 interval.
+
+Expected bot_ids after first prod deploy: mediator, coach, tante_rosi.
 
 Usage:
     python scripts/check_per_bot_panels.py --help

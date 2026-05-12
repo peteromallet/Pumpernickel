@@ -13,6 +13,7 @@ from app.bots.mediator import MEDIATOR_BOT
 logger = logging.getLogger(__name__)
 
 _RELATIONSHIP_TOPIC_ID: UUID | None = None
+_PREGNANCY_TOPIC_ID: UUID | None = None
 
 BOT_SPECS: dict[str, BotSpec] = {
     MEDIATOR_BOT.bot_id: MEDIATOR_BOT,
@@ -38,6 +39,11 @@ def _maybe_register_staging_bots() -> None:
 
         coach = build_coach_spec()
         BOT_SPECS[coach.bot_id] = coach
+
+        from app.bots.tante_rosi import build_tante_rosi_spec
+
+        rosi = build_tante_rosi_spec()
+        BOT_SPECS[rosi.bot_id] = rosi
 
 
 class UnknownBotSpec(ValueError):
@@ -110,38 +116,91 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
     logger.info("populate_mediator_spec_from_db: mediator spec updated (display_name=%s)", display_name)
 
 
-async def populate_topic_ids_from_db(pool: Any) -> None:
-    """Read the relationship topic id from mediator.topics and cache it.
+async def populate_tante_rosi_spec_from_db(pool: Any) -> None:
+    """Check for a Tante Rosi row in the bots table and register if present.
 
-    Must be called at startup AFTER the pool is available.  On miss the
-    module-level slot stays None and a warning is logged — callers must
-    tolerate get_relationship_topic_id() returning None.
+    Mirrors populate_mediator_spec_from_db but for tante_rosi.  Row existence
+    is the enablement gate — the bots table has no ``enabled`` column (only
+    id, display_name, created_at per migration 0020).
+
+    Phase 1 wires the gate; the prod bots row is inserted in Phase 2 (U3).
+    Process restart is required after row insertion because registration runs
+    once at startup.
     """
-    global _RELATIONSHIP_TOPIC_ID
     try:
         row = await pool.fetchrow(
-            "SELECT id FROM mediator.topics WHERE slug = 'relationship'"
+            "SELECT 1 FROM bots WHERE id = 'tante_rosi'"
         )
     except Exception:
         logger.warning(
-            "populate_topic_ids_from_db: could not query topics table — "
-            "relationship topic id unavailable",
+            "populate_tante_rosi_spec_from_db: could not query bots table — "
+            "keeping staging-only registration",
             exc_info=True,
         )
         return
     if row is None:
+        logger.debug(
+            "populate_tante_rosi_spec_from_db: no tante_rosi row in bots table — "
+            "bot available only via STAGING=1"
+        )
+        return
+
+    from app.bots.tante_rosi import build_tante_rosi_spec
+
+    spec = build_tante_rosi_spec()
+    BOT_SPECS[spec.bot_id] = spec
+    logger.info(
+        "populate_tante_rosi_spec_from_db: tante_rosi spec registered from bots table"
+    )
+
+
+async def populate_topic_ids_from_db(pool: Any) -> None:
+    """Read the relationship and pregnancy topic ids from mediator.topics and cache them.
+
+    Must be called at startup AFTER the pool is available.  On miss the
+    module-level slot stays None and a warning is logged — callers must
+    tolerate get_relationship_topic_id() / get_pregnancy_topic_id() returning None.
+    """
+    global _RELATIONSHIP_TOPIC_ID, _PREGNANCY_TOPIC_ID
+    try:
+        rows = await pool.fetch(
+            "SELECT id, slug FROM mediator.topics WHERE slug IN ('relationship', 'pregnancy')"
+        )
+    except Exception:
+        logger.warning(
+            "populate_topic_ids_from_db: could not query topics table — "
+            "topic ids unavailable",
+            exc_info=True,
+        )
+        return
+    for row in rows:
+        slug = row["slug"]
+        if slug == "relationship":
+            _RELATIONSHIP_TOPIC_ID = row["id"]
+            logger.info("populate_topic_ids_from_db: relationship topic id cached (%s)", _RELATIONSHIP_TOPIC_ID)
+        elif slug == "pregnancy":
+            _PREGNANCY_TOPIC_ID = row["id"]
+            logger.info("populate_topic_ids_from_db: pregnancy topic id cached (%s)", _PREGNANCY_TOPIC_ID)
+    if _RELATIONSHIP_TOPIC_ID is None:
         logger.warning(
             "populate_topic_ids_from_db: no relationship row in topics table — "
             "relationship topic id unavailable"
         )
-        return
-    _RELATIONSHIP_TOPIC_ID = row["id"]
-    logger.info("populate_topic_ids_from_db: relationship topic id cached (%s)", _RELATIONSHIP_TOPIC_ID)
+    if _PREGNANCY_TOPIC_ID is None:
+        logger.warning(
+            "populate_topic_ids_from_db: no pregnancy row in topics table — "
+            "pregnancy topic id unavailable (run migration 0033?)"
+        )
 
 
 def get_relationship_topic_id() -> UUID | None:
     """Return the cached relationship topic id, or None if not yet populated."""
     return _RELATIONSHIP_TOPIC_ID
+
+
+def get_pregnancy_topic_id() -> UUID | None:
+    """Return the cached pregnancy topic id, or None if not yet populated."""
+    return _PREGNANCY_TOPIC_ID
 
 
 _TOPIC_SLUG_CACHE: dict[str, UUID] = {}

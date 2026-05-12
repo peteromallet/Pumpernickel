@@ -18,6 +18,7 @@ from app.services.cross_thread_privacy import (
 from app.services.text_safety import clean_user_facing_text, looks_like_internal_process_text
 from app.services.time_context import add_calendar_months, temporal_reference, timezone_or_utc
 from app.services.tools.common import media_analysis_text
+from app.services.pregnancy import gestational_age as _ga
 from app.services.topic_filter import join_artifact_topics
 
 
@@ -156,7 +157,9 @@ async def _user_profile(pool: Any, user: User) -> dict[str, Any]:
         """
         SELECT id, name, phone, timezone, COALESCE(style_notes, '') AS style_notes,
                COALESCE(onboarding_state, 'pending') AS onboarding_state,
-               cross_thread_sharing_default
+               cross_thread_sharing_default,
+               pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date,
+               pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome
         FROM users
         WHERE id = $1
         """,
@@ -171,6 +174,14 @@ async def _user_profile(pool: Any, user: User) -> dict[str, Any]:
             "style_notes": "",
             "onboarding_state": "pending",
             "cross_thread_sharing_default": user.cross_thread_sharing_default,
+            "pregnancy_edd": None,
+            "pregnancy_dating_basis": None,
+            "pregnancy_lmp_date": None,
+            "pregnancy_scan_date": None,
+            "pregnancy_scan_corrected_at": None,
+            "pregnancy_started_at": None,
+            "pregnancy_ended_at": None,
+            "pregnancy_outcome": None,
         }
     return _row_dict(row)
 
@@ -732,6 +743,66 @@ def _message_thread_owner_id(row: Any) -> Any:
     return sender_id or recipient_id
 
 
+def _render_partner_pregnancy_state(
+    partner_user: dict[str, Any], partner_name: str, clip_limit: int = 240
+) -> str | None:
+    """Render the one-line partner pregnancy summary for dyad hot context.
+
+    Per §4.1: this is the ONLY pregnancy data surfaced to the mediator.
+    Never auto-bridges symptoms, themes, weight, or observations.
+
+    Returns None when there is nothing to render (no pregnancy, ended >90d,
+    or data-corruption).
+    """
+    from datetime import date
+
+    pregnancy_edd = partner_user.get("pregnancy_edd")
+    if pregnancy_edd is None:
+        return None
+
+    pregnancy_ended_at = partner_user.get("pregnancy_ended_at")
+
+    # --- Ended pregnancy -------------------------------------------------
+    if pregnancy_ended_at is not None:
+        pregnancy_outcome = partner_user.get("pregnancy_outcome")
+        if pregnancy_outcome is None or pregnancy_outcome not in ("loss", "termination"):
+            return None
+
+        # Compute days since ended_at.
+        if hasattr(pregnancy_ended_at, "date"):
+            ended_date = pregnancy_ended_at.date()
+        elif isinstance(pregnancy_ended_at, date):
+            ended_date = pregnancy_ended_at
+        else:
+            return None
+
+        _today = date.today()
+        days_ago = (_today - ended_date).days
+        if days_ago > 90:
+            return None
+
+        partner_label = _clip(partner_name, clip_limit)
+        return (
+            f"- {partner_label}'s pregnancy ended recently "
+            f"(loss, {days_ago} days ago). Handle with care."
+        )
+
+    # --- Active pregnancy ------------------------------------------------
+    pregnancy_dating_basis = partner_user.get("pregnancy_dating_basis")
+    if pregnancy_dating_basis is None:
+        return None
+
+    try:
+        weeks, days = _ga(pregnancy_edd)
+    except (ValueError, TypeError):
+        return None
+
+    edd_str = pregnancy_edd.isoformat() if hasattr(pregnancy_edd, "isoformat") else str(pregnancy_edd)
+    partner_label = _clip(partner_name, clip_limit)
+
+    return f"- {partner_label} is currently {weeks}w{days}d pregnant (EDD {edd_str})."
+
+
 def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit: int = 240) -> str:
     lines: list[str] = []
     if not hc.current_user.get("cross_thread_sharing_default"):
@@ -757,6 +828,15 @@ def _render_with_counts(hc: HotContext, truncations: dict[str, int], clip_limit:
         f"- sharing_default: {_clip(hc.partner_user.get('cross_thread_sharing_default') or 'unset', clip_limit)}",
         f"- style_notes: {_clip(hc.partner_user.get('style_notes', ''), clip_limit)}",
     ]
+    partner_pregnancy = _render_partner_pregnancy_state(
+        hc.partner_user, hc.partner_user.get("name", ""), clip_limit
+    )
+    if partner_pregnancy is not None:
+        lines += [
+            "",
+            "## Partner state",
+            partner_pregnancy,
+        ]
     if hc.temporal_context:
         lines += [
             "",

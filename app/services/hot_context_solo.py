@@ -39,6 +39,7 @@ class HotContextSolo:
     recent_reactions: list[dict[str, Any]] = field(default_factory=list)
     topic_status: dict[str, Any] | None = None
     cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
+    pregnancy_state: str | None = None
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -151,7 +152,9 @@ async def _user_profile_solo(pool: Any, user: User) -> dict[str, Any]:
     row = await pool.fetchrow(
         """\
         SELECT id, name, phone, timezone, COALESCE(style_notes, '') AS style_notes,
-               COALESCE(onboarding_state, 'pending') AS onboarding_state
+               COALESCE(onboarding_state, 'pending') AS onboarding_state,
+               pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date,
+               pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome
         FROM users
         WHERE id = $1
         """,
@@ -165,6 +168,14 @@ async def _user_profile_solo(pool: Any, user: User) -> dict[str, Any]:
             "timezone": user.timezone,
             "style_notes": "",
             "onboarding_state": "pending",
+            "pregnancy_edd": None,
+            "pregnancy_dating_basis": None,
+            "pregnancy_lmp_date": None,
+            "pregnancy_scan_date": None,
+            "pregnancy_scan_corrected_at": None,
+            "pregnancy_started_at": None,
+            "pregnancy_ended_at": None,
+            "pregnancy_outcome": None,
         }
     # §16.3 wi 7: surface the canonical user_identities address when present.
     from app.services.user_identity import resolve_user_address
@@ -537,6 +548,14 @@ async def build_hot_context_solo(
             exclude_topic_id=primary_topic_id,
             since=peek_since,
         )
+
+    # ── Pregnancy state (Tante Rosi only) ──────────────────────────────
+    pregnancy_state: str | None = None
+    if bot_id == "tante_rosi":
+        from app.services.pregnancy import format_pregnancy_state
+
+        pregnancy_state = format_pregnancy_state(user)
+
     return HotContextSolo(
         current_user=current_user,
         partner_user=partner_user,
@@ -553,6 +572,7 @@ async def build_hot_context_solo(
         recent_messages=recent_messages,
         topic_status=topic_status,
         cross_topic_peek=cross_topic_peek,
+        pregnancy_state=pregnancy_state,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
             **(trigger_metadata or {}),
@@ -626,6 +646,10 @@ def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], cl
         if body_text:
             lines.append(f"- body: {_clip(body_text, clip_limit)}")
         lines.append(f"- last_updated_at: {_clip(ts_iso, clip_limit)}")
+
+    # ── Pregnancy state (Tante Rosi only) ──────────────────────────
+    if hc.pregnancy_state is not None:
+        lines += ["", "## Pregnancy", hc.pregnancy_state]
 
     # Cross-topic peek for solo
     if hc.cross_topic_peek:
@@ -748,6 +772,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         recent_messages=list(hc.recent_messages),
         topic_status=hc.topic_status,
         cross_topic_peek=list(hc.cross_topic_peek),
+        pregnancy_state=hc.pregnancy_state,
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
     )

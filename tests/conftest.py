@@ -195,6 +195,14 @@ class FakePool:
                 "onboarding_state": "pending",
                 "pacing_preferences": {},
                 "cross_thread_sharing_default": None,
+                "pregnancy_edd": None,
+                "pregnancy_dating_basis": None,
+                "pregnancy_lmp_date": None,
+                "pregnancy_scan_date": None,
+                "pregnancy_scan_corrected_at": None,
+                "pregnancy_started_at": None,
+                "pregnancy_ended_at": None,
+                "pregnancy_outcome": None,
             }
             self.users[row["id"]] = row
             return row
@@ -203,6 +211,7 @@ class FakePool:
             or compact.startswith("SELECT id, name, phone, timezone, onboarding_state FROM users WHERE id")
             or compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences FROM users WHERE id")
             or compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default FROM users WHERE id")
+            or compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default, pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date, pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id")
         ):
             return self.users[args[0]]
         if compact.startswith("SELECT pacing_preferences FROM users WHERE id"):
@@ -239,6 +248,14 @@ class FakePool:
                     "onboarding_state": "pending",
                     "pacing_preferences": {},
                     "cross_thread_sharing_default": None,
+                    "pregnancy_edd": None,
+                    "pregnancy_dating_basis": None,
+                    "pregnancy_lmp_date": None,
+                    "pregnancy_scan_date": None,
+                    "pregnancy_scan_corrected_at": None,
+                    "pregnancy_started_at": None,
+                    "pregnancy_ended_at": None,
+                    "pregnancy_outcome": None,
                 },
             )
             self.users[user_id]["pacing_preferences"] = preferences
@@ -496,6 +513,68 @@ class FakePool:
             self.users.setdefault(user_id, {"id": user_id, "name": "User", "phone": "1", "timezone": "UTC"})
             self.users[user_id]["cross_thread_sharing_default"] = sharing_default
             return {"user_id": user_id, "cross_thread_sharing_default": sharing_default, "updated_at": datetime.now(UTC)}
+        # --- Pregnancy tool handlers ---
+        if compact.startswith("SELECT id, pregnancy_edd, pregnancy_ended_at FROM users WHERE id"):
+            user_id = args[0]
+            user = self.users.get(user_id, {"id": user_id, "pregnancy_edd": None, "pregnancy_ended_at": None})
+            return {"id": user_id, "pregnancy_edd": user.get("pregnancy_edd"), "pregnancy_ended_at": user.get("pregnancy_ended_at")}
+        if compact.startswith("SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_dating_basis, pregnancy_started_at FROM users WHERE id"):
+            user_id = args[0]
+            user = self.users.get(user_id, {"id": user_id, "pregnancy_edd": None, "pregnancy_ended_at": None, "pregnancy_dating_basis": None, "pregnancy_started_at": None})
+            return {
+                "id": user_id,
+                "pregnancy_edd": user.get("pregnancy_edd"),
+                "pregnancy_ended_at": user.get("pregnancy_ended_at"),
+                "pregnancy_dating_basis": user.get("pregnancy_dating_basis"),
+                "pregnancy_started_at": user.get("pregnancy_started_at"),
+            }
+        if compact.startswith("SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id"):
+            user_id = args[0]
+            user = self.users.get(user_id, {"id": user_id, "pregnancy_edd": None, "pregnancy_ended_at": None, "pregnancy_outcome": None})
+            return {
+                "id": user_id,
+                "pregnancy_edd": user.get("pregnancy_edd"),
+                "pregnancy_ended_at": user.get("pregnancy_ended_at"),
+                "pregnancy_outcome": user.get("pregnancy_outcome"),
+            }
+        if ("UPDATE users SET pregnancy_edd" in compact and "pregnancy_scan_date = COALESCE" in compact):
+            # correct_pregnancy_edd (MUST come before simpler "UPDATE users SET pregnancy_edd")
+            user_id, edd_val, dating_basis, scan_date, scan_corrected_at = args
+            user = self.users.get(user_id)
+            if user is not None:
+                user["pregnancy_edd"] = edd_val
+                user["pregnancy_dating_basis"] = dating_basis
+                if scan_date is not None:
+                    user["pregnancy_scan_date"] = scan_date
+                if scan_corrected_at is not None:
+                    user["pregnancy_scan_corrected_at"] = scan_corrected_at
+            return {"id": user_id}
+        if compact.startswith("UPDATE users SET pregnancy_edd"):
+            # set_pregnancy_edd: UPDATE users SET pregnancy_edd = $2, pregnancy_dating_basis = $3, ...
+            user_id, edd_val, dating_basis, lmp_date, scan_date, started_at = args
+            self.users.setdefault(
+                user_id,
+                {"id": user_id, "name": "User", "phone": "1", "timezone": "UTC",
+                 "pregnancy_edd": None, "pregnancy_dating_basis": None,
+                 "pregnancy_lmp_date": None, "pregnancy_scan_date": None,
+                 "pregnancy_started_at": None, "pregnancy_ended_at": None, "pregnancy_outcome": None},
+            )
+            self.users[user_id].update({
+                "pregnancy_edd": edd_val,
+                "pregnancy_dating_basis": dating_basis,
+                "pregnancy_lmp_date": lmp_date,
+                "pregnancy_scan_date": scan_date,
+                "pregnancy_started_at": started_at,
+            })
+            return {"id": user_id}
+        if compact.startswith("UPDATE users SET pregnancy_ended_at"):
+            # end_pregnancy: UPDATE users SET pregnancy_ended_at = $2, pregnancy_outcome = $3 ...
+            user_id, ended_at, outcome = args
+            user = self.users.get(user_id)
+            if user is not None:
+                user["pregnancy_ended_at"] = ended_at
+                user["pregnancy_outcome"] = outcome
+            return {"id": user_id}
         if compact.startswith("INSERT INTO bridge_candidates"):
             if "partner_path" in compact:
                 (
@@ -1538,6 +1617,8 @@ class FakePool:
             wanted = set(args[0])
             return [{"id": row["id"]} for row in self.memories.values() if row["id"] in wanted]
         if compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id <>"):
+            return [row for user_id, row in self.users.items() if user_id != args[0]]
+        if compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default, pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date, pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id <>"):
             return [row for user_id, row in self.users.items() if user_id != args[0]]
         if compact.startswith("SELECT transport, address FROM user_identities WHERE user_id"):
             uid = args[0]

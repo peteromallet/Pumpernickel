@@ -85,6 +85,10 @@ def build_coach_spec() -> BotSpec:
                 "escalate_to_partner",
                 "search_messages",
                 "recent_activity",
+                # Pregnancy tools: coach is career, not pregnancy.
+                "set_pregnancy_edd",
+                "correct_pregnancy_edd",
+                "end_pregnancy",
             }
         ),
         bot_spec_version="1.2.0",

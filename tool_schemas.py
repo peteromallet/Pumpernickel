@@ -1591,6 +1591,66 @@ class UpdateTurnPlanOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Pregnancy write tools (Tante Rosi — solo pregnancy coach)
+# ---------------------------------------------------------------------------
+
+
+class SetPregnancyEddInput(BaseModel):
+    edd: str = Field(description="Estimated due date as ISO date string, e.g. '2026-10-22'.")
+    dating_basis: Literal["lmp", "scan"] = Field(
+        description="How the EDD was determined: 'lmp' (last menstrual period) or 'scan' (dating ultrasound)."
+    )
+    lmp_date: str | None = Field(
+        default=None, description="First day of last menstrual period as ISO date, e.g. '2026-01-15'."
+    )
+    scan_date: str | None = Field(
+        default=None, description="Date of the dating scan as ISO date, e.g. '2026-03-01'."
+    )
+    started_at: str | None = Field(
+        default=None,
+        description="When the user started tracking this pregnancy as ISO datetime. Defaults to now().",
+    )
+
+
+class SetPregnancyEddOutput(BaseModel):
+    ok: bool
+    edd: str
+    gestational_age: str
+
+
+class CorrectPregnancyEddInput(BaseModel):
+    edd: str = Field(description="Revised estimated due date as ISO date string.")
+    dating_basis: Literal["lmp", "scan"] = Field(
+        description="How the revised EDD was determined."
+    )
+    scan_date: str | None = Field(
+        default=None, description="Date of the corrective scan as ISO date, e.g. '2026-04-15'."
+    )
+
+
+class CorrectPregnancyEddOutput(BaseModel):
+    ok: bool
+    edd: str
+    gestational_age: str
+
+
+class EndPregnancyInput(BaseModel):
+    outcome: Literal["birth", "loss", "termination"] = Field(
+        description="How the pregnancy concluded."
+    )
+    ended_at: str | None = Field(
+        default=None,
+        description="When the pregnancy ended as ISO datetime. Defaults to now() if omitted.",
+    )
+
+
+class EndPregnancyOutput(BaseModel):
+    ok: bool
+    outcome: str
+    ended_at: str
+
+
+# ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
 #
@@ -1673,4 +1733,8 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "react_to_message": (ReactToMessageInput, ReactToMessageOutput),
     "explain_media_item": (ExplainMediaItemInput, ExplainMediaItemOutput),
     "log_feedback": (LogFeedbackInput, LogFeedbackOutput),
+    # pregnancy
+    "set_pregnancy_edd": (SetPregnancyEddInput, SetPregnancyEddOutput),
+    "correct_pregnancy_edd": (CorrectPregnancyEddInput, CorrectPregnancyEddOutput),
+    "end_pregnancy": (EndPregnancyInput, EndPregnancyOutput),
 }

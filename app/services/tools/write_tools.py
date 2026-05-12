@@ -49,6 +49,10 @@ from tool_schemas import (
     BridgeCandidateStatus,
     CancelScheduledCheckinInput,
     CancelScheduledCheckinOutput,
+    CancelScheduledTaskInput,
+    CancelScheduledTaskOutput,
+    CorrectPregnancyEddInput,
+    CorrectPregnancyEddOutput,
     CreateBridgeCandidateInput,
     CreateBridgeCandidateOutput,
     CreateThemeInput,
@@ -57,6 +61,8 @@ from tool_schemas import (
     DeleteOutboundMessageOutput,
     EditOutboundMessageInput,
     EditOutboundMessageOutput,
+    EndPregnancyInput,
+    EndPregnancyOutput,
     EscalateToPartnerInput,
     EscalateToPartnerOutput,
     ExplainMediaItemInput,
@@ -82,6 +88,8 @@ from tool_schemas import (
     ScheduledTaskRow,
     SendBridgeCandidateInput,
     SendBridgeCandidateOutput,
+    SetPregnancyEddInput,
+    SetPregnancyEddOutput,
     SupersedeMemoryInput,
     SupersedeMemoryOutput,
     UpdateBridgeCandidateInput,
@@ -104,8 +112,6 @@ from tool_schemas import (
     UpdateUserStyleNotesOutput,
     UpdateWatchItemInput,
     UpdateWatchItemOutput,
-    CancelScheduledTaskInput,
-    CancelScheduledTaskOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -2101,6 +2107,226 @@ async def log_feedback(ctx: TurnContext, args: LogFeedbackInput) -> LogFeedbackO
     result = LogFeedbackOutput(id=row["id"])
     await _log_tool_call(ctx, "log_feedback", args, started, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Pregnancy write tools (Tante Rosi)
+# ---------------------------------------------------------------------------
+
+
+async def set_pregnancy_edd(ctx: TurnContext, args: "SetPregnancyEddInput") -> "SetPregnancyEddOutput":
+    """Initial pregnancy capture. Requires no active pregnancy on ctx.user."""
+    from datetime import date as _date, datetime as _datetime
+
+    from app.services.pregnancy import gestational_age
+
+    started = _start()
+    edd_val = _date.fromisoformat(args.edd)
+    _check_edd_window(edd_val)
+
+    row = await ctx.pool.fetchrow(
+        "SELECT id, pregnancy_edd, pregnancy_ended_at FROM users WHERE id = $1 FOR UPDATE",
+        ctx.user.id,
+    )
+    if row["pregnancy_edd"] is not None and row["pregnancy_ended_at"] is None:
+        raise ToolCallRejected({
+            "error": "pregnancy_already_active",
+            "reason": (
+                "There is already an active pregnancy (EDD "
+                f"{row['pregnancy_edd'].isoformat()}). "
+                "Use correct_pregnancy_edd to revise or end_pregnancy to close it first."
+            ),
+        })
+
+    lmp_date = _date.fromisoformat(args.lmp_date) if args.lmp_date else None
+    scan_date = _date.fromisoformat(args.scan_date) if args.scan_date else None
+    if args.started_at:
+        started_at = _datetime.fromisoformat(args.started_at)
+    else:
+        started_at = _datetime.now(UTC)
+
+    await ctx.pool.fetchrow(
+        """
+        UPDATE users
+        SET pregnancy_edd = $2,
+            pregnancy_dating_basis = $3,
+            pregnancy_lmp_date = $4,
+            pregnancy_scan_date = $5,
+            pregnancy_started_at = $6
+        WHERE id = $1
+        RETURNING id
+        """,
+        ctx.user.id,
+        edd_val,
+        args.dating_basis,
+        lmp_date,
+        scan_date,
+        started_at,
+    )
+
+    weeks, days = gestational_age(edd_val)
+    ga_str = f"{weeks}w{days}d"
+
+    # Refresh ctx.user in-memory (dataclasses.replace — avoids deadlock)
+    from dataclasses import replace as _replace
+
+    ctx.user = _replace(
+        ctx.user,
+        pregnancy_edd=edd_val,
+        pregnancy_dating_basis=args.dating_basis,
+        pregnancy_lmp_date=lmp_date,
+        pregnancy_scan_date=scan_date,
+        pregnancy_started_at=started_at,
+    )
+
+    result = SetPregnancyEddOutput(ok=True, edd=args.edd, gestational_age=ga_str)
+    await _log_tool_call(ctx, "set_pregnancy_edd", args, started, result)
+    return result
+
+
+async def correct_pregnancy_edd(
+    ctx: TurnContext, args: "CorrectPregnancyEddInput",
+) -> "CorrectPregnancyEddOutput":
+    """Mid-pregnancy EDD revision (e.g. after a dating scan). Requires an active pregnancy."""
+    from datetime import date as _date, datetime as _datetime
+
+    from app.services.pregnancy import gestational_age
+
+    started = _start()
+    edd_val = _date.fromisoformat(args.edd)
+    _check_edd_window(edd_val)
+
+    row = await ctx.pool.fetchrow(
+        "SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_dating_basis, pregnancy_started_at FROM users WHERE id = $1 FOR UPDATE",
+        ctx.user.id,
+    )
+    if row["pregnancy_edd"] is None or row["pregnancy_ended_at"] is not None:
+        raise ToolCallRejected({
+            "error": "no_active_pregnancy",
+            "reason": (
+                "There is no active pregnancy to correct. "
+                "Use set_pregnancy_edd to start tracking a pregnancy first."
+            ),
+        })
+
+    scan_date = _date.fromisoformat(args.scan_date) if args.scan_date else None
+    scan_corrected_at = (
+        _datetime.now(UTC)
+        if args.dating_basis == "scan" and row["pregnancy_dating_basis"] != "scan"
+        else None
+    )
+
+    await ctx.pool.fetchrow(
+        """
+        UPDATE users
+        SET pregnancy_edd = $2,
+            pregnancy_dating_basis = $3,
+            pregnancy_scan_date = COALESCE($4, pregnancy_scan_date),
+            pregnancy_scan_corrected_at = COALESCE($5, pregnancy_scan_corrected_at)
+        WHERE id = $1
+        RETURNING id
+        """,
+        ctx.user.id,
+        edd_val,
+        args.dating_basis,
+        scan_date,
+        scan_corrected_at,
+    )
+
+    weeks, days = gestational_age(edd_val)
+    ga_str = f"{weeks}w{days}d"
+
+    from dataclasses import replace as _replace
+
+    ctx.user = _replace(
+        ctx.user,
+        pregnancy_edd=edd_val,
+        pregnancy_dating_basis=args.dating_basis,
+        pregnancy_scan_date=(
+            scan_date if scan_date is not None else ctx.user.pregnancy_scan_date
+        ),
+        pregnancy_scan_corrected_at=(
+            scan_corrected_at
+            if scan_corrected_at is not None
+            else ctx.user.pregnancy_scan_corrected_at
+        ),
+    )
+
+    result = CorrectPregnancyEddOutput(ok=True, edd=args.edd, gestational_age=ga_str)
+    await _log_tool_call(ctx, "correct_pregnancy_edd", args, started, result)
+    return result
+
+
+async def end_pregnancy(ctx: TurnContext, args: "EndPregnancyInput") -> "EndPregnancyOutput":
+    """Close the active pregnancy. Errors if no active pregnancy or already ended."""
+    from datetime import datetime as _datetime
+
+    started = _start()
+
+    row = await ctx.pool.fetchrow(
+        "SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id = $1 FOR UPDATE",
+        ctx.user.id,
+    )
+    if row["pregnancy_edd"] is None:
+        raise ToolCallRejected({
+            "error": "no_active_pregnancy",
+            "reason": "There is no pregnancy to end — EDD has never been set.",
+        })
+    if row["pregnancy_ended_at"] is not None:
+        raise ToolCallRejected({
+            "error": "pregnancy_already_ended",
+            "reason": (
+                f"pregnancy already ended on {row['pregnancy_ended_at'].isoformat()}"
+            ),
+        })
+
+    if args.ended_at:
+        ended_at = _datetime.fromisoformat(args.ended_at)
+    else:
+        ended_at = _datetime.now(UTC)
+
+    await ctx.pool.fetchrow(
+        """
+        UPDATE users
+        SET pregnancy_ended_at = $2,
+            pregnancy_outcome = $3
+        WHERE id = $1
+        RETURNING id
+        """,
+        ctx.user.id,
+        ended_at,
+        args.outcome,
+    )
+
+    from dataclasses import replace as _replace
+
+    ctx.user = _replace(
+        ctx.user,
+        pregnancy_ended_at=ended_at,
+        pregnancy_outcome=args.outcome,
+    )
+
+    result = EndPregnancyOutput(
+        ok=True,
+        outcome=args.outcome,
+        ended_at=ended_at.isoformat(),
+    )
+    await _log_tool_call(ctx, "end_pregnancy", args, started, result)
+    return result
+
+
+def _check_edd_window(edd: "date") -> None:
+    """Guard: reject EDD more than 1 year in the future (data-error guard)."""
+    from datetime import date as _date, timedelta
+
+    if edd > _date.today() + timedelta(days=365):
+        raise ToolCallRejected({
+            "error": "edd_too_far_future",
+            "reason": (
+                f"EDD {edd.isoformat()} is more than 1 year in the future. "
+                "This looks like a data error — please check the date."
+            ),
+        })
 
 
 async def set_topic_status(ctx: TurnContext, args: SetTopicStatusInput) -> SetTopicStatusOutput:

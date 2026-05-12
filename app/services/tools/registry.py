@@ -106,6 +106,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "explain_media_item": "Explain a stored image and persist the explanation into message memory so `search_messages` can find it later. Use when a stored image needs a fresh durable explanation.",
     "log_feedback": "Record user feedback about a message, turn, or general behavior; do not convert every emotional reaction into feedback.",
     "set_topic_status": "Update or replace the current status for this topic. Headline ≤ 80 chars, body ≤ 300 chars. Use at most once per turn during the record step when status has materially changed.",
+    "set_pregnancy_edd": "Capture a pregnancy's estimated due date the first time a user mentions they are pregnant. You MUST call this before any other pregnancy tool. Provide `edd` as an ISO date (e.g. '2026-10-22') and `dating_basis` as 'lmp' (last menstrual period) or 'scan' (dating ultrasound). If you know the LMP or scan date, include those as well; `started_at` defaults to now. This will error if there is already an active pregnancy — use correct_pregnancy_edd to revise instead.",
+    "correct_pregnancy_edd": "Revise the EDD mid-pregnancy — for example when a dating scan gives a more precise date. Requires an active pregnancy (set_pregnancy_edd must have been called first). If the dating basis flips to 'scan', the correction timestamp is recorded automatically. This will error with 'no_active_pregnancy' if there is no pregnancy to correct — use set_pregnancy_edd first.",
+    "end_pregnancy": "Close the active pregnancy with its outcome: 'birth', 'loss', or 'termination'. Call this when the user tells you the pregnancy has ended. Requires an active pregnancy. If the pregnancy is already ended this will error with 'pregnancy already ended on <date>' — do not retry; the state is already recorded.",
 }
 
 
@@ -162,6 +165,9 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "explain_media_item": write_tools.explain_media_item,
     "log_feedback": write_tools.log_feedback,
     "set_topic_status": write_tools.set_topic_status,
+    "set_pregnancy_edd": write_tools.set_pregnancy_edd,
+    "correct_pregnancy_edd": write_tools.correct_pregnancy_edd,
+    "end_pregnancy": write_tools.end_pregnancy,
 }
 
 READ_PHASE_TOOLS = {
@@ -231,7 +237,11 @@ SCHEDULE_TOOLS = {
     "update_scheduled_task",
     "cancel_scheduled_task",
 }
-RECORD_WRITE_TOOLS = WRITE_PHASE_TOOLS - SCHEDULE_TOOLS
+RECORD_WRITE_TOOLS = WRITE_PHASE_TOOLS - SCHEDULE_TOOLS | {
+    "set_pregnancy_edd",
+    "correct_pregnancy_edd",
+    "end_pregnancy",
+}
 RESPOND_TOOLS = {"send_message_part", "search_emojis", "check_oob"}
 READ_TOOLS_FOR_STEP = READ_PHASE_TOOLS - {"send_message_part"}
 STEP_ALLOWED_TOOLS: dict[TurnStep, set[str]] = {

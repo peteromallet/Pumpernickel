@@ -169,6 +169,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.bots.registry import populate_mediator_spec_from_db
 
         await populate_mediator_spec_from_db(pool)
+        # Sprint 7: check for Tante Rosi bots row (prod-registration gate)
+        from app.bots.registry import populate_tante_rosi_spec_from_db
+
+        await populate_tante_rosi_spec_from_db(pool)
         # Sprint 2a: cache relationship topic id for scope fallbacks
         from app.bots.registry import populate_topic_ids_from_db
 

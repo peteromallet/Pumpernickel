@@ -1,6 +1,7 @@
 """Small user model helpers shared by ingestion, debouncing, and recovery."""
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -16,6 +17,15 @@ class User:
     onboarding_state: str = "pending"
     pacing_preferences: dict[str, Any] = field(default_factory=dict)
     cross_thread_sharing_default: str | None = None
+    # Pregnancy fields (all nullable — additive schema, no backfill required)
+    pregnancy_edd: date | None = None
+    pregnancy_dating_basis: str | None = None
+    pregnancy_lmp_date: date | None = None
+    pregnancy_scan_date: date | None = None
+    pregnancy_scan_corrected_at: datetime | None = None
+    pregnancy_started_at: datetime | None = None
+    pregnancy_ended_at: datetime | None = None
+    pregnancy_outcome: str | None = None
 
 
 def _clamp_float(value: Any, default: float, minimum: float, maximum: float) -> float:
@@ -126,6 +136,15 @@ def _row_to_user(row: Any) -> User:
     onboarding_state = row["onboarding_state"] if "onboarding_state" in row else "pending"
     pacing_preferences = row["pacing_preferences"] if "pacing_preferences" in row else None
     cross_thread_sharing_default = row["cross_thread_sharing_default"] if "cross_thread_sharing_default" in row else None
+    # Defensive reads for pregnancy columns (absent → None; no AttributeError)
+    pregnancy_edd = row["pregnancy_edd"] if "pregnancy_edd" in row else None
+    pregnancy_dating_basis = row["pregnancy_dating_basis"] if "pregnancy_dating_basis" in row else None
+    pregnancy_lmp_date = row["pregnancy_lmp_date"] if "pregnancy_lmp_date" in row else None
+    pregnancy_scan_date = row["pregnancy_scan_date"] if "pregnancy_scan_date" in row else None
+    pregnancy_scan_corrected_at = row["pregnancy_scan_corrected_at"] if "pregnancy_scan_corrected_at" in row else None
+    pregnancy_started_at = row["pregnancy_started_at"] if "pregnancy_started_at" in row else None
+    pregnancy_ended_at = row["pregnancy_ended_at"] if "pregnancy_ended_at" in row else None
+    pregnancy_outcome = row["pregnancy_outcome"] if "pregnancy_outcome" in row else None
     return User(
         id=row["id"],
         name=row["name"],
@@ -134,13 +153,23 @@ def _row_to_user(row: Any) -> User:
         onboarding_state=onboarding_state,
         pacing_preferences=dict(pacing_preferences or {}),
         cross_thread_sharing_default=cross_thread_sharing_default,
+        pregnancy_edd=pregnancy_edd,
+        pregnancy_dating_basis=pregnancy_dating_basis,
+        pregnancy_lmp_date=pregnancy_lmp_date,
+        pregnancy_scan_date=pregnancy_scan_date,
+        pregnancy_scan_corrected_at=pregnancy_scan_corrected_at,
+        pregnancy_started_at=pregnancy_started_at,
+        pregnancy_ended_at=pregnancy_ended_at,
+        pregnancy_outcome=pregnancy_outcome,
     )
 
 
 async def fetch_user_by_id(pool: Any, user_id: UUID) -> User:
     row = await pool.fetchrow(
         """
-        SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default
+        SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default,
+               pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date,
+               pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome
         FROM users
         WHERE id = $1
         """,
@@ -159,6 +188,14 @@ async def fetch_user_by_id(pool: Any, user_id: UUID) -> User:
             onboarding_state=user.onboarding_state,
             pacing_preferences=user.pacing_preferences,
             cross_thread_sharing_default=user.cross_thread_sharing_default,
+            pregnancy_edd=user.pregnancy_edd,
+            pregnancy_dating_basis=user.pregnancy_dating_basis,
+            pregnancy_lmp_date=user.pregnancy_lmp_date,
+            pregnancy_scan_date=user.pregnancy_scan_date,
+            pregnancy_scan_corrected_at=user.pregnancy_scan_corrected_at,
+            pregnancy_started_at=user.pregnancy_started_at,
+            pregnancy_ended_at=user.pregnancy_ended_at,
+            pregnancy_outcome=user.pregnancy_outcome,
         )
     return user
 
@@ -169,7 +206,9 @@ async def upsert_user(pool: Any, name: str, phone: str, default_tz: str) -> User
         INSERT INTO users (name, phone, timezone)
         VALUES ($1, $2, $3)
         ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
-        RETURNING id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default
+        RETURNING id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default,
+                  pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date,
+                  pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome
         """,
         name,
         phone,
