@@ -166,7 +166,13 @@ async def _user_profile_solo(pool: Any, user: User) -> dict[str, Any]:
             "style_notes": "",
             "onboarding_state": "pending",
         }
-    return _row_dict(row)
+    # §16.3 wi 7: surface the canonical user_identities address when present.
+    from app.services.user_identity import resolve_user_address
+    resolved = await resolve_user_address(pool, user.id)
+    profile = _row_dict(row)
+    if resolved is not None:
+        profile["phone"] = resolved
+    return profile
 
 
 async def _fetch_topic_status_solo(

@@ -244,7 +244,13 @@ class ScheduledJobHandlers:
         )
         if row is None:
             raise ValueError(f"user not found for scheduled job: {user_id}")
-        return dict(row)
+        # §16.3 wi 7: prefer user_identities address; fall back to phone column.
+        from app.services.user_identity import resolve_user_address
+        resolved = await resolve_user_address(self.pool, user_id)
+        record = dict(row)
+        if resolved is not None:
+            record["phone"] = resolved
+        return record
 
     async def _weekly_summary_counts(self, user_id: UUID, *, topic_id: UUID) -> dict[str, int]:
         row = await self.pool.fetchrow(
@@ -368,9 +374,15 @@ async def seed_weekly_summaries(pool: Any, *, now: datetime | None = None) -> li
         WHERE weekly_summary_enabled = true
         """
     )
+    # §16.3 wi 7: resolve each user's canonical address via user_identities.
+    from app.services.user_identity import resolve_user_address
     inserted = []
     for row in rows:
-        inserted.append(await schedule_next_weekly_summary(pool, dict(row), now=now))
+        record = dict(row)
+        resolved = await resolve_user_address(pool, record["id"])
+        if resolved is not None:
+            record["phone"] = resolved
+        inserted.append(await schedule_next_weekly_summary(pool, record, now=now))
     return inserted
 
 

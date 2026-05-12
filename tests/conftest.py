@@ -147,6 +147,10 @@ class FakePool:
         self.topics: dict[str, dict[str, Any]] = {}
         # S6 T5: artifact_topics_rows recorded during multi-topic writes
         self.artifact_topics_rows: list[dict[str, Any]] = []
+        # S7 fix 2: user_identities rows keyed by (transport, address) -> user_id.
+        # Tests that want resolve_user_address to return a non-phone value seed
+        # rows here directly.  Default empty so existing tests fall back to phone.
+        self.user_identities: dict[tuple[str, str], UUID] = {}
 
     def link_topic(self, artifact_table: str, artifact_id: UUID, topic_id: UUID) -> None:
         """Register a topic link for an artifact row.
@@ -206,6 +210,17 @@ class FakePool:
             if user is None:
                 return None
             return {"pacing_preferences": user.get("pacing_preferences", {})}
+        if compact.startswith("SELECT phone FROM users WHERE id"):
+            user = self.users.get(args[0])
+            if user is None:
+                return None
+            return {"phone": user.get("phone")}
+        if compact.startswith("SELECT address FROM user_identities WHERE user_id"):
+            user_id_arg, transport_arg = args[0], args[1]
+            for (transport, address), owner in self.user_identities.items():
+                if owner == user_id_arg and transport == transport_arg:
+                    return {"address": address}
+            return None
         if compact.startswith("SELECT cross_thread_sharing_default FROM users WHERE id"):
             user = self.users.get(args[0])
             if user is None:
@@ -1460,9 +1475,21 @@ class FakePool:
                 return None
             return max(rows, key=lambda row: row["sent_at"])["whatsapp_message_id"]
         if 'SELECT owner_user_id' in compact and 'FROM watch_items' in compact and 'WHERE' in compact:
-            return self.watch_items[args[0]]["owner_user_id"]
+            row = self.watch_items.get(args[0])
+            return row.get("owner_user_id") if row else None
         if 'SELECT owner_id' in compact and 'FROM out_of_bounds' in compact and 'WHERE' in compact:
-            return self.out_of_bounds[args[0]]["owner_id"]
+            row = self.out_of_bounds.get(args[0])
+            return row.get("owner_id") if row else None
+        if compact.startswith("SELECT about_user_id FROM memories WHERE id"):
+            row = self.memories.get(args[0])
+            return row.get("about_user_id") if row else None
+        if compact.startswith("SELECT about_user_id FROM observations WHERE id"):
+            row = self.observations.get(args[0])
+            return row.get("about_user_id") if row else None
+        if compact.startswith("SELECT phone FROM users WHERE id"):
+            # Used by app.services.user_identity.resolve_user_address fallback.
+            row = self.users.get(args[0])
+            return row.get("phone") if row else None
         if compact.startswith("SELECT id FROM messages WHERE whatsapp_message_id"):
             wa_id = args[0]
             for row in self.messages.values():
@@ -1512,6 +1539,13 @@ class FakePool:
             return [{"id": row["id"]} for row in self.memories.values() if row["id"] in wanted]
         if compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id <>"):
             return [row for user_id, row in self.users.items() if user_id != args[0]]
+        if compact.startswith("SELECT transport, address FROM user_identities WHERE user_id"):
+            uid = args[0]
+            return [
+                {"transport": transport, "address": address}
+                for (transport, address), owner in self.user_identities.items()
+                if owner == uid
+            ]
         if compact.startswith("SELECT id, name, phone, timezone, weekly_summary_enabled") and "WHERE weekly_summary_enabled = true" in compact:
             rows = []
             for row in self.users.values():

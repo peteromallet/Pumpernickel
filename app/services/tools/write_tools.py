@@ -714,24 +714,69 @@ def _append_note(existing: str | None, note: str) -> str:
     return f"{existing}\n{note}" if existing else note
 
 
-def _assert_solo_about_user(ctx: TurnContext, about_user_id: Any) -> dict[str, Any] | None:
-    """Validate that about_user_id is ctx.user.id for solo bots.
+def _assert_solo_about_user(
+    ctx: TurnContext,
+    target_user_id: Any,
+    *,
+    field_name: str = "about_user_id",
+) -> dict[str, Any] | None:
+    """Validate that *target_user_id* is ctx.user.id for solo bots.
 
     When bot_spec.participants_shape == 'solo', reject:
-      - about_user_id is None (must always target the bound user)
-      - about_user_id != ctx.user.id (cannot target anyone else)
+      - target_user_id is None (must always target the bound user)
+      - target_user_id != ctx.user.id (cannot target anyone else)
 
-    Returns a tool-error dict (matching _tool_error in registry.py:306) on
-    failure, or None if the check passes.  This runs BEFORE the scope guard
-    per lesson #8 — it is an additive pre-check, not a replacement.
+    *field_name* tunes the error message so guards on owner_user_id /
+    owner_id read sensibly.  Returns a tool-error dict (matching _tool_error
+    in registry.py:306) on failure, or None if the check passes.  This runs
+    BEFORE the scope guard per lesson #8 — it is an additive pre-check, not
+    a replacement.
     """
     if getattr(ctx, "bot_spec", None) is None or ctx.bot_spec.participants_shape != "solo":
         return None
-    if about_user_id is None:
-        return {"error": "about_user_id is required for solo bots", "is_error": True}
-    if about_user_id != ctx.user.id:
+    if target_user_id is None:
+        return {"error": f"{field_name} is required for solo bots", "is_error": True}
+    if target_user_id != ctx.user.id:
         return {
-            "error": f"about_user_id {about_user_id} does not match the solo bot's bound user {ctx.user.id}",
+            "error": f"{field_name} {target_user_id} does not match the solo bot's bound user {ctx.user.id}",
+            "is_error": True,
+        }
+    return None
+
+
+async def _assert_solo_owns_row(
+    ctx: TurnContext,
+    *,
+    table: str,
+    row_id: Any,
+    owner_field: str,
+) -> dict[str, Any] | None:
+    """For solo bots, ensure that the existing row at *table.row_id* is owned by ctx.user.id.
+
+    Returns a tool-error dict if the row does not exist or the owner field
+    does not match the bound user; None otherwise.  No-op for non-solo bots.
+
+    The SELECT is unconditional (no topic join) — scope guards still apply
+    separately, but ownership is a stronger invariant: even within scope, a
+    solo bot must not mutate another user's row.
+    """
+    if getattr(ctx, "bot_spec", None) is None or ctx.bot_spec.participants_shape != "solo":
+        return None
+    actual = await ctx.pool.fetchval(
+        f"SELECT {owner_field} FROM {table} WHERE id = $1",
+        row_id,
+    )
+    if actual is None:
+        return {
+            "error": f"{table} row {row_id} not found",
+            "is_error": True,
+        }
+    if actual != ctx.user.id:
+        return {
+            "error": (
+                f"{table}.{owner_field} {actual} does not match the solo bot's bound user "
+                f"{ctx.user.id}"
+            ),
             "is_error": True,
         }
     return None
@@ -791,6 +836,11 @@ async def add_memory(ctx: TurnContext, args: AddMemoryInput) -> AddMemoryOutput:
 
 
 async def update_memory(ctx: TurnContext, args: UpdateMemoryInput) -> UpdateMemoryOutput:
+    _solo_err = await _assert_solo_owns_row(
+        ctx, table="memories", row_id=args.memory_id, owner_field="about_user_id"
+    )
+    if _solo_err is not None:
+        raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -818,6 +868,11 @@ async def update_memory(ctx: TurnContext, args: UpdateMemoryInput) -> UpdateMemo
 
 
 async def supersede_memory(ctx: TurnContext, args: SupersedeMemoryInput) -> SupersedeMemoryOutput:
+    _solo_err = await _assert_solo_owns_row(
+        ctx, table="memories", row_id=args.old_memory_id, owner_field="about_user_id"
+    )
+    if _solo_err is not None:
+        raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -909,6 +964,9 @@ async def update_theme(ctx: TurnContext, args: UpdateThemeInput) -> UpdateThemeO
 
 
 async def add_watch_item(ctx: TurnContext, args: AddWatchItemInput) -> AddWatchItemOutput:
+    _solo_err = _assert_solo_about_user(ctx, args.owner_user_id, field_name="owner_user_id")
+    if _solo_err is not None:
+        raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -990,6 +1048,11 @@ async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> Upd
 
 
 async def address_watch_item(ctx: TurnContext, args: AddressWatchItemInput) -> AddressWatchItemOutput:
+    _solo_err = await _assert_solo_owns_row(
+        ctx, table="watch_items", row_id=args.watch_item_id, owner_field="owner_user_id"
+    )
+    if _solo_err is not None:
+        raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -1060,6 +1123,11 @@ async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObs
 
 
 async def update_observation(ctx: TurnContext, args: UpdateObservationInput) -> UpdateObservationOutput:
+    _solo_err = await _assert_solo_owns_row(
+        ctx, table="observations", row_id=args.observation_id, owner_field="about_user_id"
+    )
+    if _solo_err is not None:
+        raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -1082,6 +1150,11 @@ async def update_observation(ctx: TurnContext, args: UpdateObservationInput) -> 
 
 
 async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddDistillationOutput:
+    if getattr(ctx, "bot_spec", None) is not None and ctx.bot_spec.participants_shape == "solo":
+        for src in args.source_user_ids or []:
+            _solo_err = _assert_solo_about_user(ctx, src, field_name="source_user_ids[*]")
+            if _solo_err is not None:
+                raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -1311,6 +1384,9 @@ async def revise_distillation(ctx: TurnContext, args: ReviseDistillationInput) -
 
 
 async def add_oob(ctx: TurnContext, args: AddOOBInput) -> AddOOBOutput:
+    _solo_err = _assert_solo_about_user(ctx, args.owner_id, field_name="owner_id")
+    if _solo_err is not None:
+        raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -1399,6 +1475,11 @@ async def update_oob(ctx: TurnContext, args: UpdateOOBInput) -> UpdateOOBOutput:
 
 
 async def lift_oob(ctx: TurnContext, args: LiftOOBInput) -> LiftOOBOutput:
+    _solo_err = await _assert_solo_owns_row(
+        ctx, table="out_of_bounds", row_id=args.oob_id, owner_field="owner_id"
+    )
+    if _solo_err is not None:
+        raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})

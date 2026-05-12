@@ -146,7 +146,21 @@ async def fetch_user_by_id(pool: Any, user_id: UUID) -> User:
         """,
         user_id,
     )
-    return _row_to_user(row)
+    user = _row_to_user(row)
+    # §16.3 wi 7: resolve address via user_identities, falling back to phone.
+    from app.services.user_identity import resolve_user_address
+    resolved = await resolve_user_address(pool, user_id)
+    if resolved is not None:
+        user = User(
+            id=user.id,
+            name=user.name,
+            phone=resolved,
+            timezone=user.timezone,
+            onboarding_state=user.onboarding_state,
+            pacing_preferences=user.pacing_preferences,
+            cross_thread_sharing_default=user.cross_thread_sharing_default,
+        )
+    return user
 
 
 async def upsert_user(pool: Any, name: str, phone: str, default_tz: str) -> User:

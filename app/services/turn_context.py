@@ -74,7 +74,10 @@ async def partner_of(pool: Any, user: User) -> User:
     if len(rows) != 1:
         raise ValueError(f"expected exactly one partner for user {user.id}, found {len(rows)}")
     row = rows[0]
-    return User(id=row["id"], name=row["name"], phone=row["phone"], timezone=row["timezone"])
+    # §16.3 wi 7: prefer the canonical user_identities address; fall back to phone.
+    from app.services.user_identity import resolve_user_address
+    address = await resolve_user_address(pool, row["id"]) or row["phone"]
+    return User(id=row["id"], name=row["name"], phone=address, timezone=row["timezone"])
 
 
 def replace_ctx(ctx: TurnContext, **overrides: Any) -> TurnContext:
