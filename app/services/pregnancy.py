@@ -11,7 +11,7 @@ When ``today`` is omitted, the real current date (UTC) is used.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -215,10 +215,3 @@ def _as_date(dt: datetime) -> date:
         return dt.date()
     # Naive datetime — treat as UTC
     return dt.replace(tzinfo=timezone.utc).date()
-
-
-# ---------------------------------------------------------------------------
-# stdlib imports (placed at bottom to keep top clean)
-# ---------------------------------------------------------------------------
-
-from datetime import timedelta  # noqa: E402

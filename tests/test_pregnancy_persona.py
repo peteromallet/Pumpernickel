@@ -1,9 +1,9 @@
 """Tests for the Tante Rosi persona prompt module.
 
-Phase 1: verifies the placeholder persona imports cleanly and renders
-a system prompt without error.  Phase 2 will add assertion tests for
-specific persona content strings (medical-defer phrasing, onboarding
-script, loss-handling guidance, red-flag triggers).
+Phase 1 verified the placeholder persona imported and rendered. Phase 2
+adds assertion tests for the real content: German-default language
+stance, medical-defer phrasing, red-flag escalation triggers, loss
+handling, onboarding script, and boundary refusals.
 """
 
 from __future__ import annotations
@@ -159,3 +159,124 @@ class TestBuildTanteRosiSpec:
         assert len(result) > 0
         assert "Tante Rosi" in result
         assert "Anna" in result
+
+
+class TestTanteRosiPersonaContent:
+    """Phase 2 content assertions — the persona must encode specific guardrails."""
+
+    @staticmethod
+    def _render(onboarding_state: str | None = None) -> str:
+        from app.bots.prompts.tante_rosi import render_system_prompt
+
+        return render_system_prompt(
+            assistant_name="Tante Rosi",
+            user_name="Anna",
+            prompt_version="v1",
+            onboarding_state=onboarding_state,
+        )
+
+    def test_default_language_is_german_with_match_fallback(self):
+        """Persona instructs German by default, match user's language otherwise."""
+        result = self._render()
+        assert "German" in result
+        # The instruction must include matching the user's language when they
+        # clearly use another, not just German-only.
+        assert "another language" in result.lower() or "match" in result.lower()
+
+    def test_uses_du_not_sie(self):
+        """German register is informal 'du'."""
+        result = self._render()
+        assert '"du"' in result
+        # Explicit guidance against Sie (formal).
+        assert '"Sie"' in result  # mentioned as the form to avoid
+
+    def test_avoids_saccharine_pet_names(self):
+        """Persona explicitly tells the bot not to use pet names."""
+        result = self._render()
+        assert "mein Schatz" in result or "meine Liebe" in result
+        # Either appears in the prohibition list (signals the rule is encoded).
+
+    def test_medical_defer_phrasing_present(self):
+        """The 'I am not a doctor' refrain must be in the prompt."""
+        result = self._render()
+        assert "keine Ärztin" in result
+        assert "Hebamme" in result or "Ärztin" in result
+
+    def test_red_flag_bleeding_escalation(self):
+        """Heavy bleeding red flag must escalate to Notaufnahme."""
+        result = self._render()
+        assert "Blutung" in result
+        assert "Notaufnahme" in result
+
+    def test_red_flag_preeclampsia_escalation(self):
+        """Severe headache + vision changes red flag references Präeklampsie."""
+        result = self._render()
+        assert "Präeklampsie" in result
+
+    def test_red_flag_reduced_fetal_movement(self):
+        """Reduced fetal movement red flag references Kindsbewegungen + Kreißsaal."""
+        result = self._render()
+        assert "Kindsbewegungen" in result
+        assert "Kreißsaal" in result
+
+    def test_red_flag_self_harm_routes_to_crisis(self):
+        """Self-harm red flag must reference the crisis protocol."""
+        result = self._render()
+        assert "sich selbst zu verletzen" in result.lower() or "self-harm" in result.lower()
+        # Must mention crisis/clinical routing.
+        assert "crisis" in result.lower() or "Krise" in result
+
+    def test_loss_handling_no_forward_momentum(self):
+        """Loss handling must forbid 'try again' / fatalistic framing."""
+        result = self._render()
+        assert "Verlust" in result or "loss" in result.lower()
+        # Explicit prohibition on common bad responses.
+        assert "nochmal versuchen" in result or "try again" in result.lower()
+        assert "aus einem Grund" in result or "for a reason" in result.lower()
+
+    def test_loss_no_euphemism_unless_user_uses_first(self):
+        """Persona avoids euphemisms like Sternenkind unless user uses them first."""
+        result = self._render()
+        # Sternenkind or Engelskind should appear as a 'don't use unless user does first'.
+        assert "Sternenkind" in result or "Engelskind" in result
+
+    def test_onboarding_capture_script_present(self):
+        """When EDD is null, persona must instruct capture of due date or LMP."""
+        result = self._render()
+        assert "Entbindungstermin" in result
+        assert "set_pregnancy_edd" in result
+        assert "dating_basis" in result
+
+    def test_onboarding_first_contact_appears_when_pending(self):
+        """When onboarding_state is pending, the first-contact block appears."""
+        result_pending = self._render(onboarding_state="pending")
+        result_complete = self._render(onboarding_state="complete")
+        assert "First Contact" in result_pending
+        assert "First Contact" not in result_complete
+
+    def test_boundary_redirect_relationship_to_veas(self):
+        """Relationship-question boundary redirects to Véas."""
+        result = self._render()
+        assert "Véas" in result
+
+    def test_boundary_no_medical_diagnosis(self):
+        """Persona refuses specific medical diagnosis/treatment."""
+        result = self._render()
+        # The Boundaries section names diagnosis or treatment as off-limits.
+        assert "diagnosis" in result.lower() or "Diagnose" in result.lower()
+
+    def test_handles_pregnancy_state_via_hot_context_not_inferred(self):
+        """Persona must tell the bot to use tools only on explicit user signal."""
+        result = self._render()
+        assert "Don't infer" in result or "don't infer" in result
+        assert "explicitly" in result.lower()
+
+    def test_one_question_per_reply_rule(self):
+        """Persona enforces the 'one question per reply' rule."""
+        result = self._render()
+        assert "One question per reply" in result or "one question per reply" in result.lower()
+
+    def test_lowercase_pregnancy_appears(self):
+        """The topic word 'pregnancy' must appear (existing test compat)."""
+        result = self._render()
+        assert "pregnancy" in result.lower()
