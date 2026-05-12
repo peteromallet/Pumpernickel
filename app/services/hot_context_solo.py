@@ -268,11 +268,11 @@ async def build_hot_context_solo(
         }
         for row in await pool.fetch(
             f"""\
-            SELECT id, owner_id, shareable_context, severity, review_at
-            FROM out_of_bounds
+            SELECT x.id, x.owner_id, x.shareable_context, x.severity, x.review_at
+            FROM out_of_bounds x
             {join_artifact_topics('x', '$2')}
-            WHERE status = 'active' AND owner_id = $1
-            ORDER BY CASE severity WHEN 'hard' THEN 1 WHEN 'firm' THEN 2 ELSE 3 END, created_at DESC
+            WHERE x.status = 'active' AND x.owner_id = $1
+            ORDER BY CASE x.severity WHEN 'hard' THEN 1 WHEN 'firm' THEN 2 ELSE 3 END, x.created_at DESC
             """,
             user.id,
             primary_topic_id,
@@ -293,12 +293,12 @@ async def build_hot_context_solo(
         }
         for row in await pool.fetch(
             f"""\
-            SELECT id, about_user_id, content, COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
-                   last_referenced_at, created_at
-            FROM memories
+            SELECT m.id, m.about_user_id, m.content, COALESCE(m.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+                   m.last_referenced_at, m.created_at
+            FROM memories m
             {join_artifact_topics('m', '$2')}
-            WHERE status = 'active' AND about_user_id = $1
-            ORDER BY COALESCE(last_referenced_at, created_at) DESC
+            WHERE m.status = 'active' AND m.about_user_id = $1
+            ORDER BY COALESCE(m.last_referenced_at, m.created_at) DESC
             LIMIT 80
             """,
             user.id,
@@ -322,11 +322,11 @@ async def build_hot_context_solo(
         }
         for row in await pool.fetch(
             f"""\
-            SELECT id, title, description, status, sentiment, health, last_reinforced_at, last_active_at
-            FROM themes
+            SELECT t.id, t.title, t.description, t.status, t.sentiment, t.health, t.last_reinforced_at, t.last_active_at
+            FROM themes t
             {join_artifact_topics('t', '$1')}
-            WHERE status = 'active'
-            ORDER BY COALESCE(last_reinforced_at, first_seen_at) DESC
+            WHERE t.status = 'active'
+            ORDER BY COALESCE(t.last_reinforced_at, t.first_seen_at) DESC
             LIMIT 10
             """,
             primary_topic_id,
@@ -345,11 +345,11 @@ async def build_hot_context_solo(
         }
         for row in await pool.fetch(
             f"""\
-            SELECT id, owner_user_id, content, due_at, COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids
-            FROM watch_items
+            SELECT w.id, w.owner_user_id, w.content, w.due_at, COALESCE(w.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids
+            FROM watch_items w
             {join_artifact_topics('w', '$2')}
-            WHERE status = 'open' AND owner_user_id = $1
-            ORDER BY COALESCE(due_at, created_at) ASC
+            WHERE w.status = 'open' AND w.owner_user_id = $1
+            ORDER BY COALESCE(w.due_at, w.created_at) ASC
             """,
             user.id,
             primary_topic_id,
@@ -372,14 +372,14 @@ async def build_hot_context_solo(
         }
         for row in await pool.fetch(
             f"""\
-            SELECT id, about_user_id, content, confidence, significance,
-                   COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
-                   last_reinforced_at, created_at
-            FROM observations
+            SELECT o.id, o.about_user_id, o.content, o.confidence, o.significance,
+                   COALESCE(o.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+                   o.last_reinforced_at, o.created_at
+            FROM observations o
             {join_artifact_topics('o', '$1')}
-            WHERE status = 'active' AND significance >= 3
-            ORDER BY recency_weighted_score(significance, last_reinforced_at, created_at) DESC NULLS LAST,
-                     COALESCE(last_reinforced_at, created_at) DESC
+            WHERE o.status = 'active' AND o.significance >= 3
+            ORDER BY recency_weighted_score(o.significance, o.last_reinforced_at, o.created_at) DESC NULLS LAST,
+                     COALESCE(o.last_reinforced_at, o.created_at) DESC
             LIMIT 80
             """,
             primary_topic_id,
@@ -403,18 +403,18 @@ async def build_hot_context_solo(
     # Distillations: scoped to primary topic, source includes user
     distillation_rows = await pool.fetch(
         f"""\
-        SELECT id, content, confidence, status, sensitivity, visibility, shareable_summary,
-               COALESCE(source_user_ids, '{{}}'::uuid[]) AS source_user_ids,
-               COALESCE(related_memory_ids, '{{}}'::uuid[]) AS related_memory_ids,
-               COALESCE(related_observation_ids, '{{}}'::uuid[]) AS related_observation_ids,
-               COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
-               COALESCE(supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
-               revision_note, revision_count, updated_at, created_at
-        FROM distillations
+        SELECT d.id, d.content, d.confidence, d.status, d.sensitivity, d.visibility, d.shareable_summary,
+               COALESCE(d.source_user_ids, '{{}}'::uuid[]) AS source_user_ids,
+               COALESCE(d.related_memory_ids, '{{}}'::uuid[]) AS related_memory_ids,
+               COALESCE(d.related_observation_ids, '{{}}'::uuid[]) AS related_observation_ids,
+               COALESCE(d.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+               COALESCE(d.supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
+               d.revision_note, d.revision_count, d.updated_at, d.created_at
+        FROM distillations d
         {join_artifact_topics('d', '$2')}
-        WHERE status = 'active'
-          AND source_user_ids && $1::uuid[]
-        ORDER BY updated_at DESC, created_at DESC
+        WHERE d.status = 'active'
+          AND d.source_user_ids && $1::uuid[]
+        ORDER BY d.updated_at DESC, d.created_at DESC
         LIMIT 12
         """,
         [user.id],

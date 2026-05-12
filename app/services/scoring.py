@@ -137,14 +137,14 @@ async def rescore_observations(
         raise RuntimeError("rescore_observations: no topic_id provided and relationship topic not available")
     rows = await pool.fetch(
         f"""
-        SELECT id, content
-        FROM observations
+        SELECT o.id, o.content
+        FROM observations o
         {join_artifact_topics('o', '$2')}
-        WHERE (scoring_prompt_version IS NULL
-           OR scoring_prompt_version < $1
-           OR scoring_prompt_version LIKE '%failed'
-           OR needs_rescoring = true)
-        ORDER BY created_at
+        WHERE (o.scoring_prompt_version IS NULL
+           OR o.scoring_prompt_version < $1
+           OR o.scoring_prompt_version LIKE '%failed'
+           OR o.needs_rescoring = true)
+        ORDER BY o.created_at
         """,
         prompt_version_threshold, topic,
     )

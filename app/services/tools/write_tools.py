@@ -635,7 +635,7 @@ async def _require_existing_distillation_links(
         else:
             alias = {'memories': 'm', 'observations': 'o', 'themes': 't'}.get(table, table[:1])
             rows = await ctx.pool.fetch(
-                f"SELECT id FROM {table} {join_artifact_topics(alias, '$2')} WHERE id = ANY($1::uuid[])",
+                f"SELECT {alias}.id FROM {table} {alias} {join_artifact_topics(alias, '$2')} WHERE {alias}.id = ANY($1::uuid[])",
                 ids, ctx.primary_topic_id,
             )
         found = {row["id"] for row in rows}
@@ -1029,7 +1029,7 @@ async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> Upd
     row = await ctx.pool.fetchrow(f"UPDATE watch_items SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
     if args.due_at is not None:
         owner_user_id = await ctx.pool.fetchval(
-            f"SELECT owner_user_id FROM watch_items {join_artifact_topics('w', '$2')} WHERE id=$1",
+            f"SELECT w.owner_user_id FROM watch_items w {join_artifact_topics('w', '$2')} WHERE w.id=$1",
             args.watch_item_id, ctx.primary_topic_id,
         )
         await _schedule_context_job(
@@ -1456,7 +1456,7 @@ async def update_oob(ctx: TurnContext, args: UpdateOOBInput) -> UpdateOOBOutput:
     row = await ctx.pool.fetchrow(f"UPDATE out_of_bounds SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
     if args.review_at is not None:
         owner_id = await ctx.pool.fetchval(
-            f"SELECT owner_id FROM out_of_bounds {join_artifact_topics('x', '$2')} WHERE id=$1",
+            f"SELECT x.owner_id FROM out_of_bounds x {join_artifact_topics('x', '$2')} WHERE x.id=$1",
             args.oob_id, ctx.primary_topic_id,
         )
         await _schedule_context_job(

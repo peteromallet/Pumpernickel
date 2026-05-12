@@ -264,9 +264,9 @@ class ScheduledJobHandlers:
                       AND (sender_id = $1 OR recipient_id = $1)
                 )::int AS conversation_count,
                 (
-                    (SELECT COUNT(*) FROM themes {join_artifact_topics('t', '$3')} WHERE t.status = 'active')
+                    (SELECT COUNT(*) FROM themes t {join_artifact_topics('t', '$3')} WHERE t.status = 'active')
                     +
-                    (SELECT COUNT(*) FROM watch_items {join_artifact_topics('w', '$4')} WHERE w.owner_user_id = $2 AND w.status = 'open')
+                    (SELECT COUNT(*) FROM watch_items w {join_artifact_topics('w', '$4')} WHERE w.owner_user_id = $2 AND w.status = 'open')
                 )::int AS ongoing_count
             """,
             user_id, user_id, topic_id, topic_id,
@@ -281,10 +281,10 @@ class ScheduledJobHandlers:
             return None
         row = await self.pool.fetchrow(
             f"""
-            SELECT id, owner_user_id, content, due_at, status
-            FROM watch_items
+            SELECT w.id, w.owner_user_id, w.content, w.due_at, w.status
+            FROM watch_items w
             {join_artifact_topics('w', '$2')}
-            WHERE id = $1
+            WHERE w.id = $1
             """,
             watch_item_id, topic_id,
         )

@@ -116,12 +116,12 @@ async def _active_oob_entries(pool: Any, owner_ids: list[UUID], *, topic_id: UUI
         return []
     rows = await pool.fetch(
         f"""
-        SELECT id, sensitive_core, shareable_context, severity
-        FROM out_of_bounds
+        SELECT x.id, x.sensitive_core, x.shareable_context, x.severity
+        FROM out_of_bounds x
         {join_artifact_topics('x', '$2')}
-        WHERE owner_id = ANY($1::uuid[])
-          AND status = 'active'
-        ORDER BY created_at DESC
+        WHERE x.owner_id = ANY($1::uuid[])
+          AND x.status = 'active'
+        ORDER BY x.created_at DESC
         """,
         owner_ids, topic_id,
     )

@@ -523,18 +523,18 @@ async def list_themes(ctx: TurnContext, args: ListThemesInput) -> ListThemesOutp
     if _err is not None:
         return ListThemesOutput(is_error=True, error=_err, themes=[])
     order_by = {
-        "last_reinforced": "COALESCE(last_reinforced_at, first_seen_at) DESC",
-        "last_active": "last_active_at DESC",
-        "created": "first_seen_at DESC",
+        "last_reinforced": "COALESCE(t.last_reinforced_at, t.first_seen_at) DESC",
+        "last_active": "t.last_active_at DESC",
+        "created": "t.first_seen_at DESC",
     }[args.sort_by.value]
-    status_clause = "WHERE status = 'active'" if args.active_only else ""
+    status_clause = "WHERE t.status = 'active'" if args.active_only else ""
     rows = await ctx.pool.fetch(
         f"""
-        SELECT id, title, status, sentiment, health, last_reinforced_at, last_active_at
-        FROM themes
+        SELECT t.id, t.title, t.status, t.sentiment, t.health, t.last_reinforced_at, t.last_active_at
+        FROM themes t
         {join_artifact_topics('t', '$2')}
         {status_clause}
-        ORDER BY {order_by}, title ASC
+        ORDER BY {order_by}, t.title ASC
         LIMIT $1
         """,
         args.limit, ctx.primary_topic_id,
@@ -549,22 +549,22 @@ async def get_theme(ctx: TurnContext, args: GetThemeInput) -> GetThemeOutput:
         return GetThemeOutput(is_error=True, error=_err, theme=None)
     row = await ctx.pool.fetchrow(
         f"""
-        SELECT id, title, description, status, sentiment, health, first_seen_at,
-               last_reinforced_at, last_active_at
-        FROM themes
+        SELECT t.id, t.title, t.description, t.status, t.sentiment, t.health, t.first_seen_at,
+               t.last_reinforced_at, t.last_active_at
+        FROM themes t
         {join_artifact_topics('t', '$2')}
-        WHERE id = $1
+        WHERE t.id = $1
         """,
         args.theme_id, ctx.primary_topic_id,
     )
     if row is None:
         return GetThemeOutput(theme=None)
     memory_rows = await ctx.pool.fetch(
-        f"SELECT id FROM memories {join_artifact_topics('m', '$2')} WHERE $1 = ANY(COALESCE(related_theme_ids, '{{}}'::uuid[]))",
+        f"SELECT m.id FROM memories m {join_artifact_topics('m', '$2')} WHERE $1 = ANY(COALESCE(m.related_theme_ids, '{{}}'::uuid[]))",
         args.theme_id, ctx.primary_topic_id,
     )
     observation_rows = await ctx.pool.fetch(
-        f"SELECT id FROM observations {join_artifact_topics('o', '$2')} WHERE $1 = ANY(COALESCE(related_theme_ids, '{{}}'::uuid[]))",
+        f"SELECT o.id FROM observations o {join_artifact_topics('o', '$2')} WHERE $1 = ANY(COALESCE(o.related_theme_ids, '{{}}'::uuid[]))",
         args.theme_id, ctx.primary_topic_id,
     )
     return GetThemeOutput(
@@ -584,25 +584,25 @@ async def get_memories(ctx: TurnContext, args: GetMemoriesInput) -> GetMemoriesO
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
         return GetMemoriesOutput(is_error=True, error=_err, memories=[])
-    clauses = ["status = $1"]
+    clauses = ["m.status = $1"]
     params: list[Any] = [args.status.value]
     if args.couple_only:
-        clauses.append("about_user_id IS NULL")
+        clauses.append("m.about_user_id IS NULL")
     elif args.about_user_id is not None:
         params.append(args.about_user_id)
-        clauses.append(f"about_user_id = ${len(params)}")
+        clauses.append(f"m.about_user_id = ${len(params)}")
     if args.theme_id is not None:
         params.append(args.theme_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(related_theme_ids, '{{}}'::uuid[]))")
+        clauses.append(f"${len(params)} = ANY(COALESCE(m.related_theme_ids, '{{}}'::uuid[]))")
     params.append(args.limit)
     rows = await ctx.pool.fetch(
         f"""
-        SELECT id, about_user_id, content, status, COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
-               created_at, last_referenced_at
-        FROM memories
+        SELECT m.id, m.about_user_id, m.content, m.status, COALESCE(m.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+               m.created_at, m.last_referenced_at
+        FROM memories m
         {join_artifact_topics('m', f'${len(params) + 1}')}
         WHERE {' AND '.join(clauses)}
-        ORDER BY COALESCE(last_referenced_at, created_at) DESC
+        ORDER BY COALESCE(m.last_referenced_at, m.created_at) DESC
         LIMIT ${len(params)}
         """,
         *params, ctx.primary_topic_id,
@@ -619,22 +619,22 @@ async def list_watch_items(ctx: TurnContext, args: ListWatchItemsInput) -> ListW
     params: list[Any] = []
     if args.owner_user_id is not None:
         params.append(args.owner_user_id)
-        clauses.append(f"owner_user_id = ${len(params)}")
+        clauses.append(f"w.owner_user_id = ${len(params)}")
     if args.status is not None:
         params.append(args.status.value)
-        clauses.append(f"status = ${len(params)}")
+        clauses.append(f"w.status = ${len(params)}")
     if args.due_before is not None:
         params.append(args.due_before)
-        clauses.append(f"due_at <= ${len(params)}")
+        clauses.append(f"w.due_at <= ${len(params)}")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = await ctx.pool.fetch(
         f"""
-        SELECT id, owner_user_id, content, due_at, status, addressing_note, created_at, addressed_at,
-               COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids
-        FROM watch_items
+        SELECT w.id, w.owner_user_id, w.content, w.due_at, w.status, w.addressing_note, w.created_at, w.addressed_at,
+               COALESCE(w.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids
+        FROM watch_items w
         {join_artifact_topics('w', f'${len(params) + 1}')}
         {where}
-        ORDER BY COALESCE(due_at, created_at) ASC
+        ORDER BY COALESCE(w.due_at, w.created_at) ASC
         """,
         *params, ctx.primary_topic_id,
     )
@@ -646,29 +646,29 @@ async def get_observations(ctx: TurnContext, args: GetObservationsInput) -> GetO
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
         return GetObservationsOutput(is_error=True, error=_err, observations=[])
-    clauses = ["status = $1"]
+    clauses = ["o.status = $1"]
     params: list[Any] = [args.status.value]
     if args.theme_id is not None:
         params.append(args.theme_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(related_theme_ids, '{{}}'::uuid[]))")
+        clauses.append(f"${len(params)} = ANY(COALESCE(o.related_theme_ids, '{{}}'::uuid[]))")
     if args.about_user_id is not None:
         params.append(args.about_user_id)
-        clauses.append(f"about_user_id = ${len(params)}")
+        clauses.append(f"o.about_user_id = ${len(params)}")
     if args.min_significance is not None:
         params.append(args.min_significance)
-        clauses.append(f"significance >= ${len(params)}")
+        clauses.append(f"o.significance >= ${len(params)}")
     params.append(args.limit)
     rows = await ctx.pool.fetch(
         f"""
-        SELECT id, content, about_user_id, confidence, significance, status,
-               COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
-               COALESCE(supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
-               created_at, last_reinforced_at, surfaced_count
-        FROM observations
+        SELECT o.id, o.content, o.about_user_id, o.confidence, o.significance, o.status,
+               COALESCE(o.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+               COALESCE(o.supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
+               o.created_at, o.last_reinforced_at, o.surfaced_count
+        FROM observations o
         {join_artifact_topics('o', f'${len(params) + 1}')}
         WHERE {' AND '.join(clauses)}
-        ORDER BY recency_weighted_score(significance, last_reinforced_at, created_at) DESC NULLS LAST,
-                 COALESCE(last_reinforced_at, created_at) DESC
+        ORDER BY recency_weighted_score(o.significance, o.last_reinforced_at, o.created_at) DESC NULLS LAST,
+                 COALESCE(o.last_reinforced_at, o.created_at) DESC
         LIMIT ${len(params)}
         """,
         *params, ctx.primary_topic_id,
@@ -681,49 +681,49 @@ async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> Ge
     if _err is not None:
         return GetDistillationsOutput(is_error=True, error=_err, distillations=[])
     logger.info("read tool get_distillations turn_id=%s", ctx.turn_id)
-    clauses = ["status = $1"]
+    clauses = ["d.status = $1"]
     params: list[Any] = [args.status.value]
     if args.source_user_id is not None:
         params.append(args.source_user_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(source_user_ids, '{{}}'::uuid[]))")
+        clauses.append(f"${len(params)} = ANY(COALESCE(d.source_user_ids, '{{}}'::uuid[]))")
     if args.related_theme_id is not None:
         params.append(args.related_theme_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(related_theme_ids, '{{}}'::uuid[]))")
+        clauses.append(f"${len(params)} = ANY(COALESCE(d.related_theme_ids, '{{}}'::uuid[]))")
     if args.related_memory_id is not None:
         params.append(args.related_memory_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(related_memory_ids, '{{}}'::uuid[]))")
+        clauses.append(f"${len(params)} = ANY(COALESCE(d.related_memory_ids, '{{}}'::uuid[]))")
     if args.related_observation_id is not None:
         params.append(args.related_observation_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(related_observation_ids, '{{}}'::uuid[]))")
+        clauses.append(f"${len(params)} = ANY(COALESCE(d.related_observation_ids, '{{}}'::uuid[]))")
     if args.supporting_message_id is not None:
         params.append(args.supporting_message_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(supporting_message_ids, '{{}}'::uuid[]))")
+        clauses.append(f"${len(params)} = ANY(COALESCE(d.supporting_message_ids, '{{}}'::uuid[]))")
     if args.text_contains:
         params.append(f"%{args.text_contains}%")
         clauses.append(
             f"""(
-                content ILIKE ${len(params)}
-                OR shareable_summary ILIKE ${len(params)}
-                OR revision_note ILIKE ${len(params)}
+                d.content ILIKE ${len(params)}
+                OR d.shareable_summary ILIKE ${len(params)}
+                OR d.revision_note ILIKE ${len(params)}
             )"""
         )
     params.append(args.limit)
     rows = await ctx.pool.fetch(
         f"""
-        SELECT id, content, confidence, status, sensitivity, visibility, shareable_summary,
-               COALESCE(source_user_ids, '{{}}'::uuid[]) AS source_user_ids,
-               COALESCE(related_memory_ids, '{{}}'::uuid[]) AS related_memory_ids,
-               COALESCE(related_observation_ids, '{{}}'::uuid[]) AS related_observation_ids,
-               COALESCE(related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
-               COALESCE(supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
-               created_from_tool_call_id, triggering_message_id,
-               supersedes_distillation_id, superseded_by_distillation_id,
-               revision_note, revision_count,
-               created_at, updated_at, revised_at, retired_at
-        FROM distillations
+        SELECT d.id, d.content, d.confidence, d.status, d.sensitivity, d.visibility, d.shareable_summary,
+               COALESCE(d.source_user_ids, '{{}}'::uuid[]) AS source_user_ids,
+               COALESCE(d.related_memory_ids, '{{}}'::uuid[]) AS related_memory_ids,
+               COALESCE(d.related_observation_ids, '{{}}'::uuid[]) AS related_observation_ids,
+               COALESCE(d.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+               COALESCE(d.supporting_message_ids, '{{}}'::uuid[]) AS supporting_message_ids,
+               d.created_from_tool_call_id, d.triggering_message_id,
+               d.supersedes_distillation_id, d.superseded_by_distillation_id,
+               d.revision_note, d.revision_count,
+               d.created_at, d.updated_at, d.revised_at, d.retired_at
+        FROM distillations d
         {join_artifact_topics('d', f'${len(params) + 1}')}
         WHERE {' AND '.join(clauses)}
-        ORDER BY updated_at DESC, created_at DESC
+        ORDER BY d.updated_at DESC, d.created_at DESC
         LIMIT ${len(params)}
         """,
         *params, ctx.primary_topic_id,
@@ -765,17 +765,17 @@ async def get_oob(ctx: TurnContext, args: GetOOBInput) -> GetOOBOutput:
     params: list[Any] = []
     if args.owner_id is not None:
         params.append(args.owner_id)
-        clauses.append(f"owner_id = ${len(params)}")
+        clauses.append(f"x.owner_id = ${len(params)}")
     if not args.include_lifted:
-        clauses.append("status = 'active'")
+        clauses.append("x.status = 'active'")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = await ctx.pool.fetch(
         f"""
-        SELECT id, owner_id, shareable_context, severity, status, created_at, review_at
-        FROM out_of_bounds
+        SELECT x.id, x.owner_id, x.shareable_context, x.severity, x.status, x.created_at, x.review_at
+        FROM out_of_bounds x
         {join_artifact_topics('x', f'${len(params) + 1}')}
         {where}
-        ORDER BY created_at DESC
+        ORDER BY x.created_at DESC
         """,
         *params, ctx.primary_topic_id,
     )
