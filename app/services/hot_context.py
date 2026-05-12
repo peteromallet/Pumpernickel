@@ -374,7 +374,7 @@ async def build_hot_context(
             WHERE x.status = 'active' AND x.owner_id = ANY($1::uuid[])
             ORDER BY CASE x.severity WHEN 'hard' THEN 1 WHEN 'firm' THEN 2 ELSE 3 END, x.created_at DESC
             """,
-            [user.id, partner.id, primary_topic],
+            [user.id, partner.id], primary_topic,
         )
     ]
     memories = [
@@ -398,7 +398,7 @@ async def build_hot_context(
             ORDER BY COALESCE(m.last_referenced_at, m.created_at) DESC
             LIMIT 80
             """,
-            [user.id, partner.id, primary_topic],
+            [user.id, partner.id], primary_topic,
         )
     ]
     active_themes = [
@@ -423,7 +423,7 @@ async def build_hot_context(
             ORDER BY COALESCE(t.last_reinforced_at, t.first_seen_at) DESC
             LIMIT 10
             """,
-            [primary_topic]
+            primary_topic,
         )
     ]
     open_watch_items = [
@@ -471,7 +471,7 @@ async def build_hot_context(
                      COALESCE(o.last_reinforced_at, o.created_at) DESC
             LIMIT 80
             """,
-            [primary_topic]
+            primary_topic,
         )
     ]
     message_rows = await pool.fetch(
@@ -506,7 +506,7 @@ async def build_hot_context(
         ORDER BY d.updated_at DESC, d.created_at DESC
         LIMIT 12
         """,
-        [user.id, partner.id, primary_topic],
+        [user.id, partner.id], primary_topic,
     )
     distillations: list[dict[str, Any]] = []
     for row in distillation_rows:
