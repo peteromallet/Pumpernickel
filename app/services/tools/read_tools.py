@@ -730,8 +730,9 @@ async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> Ge
     )
     sharing_defaults = {
         ctx.user.id: normalize_sharing_default(ctx.user.cross_thread_sharing_default),
-        ctx.partner.id: normalize_sharing_default(ctx.partner.cross_thread_sharing_default),
     }
+    if ctx.partner is not None:
+        sharing_defaults[ctx.partner.id] = normalize_sharing_default(ctx.partner.cross_thread_sharing_default)
     visible_rows = []
     for row in rows:
         source_user_ids = list(row["source_user_ids"] or [])

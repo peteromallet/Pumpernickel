@@ -83,6 +83,8 @@ def build_coach_spec() -> BotSpec:
                 "send_bridge_candidate",
                 "list_bridge_candidates",
                 "escalate_to_partner",
+                "search_messages",
+                "recent_activity",
             }
         ),
         bot_spec_version="1.2.0",
