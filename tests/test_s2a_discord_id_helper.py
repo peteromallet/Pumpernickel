@@ -9,13 +9,10 @@ Verifies:
 
 from __future__ import annotations
 
-import os
-import pytest
-
 from app.services.discord_id import (
-    discord_bot_user_id,
-    _decode_discord_user_id,
     _DISCORD_BOT_USER_ID_RE,
+    _decode_discord_user_id,
+    discord_bot_user_id,
 )
 
 
@@ -75,14 +72,14 @@ class TestDiscordBotUserID:
     def test_returns_env_var_when_set(self, monkeypatch):
         """DISCORD_BOT_USER_ID env var takes priority."""
         monkeypatch.setenv("DISCORD_BOT_USER_ID", "999888777666555444")
-        result = discord_bot_user_id()
+        result = discord_bot_user_id("mediator")
         assert result == "999888777666555444"
 
     def test_env_var_must_be_digit_only(self, monkeypatch):
         """Non-digit DISCORD_BOT_USER_ID is rejected (falls back to token decode)."""
         monkeypatch.setenv("DISCORD_BOT_USER_ID", "not-digits")
         monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
-        result = discord_bot_user_id()
+        result = discord_bot_user_id("mediator")
         assert result is None, f"Non-digit env var should be rejected, got {result}"
 
     def test_falls_back_to_token_decode(self, monkeypatch):
@@ -90,21 +87,21 @@ class TestDiscordBotUserID:
         monkeypatch.delenv("DISCORD_BOT_USER_ID", raising=False)
         # Use a valid token segment that decodes to all digits
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "MTIzNDU2Nzg5MA.sig.hmac")
-        result = discord_bot_user_id()
+        result = discord_bot_user_id("mediator")
         assert result == "1234567890", f"Got {result}"
 
     def test_returns_none_when_both_empty(self, monkeypatch):
         """Returns None when neither env var is available."""
         monkeypatch.delenv("DISCORD_BOT_USER_ID", raising=False)
         monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
-        result = discord_bot_user_id()
+        result = discord_bot_user_id("mediator")
         assert result is None
 
     def test_returns_none_when_token_is_empty_string(self, monkeypatch):
         """Empty DISCORD_BOT_TOKEN returns None."""
         monkeypatch.delenv("DISCORD_BOT_USER_ID", raising=False)
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "")
-        result = discord_bot_user_id()
+        result = discord_bot_user_id("mediator")
         assert result is None
 
 

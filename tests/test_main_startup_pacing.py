@@ -26,7 +26,7 @@ def test_configure_coalescer_keeps_legacy_path_for_non_discord(fake_pool, app_en
 
     _configure_coalescer(app, fake_pool, settings)
 
-    assert app.state.discord_pacer is None
+    assert app.state.discord_pacers == {}
     assert app.state.coalescer.pacer is None
     assert app.state.coalescer.on_paced_answer is None
     assert app.state.coalescer.on_paced_reaction is None
@@ -38,7 +38,7 @@ def test_configure_coalescer_keeps_legacy_path_when_discord_pacing_disabled(fake
 
     _configure_coalescer(app, fake_pool, settings)
 
-    assert app.state.discord_pacer is None
+    assert app.state.discord_pacers == {}
     assert app.state.coalescer.pacer is None
     assert app.state.coalescer.on_paced_answer is None
     assert app.state.coalescer.on_paced_reaction is None
@@ -71,13 +71,13 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
         if before_paced_send is not None:
             await before_paced_send("human-paced answer")
 
-    async def fake_add_reaction(to, message_id, emoji):
+    async def fake_add_reaction(to, message_id, emoji, *, bot_id="mediator"):
         reaction_calls.append((to, message_id, emoji))
 
-    async def fake_send_typing(channel_id):
+    async def fake_send_typing(channel_id, *, bot_id="mediator"):
         return None
 
-    async def fake_get_dm_channel_id(to):
+    async def fake_get_dm_channel_id(to, *, bot_id="mediator"):
         assert to == "15555550100"
         return "channel-1"
 
@@ -96,15 +96,16 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
 
     _configure_coalescer(app, fake_pool, settings)
 
-    assert isinstance(app.state.discord_pacer, DiscordPacer)
-    assert app.state.coalescer.pacer is app.state.discord_pacer
+    mediator_pacer = app.state.discord_pacers["mediator"]
+    assert isinstance(mediator_pacer, DiscordPacer)
+    assert app.state.coalescer.pacer is mediator_pacer
     assert app.state.coalescer.debounce_seconds == settings.discord_pacing_burst_window_s
     assert app.state.coalescer.on_paced_answer is not None
     assert app.state.coalescer.on_paced_reaction is not None
     assert app.state.coalescer.on_live_typing is not None
-    monkeypatch.setattr(app.state.discord_pacer, "perform_send_typing", fake_perform_send_typing)
+    monkeypatch.setattr(mediator_pacer, "perform_send_typing", fake_perform_send_typing)
     monkeypatch.setattr(
-        app.state.discord_pacer,
+        mediator_pacer,
         "perform_thinking_typing_until_stopped",
         fake_perform_thinking_typing_until_stopped,
     )

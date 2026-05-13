@@ -2,19 +2,71 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from app.config import get_settings
 from app.services.discord import (
+    DiscordClient,
     DiscordGatewayBot,
     add_reaction,
     catch_up_recent_messages,
     is_allowed_discord_user,
     message_to_meta_payload,
+    register_client,
     seed_partner_users,
     send_text,
 )
 from app.services.pacer import DiscordPacer
+
+
+def _make_test_client(bot_id: str = "mediator", bot_user_id: str = "123456789") -> DiscordClient:
+    """Create a minimal DiscordClient stub for gateway tests."""
+    client = DiscordClient.__new__(DiscordClient)
+    client.bot_id = bot_id
+    client._token = "test.token.here"
+    client._http = httpx.AsyncClient()
+    client.bot_user_id = bot_user_id
+    return client
+
+
+class _MockRest:
+    """Mock DiscordRestClient for capturing REST request calls."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def request(self, method, path, **kwargs):
+        self.calls.append((method, path, kwargs))
+        return _MockResponse()
+
+    async def send_message(self, channel_id, *, content):
+        self.calls.append(("POST", f"/channels/{channel_id}/messages", {"content": content}))
+        return _MockResponse()
+
+    async def send_typing(self, channel_id):
+        self.calls.append(("POST", f"/channels/{channel_id}/typing", {}))
+        return _MockResponse()
+
+    async def edit_message(self, channel_id, message_id, *, content):
+        self.calls.append(("PATCH", f"/channels/{channel_id}/messages/{message_id}", {"content": content}))
+        return _MockResponse()
+
+    async def delete_message(self, channel_id, message_id):
+        self.calls.append(("DELETE", f"/channels/{channel_id}/messages/{message_id}", {}))
+        return _MockResponse()
+
+    async def fetch_channel_messages(self, channel_id, **params):
+        self.calls.append(("GET", f"/channels/{channel_id}/messages", params))
+        return _MockResponse()
+
+
+class _MockResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"id": "discord-message-1"}
 
 
 def test_discord_message_to_meta_payload() -> None:
@@ -78,7 +130,7 @@ async def test_discord_gateway_drops_non_partner(fake_pool, monkeypatch: pytest.
         calls.append(payload)
 
     monkeypatch.setattr("app.services.inbound.process_inbound", process_inbound)
-    bot = DiscordGatewayBot(fake_pool, None)
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)
     await bot._handle_message(
         {
             "id": "123",
@@ -172,7 +224,7 @@ async def test_discord_gateway_processes_image_only_message(
         calls.append(payload)
 
     monkeypatch.setattr("app.services.inbound.process_inbound", process_inbound)
-    bot = DiscordGatewayBot(fake_pool, None)
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)
     await bot._handle_message(
         {
             "id": "123",
@@ -208,7 +260,7 @@ async def test_discord_gateway_processes_audio_only_message(
         calls.append(payload)
 
     monkeypatch.setattr("app.services.inbound.process_inbound", process_inbound)
-    bot = DiscordGatewayBot(fake_pool, None)
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)
     await bot._handle_message(
         {
             "id": "123",
@@ -249,7 +301,7 @@ async def test_discord_gateway_accepts_partner(fake_pool, monkeypatch: pytest.Mo
 
     monkeypatch.setattr("app.services.inbound.process_inbound", process_inbound)
     monkeypatch.setattr("app.services.discord._send_typing_after_delay", send_typing_after_delay)
-    bot = DiscordGatewayBot(fake_pool, None)
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)
     await bot._handle_message(
         {
             "id": "123",
@@ -279,7 +331,7 @@ async def test_discord_gateway_typing_start_marks_pacer_through_raw_event(
         def __init__(self) -> None:
             self.pacer = pacer
 
-    bot = DiscordGatewayBot(fake_pool, Coalescer())
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, Coalescer(), pacer=pacer)
     await bot._gateway_loop.dispatch_payload(
         {
             "op": 0,
@@ -311,30 +363,19 @@ async def test_seed_partner_users_upserts_configured_discord_ids(fake_pool, monk
 
 
 async def test_add_reaction_calls_discord_reaction_endpoint(app_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = []
-
-    async def get_dm_channel_id(user_id):
+    mock_rest = _MockRest()
+    client = _make_test_client()
+    client._rest = mock_rest
+    async def mock_get_dm_channel_id(user_id):
         assert user_id == "456"
         return "channel-1"
+    monkeypatch.setattr(client, "get_dm_channel_id", mock_get_dm_channel_id)
+    register_client("mediator", client)
 
-    class Response:
-        def raise_for_status(self):
-            return None
+    await add_reaction("discord:456", "message-1", "👋", bot_id="mediator")
 
-    class Client:
-        async def put(self, path, headers=None):
-            calls.append((path, headers))
-            return Response()
-
-    async def get_client():
-        return Client()
-
-    monkeypatch.setattr("app.services.discord.get_dm_channel_id", get_dm_channel_id)
-    monkeypatch.setattr("app.services.discord._get_client", get_client)
-
-    await add_reaction("discord:456", "message-1", "👋")
-
-    assert calls[0][0] == "/channels/channel-1/messages/message-1/reactions/%F0%9F%91%8B/@me"
+    assert mock_rest.calls[0][0] == "PUT"
+    assert mock_rest.calls[0][1] == "/channels/channel-1/messages/message-1/reactions/%F0%9F%91%8B/@me"
 
 
 async def test_discord_send_text_can_suppress_typing_indicator(app_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -360,15 +401,15 @@ async def test_discord_send_text_can_suppress_typing_indicator(app_env, monkeypa
             message_calls.append((channel_id, content))
             return Response()
 
-    async def rest_client():
-        return Rest()
+    client = _make_test_client()
+    monkeypatch.setattr(client, "get_dm_channel_id", get_dm_channel_id)
+    monkeypatch.setattr(client, "send_typing", send_typing)
+    # Replace the client's _rest with our mock
+    client._rest = Rest()
+    register_client("mediator", client)
 
-    monkeypatch.setattr("app.services.discord.get_dm_channel_id", get_dm_channel_id)
-    monkeypatch.setattr("app.services.discord.send_typing", send_typing)
-    monkeypatch.setattr("app.services.discord._rest_client", rest_client)
-
-    await send_text("discord:456", "quiet", send_typing_indicator=False)
-    await send_text("discord:456", "default")
+    await send_text("discord:456", "quiet", send_typing_indicator=False, bot_id="mediator")
+    await send_text("discord:456", "default", bot_id="mediator")
 
     assert typing_calls == ["channel-1"]
     assert message_calls == [("channel-1", "quiet"), ("channel-1", "default")]
@@ -402,11 +443,14 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
             calls.append((path, params))
             return Response()
 
-    monkeypatch.setattr("app.services.discord.get_dm_channel_id", get_dm_channel_id)
-    async def get_client():
-        return Client()
-
-    monkeypatch.setattr("app.services.discord._get_client", get_client)
+    test_client = _make_test_client()
+    monkeypatch.setattr(test_client, "get_dm_channel_id", get_dm_channel_id)
+    # Replace the client's _rest with a mock that has fetch_channel_messages
+    class MockRest:
+        async def fetch_channel_messages(self, channel_id, **params):
+            calls.append((f"/channels/{channel_id}/messages", params))
+            return Response()
+    test_client._rest = MockRest()
 
     class Coalescer:
         def __init__(self) -> None:
@@ -417,10 +461,10 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
 
     coalescer = Coalescer()
 
-    count = await catch_up_recent_messages(fake_pool, coalescer)
+    count = await catch_up_recent_messages(fake_pool, coalescer, client=test_client)
 
     assert count == 2
-    assert calls == [("/channels/channel-1/messages", {"limit": 50})]
+    assert calls == [("/channels/channel-1/messages", {"limit": 50, "after": None})]
     inbound_ids = {
         row["whatsapp_message_id"]
         for row in fake_pool.messages.values()
@@ -477,13 +521,15 @@ async def test_catch_up_recent_messages_strips_attachment_suffix_for_after(
             calls.append((path, params))
             return Response()
 
-    async def get_client():
-        return Client()
+    test_client2 = _make_test_client()
+    monkeypatch.setattr(test_client2, "get_dm_channel_id", get_dm_channel_id)
+    class MockRest2:
+        async def fetch_channel_messages(self, channel_id, **params):
+            calls.append((f"/channels/{channel_id}/messages", params))
+            return Response()
+    test_client2._rest = MockRest2()
 
-    monkeypatch.setattr("app.services.discord.get_dm_channel_id", get_dm_channel_id)
-    monkeypatch.setattr("app.services.discord._get_client", get_client)
-
-    assert await catch_up_recent_messages(fake_pool, None) == 0
+    assert await catch_up_recent_messages(fake_pool, None, client=test_client2) == 0
     assert calls == [
         (
             "/channels/channel-1/messages",
@@ -519,7 +565,7 @@ async def test_discord_gateway_logs_reaction_feedback(fake_pool, monkeypatch: py
         "deleted_at": None,
     }
 
-    bot = DiscordGatewayBot(fake_pool, None)
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)
     await bot._handle_reaction_add(
         {"user_id": "456", "message_id": "discord-out-1", "emoji": {"name": "👍"}}
     )
@@ -557,7 +603,7 @@ async def test_discord_gateway_updates_and_deletes_messages(fake_pool, monkeypat
         "deleted_at": None,
     }
 
-    bot = DiscordGatewayBot(fake_pool, None)
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)
     await bot._handle_message_update(
         {"id": "discord-in-1", "content": "new", "author": {"id": "456"}}
     )

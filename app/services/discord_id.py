@@ -37,17 +37,41 @@ def _decode_discord_user_id(token: str) -> str | None:
     return None
 
 
-def discord_bot_user_id() -> str | None:
-    """Return the Discord bot's numeric user id.
+def discord_bot_user_id(bot_id: str) -> str | None:
+    """Return the Discord bot's numeric user id for *bot_id*.
 
-    Reads DISCORD_BOT_USER_ID from the environment if set and digit-only;
-    otherwise falls back to decoding it from DISCORD_BOT_TOKEN via
-    _decode_discord_user_id.  Returns None when neither source is available.
+    Resolution order (first match wins):
+
+    1. Per-bot override  — DISCORD_BOT_USER_ID_<BOT_ID_UPPER> (digit-only).
+    2. Per-bot token      — DISCORD_BOT_TOKEN_<BOT_ID_UPPER>, decoded via
+                            _decode_discord_user_id.
+    3. Mediator fallback  — (only when *bot_id* == 'mediator'): try
+                            DISCORD_BOT_USER_ID, then DISCORD_BOT_TOKEN
+                            decode (same logic as the pre-multi-gateway era).
+
+    Returns None when no source is available for the requested bot.
     """
-    from_env = os.environ.get("DISCORD_BOT_USER_ID")
-    if from_env and _DISCORD_BOT_USER_ID_RE.match(from_env):
-        return from_env
-    token = os.environ.get("DISCORD_BOT_TOKEN")
-    if not token:
-        return None
-    return _decode_discord_user_id(token)
+    from app.config import get_settings
+
+    settings = get_settings()
+
+    # (a) Per-bot user-id override — DISCORD_BOT_USER_ID_<BOT_ID_UPPER>
+    overrides = settings.discord_bot_user_id_overrides
+    if bot_id in overrides:
+        return overrides[bot_id]
+
+    # (b) Decode from per-bot token — DISCORD_BOT_TOKEN_<BOT_ID_UPPER>
+    tokens = settings.discord_bot_tokens
+    if bot_id in tokens:
+        return _decode_discord_user_id(tokens[bot_id].get_secret_value())
+
+    # (c) Mediator legacy fallback — DISCORD_BOT_USER_ID / DISCORD_BOT_TOKEN
+    if bot_id == "mediator":
+        from_env = os.environ.get("DISCORD_BOT_USER_ID")
+        if from_env and _DISCORD_BOT_USER_ID_RE.match(from_env):
+            return from_env
+        token = os.environ.get("DISCORD_BOT_TOKEN")
+        if token:
+            return _decode_discord_user_id(token)
+
+    return None

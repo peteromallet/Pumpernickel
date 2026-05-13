@@ -542,7 +542,7 @@ async def test_run_agentic_send_message_part_is_visible_to_record_step(fake_pool
     record_seed = []
     schedule_seed = []
 
-    async def fake_discord_send(to, body, *, send_typing_indicator=True):
+    async def fake_discord_send(to, body, *, send_typing_indicator=True, bot_id="mediator"):
         sent.append((to, body, send_typing_indicator))
         return {"messages": [{"id": f"discord-out-{len(sent)}"}]}
 
@@ -640,7 +640,7 @@ async def test_run_agentic_suppresses_residual_text_after_send_message_part(fake
     }
     sent = []
 
-    async def fake_discord_send(to, body, *, send_typing_indicator=True):
+    async def fake_discord_send(to, body, *, send_typing_indicator=True, bot_id="mediator"):
         sent.append((to, body, send_typing_indicator))
         return {"messages": [{"id": f"discord-out-{len(sent)}"}]}
 
@@ -724,7 +724,7 @@ async def test_run_agentic_can_react_instead_of_replying(fake_pool, app_env, mon
             assert "[reaction 👋]" in seed_messages[-1]["content"]
         return "", [], 0
 
-    async def fake_add_reaction(phone, discord_message_id, emoji):
+    async def fake_add_reaction(phone, discord_message_id, emoji, *, bot_id="mediator"):
         reactions.append((phone, discord_message_id, emoji))
 
     monkeypatch.setattr(agentic, "run_step", fake_run_step)
@@ -779,7 +779,7 @@ async def test_run_agentic_can_react_alongside_reply(fake_pool, app_env, monkeyp
             assert "That matters. Let it land for a bit." in seed_messages[-1]["content"]
         return "", [], 0
 
-    async def fake_add_reaction(phone, discord_message_id, emoji):
+    async def fake_add_reaction(phone, discord_message_id, emoji, *, bot_id="mediator"):
         reactions.append((phone, discord_message_id, emoji))
 
     async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):

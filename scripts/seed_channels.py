@@ -3,15 +3,16 @@
 
 Post-migration script. Run after 0020_topics_bots_bindings.sql is applied.
 Each transport block independently reads its env var; if absent, logs INFO and skips.
-WhatsApp is optional (WHATSA_PHONE_NUMBER_ID may not be set).
+WhatsApp is optional (WHATSAPP_PHONE_NUMBER_ID may not be set).
 
 Usage:
     python scripts/seed_channels.py
 
 Requires:
-    DISCORD_BOT_TOKEN (required for discord channel)
-    DISCORD_BOT_USER_ID (optional — derived from token if unset)
-    WHATSAPP_PHONE_NUMBER_ID (optional — skipped if absent)
+    DISCORD_BOT_TOKEN_<BOT_ID> (per-bot tokens; required for each discord channel)
+    DISCORD_BOT_USER_ID_<BOT_ID> (optional per-bot override; derived from token if unset)
+    DISCORD_BOT_TOKEN               (legacy fallback for mediator)
+    WHATSAPP_PHONE_NUMBER_ID        (optional — skipped if absent)
     DATABASE_URL or PG* env vars for asyncpg connection
 """
 
@@ -54,39 +55,63 @@ async def _get_pool() -> asyncpg.Pool:
 
 
 async def seed_discord(pool: asyncpg.Pool) -> bool:
-    """Seed discord channel. Returns True if seeded, False if skipped."""
-    bot_token = _env("DISCORD_BOT_TOKEN")
-    if not bot_token:
-        logger.info("DISCORD_BOT_TOKEN not set — skipping discord channel seed")
+    """Seed discord channels from per-bot tokens. Returns True if any seeded, False if skipped."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    per_bot_tokens = settings.discord_bot_tokens
+
+    # Build a unified dict of (bot_id, token_str) pairs
+    tokens: dict[str, str] = {
+        bot_id: s.get_secret_value() for bot_id, s in per_bot_tokens.items()
+    }
+
+    # Legacy fallback: DISCORD_BOT_TOKEN → mediator (only when no per-bot tokens)
+    if not tokens:
+        legacy_token = _env("DISCORD_BOT_TOKEN")
+        if legacy_token:
+            tokens["mediator"] = legacy_token
+
+    if not tokens:
+        logger.info("No Discord bot tokens configured — skipping discord channel seed")
         return False
 
-    bot_user_id = _env("DISCORD_BOT_USER_ID")
-    if not bot_user_id:
-        # Derive from token: the first segment is a base64url-encoded user id.
-        bot_user_id = _decode_discord_user_id(bot_token)
-        if bot_user_id is None or not bot_user_id.isdigit():
-            logger.warning(
-                "Could not decode DISCORD_BOT_USER_ID from token; "
-                "set DISCORD_BOT_USER_ID explicitly or check token format"
-            )
-            return False
+    seeded_any = False
+    for bot_id, token in tokens.items():
+        # Per-bot user-id override: DISCORD_BOT_USER_ID_<BOT_ID_UPPER>
+        override_key = f"DISCORD_BOT_USER_ID_{bot_id.upper()}"
+        bot_user_id = _env(override_key)
+        if not bot_user_id or not bot_user_id.isdigit():
+            bot_user_id = _decode_discord_user_id(token)
 
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            """
-            INSERT INTO channels (bot_id, transport, address, guild_id, channel_id)
-            VALUES ('mediator', 'discord', $1, NULL, NULL)
-            ON CONFLICT (transport, address, COALESCE(guild_id, ''), COALESCE(channel_id, ''))
-            DO NOTHING
-            """,
-            bot_user_id,
-        )
-    inserted = result != "INSERT 0 0"
-    if inserted:
-        logger.info("Seeded discord channel: address=%s", bot_user_id)
-    else:
-        logger.info("Discord channel already exists: address=%s", bot_user_id)
-    return True
+        if not bot_user_id or not bot_user_id.isdigit():
+            logger.warning(
+                "Could not resolve bot user id for bot_id=%s; "
+                "set DISCORD_BOT_USER_ID_%s explicitly or check token format",
+                bot_id,
+                bot_id.upper(),
+            )
+            continue
+
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO channels (bot_id, transport, address, guild_id, channel_id)
+                VALUES ($1, 'discord', $2, NULL, NULL)
+                ON CONFLICT (transport, address, COALESCE(guild_id, ''), COALESCE(channel_id, ''))
+                DO NOTHING
+                """,
+                bot_id,
+                bot_user_id,
+            )
+        inserted = result != "INSERT 0 0"
+        if inserted:
+            logger.info("Seeded discord channel: bot_id=%s address=%s", bot_id, bot_user_id)
+        else:
+            logger.info("Discord channel already exists: bot_id=%s address=%s", bot_id, bot_user_id)
+        seeded_any = True
+
+    return seeded_any
 
 
 async def seed_whatsapp(pool: asyncpg.Pool) -> bool:
@@ -127,7 +152,7 @@ async def main() -> None:
 
         if not discord_ok and not whatsapp_ok:
             logger.warning(
-                "No channels seeded — set DISCORD_BOT_TOKEN or WHATSAPP_PHONE_NUMBER_ID"
+                "No channels seeded — set DISCORD_BOT_TOKEN_<BOT_ID> or WHATSAPP_PHONE_NUMBER_ID"
             )
         else:
             logger.info("Channel seeding complete")

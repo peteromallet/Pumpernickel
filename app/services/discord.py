@@ -9,15 +9,6 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
-TYPING_DELAY_MIN_S = 0.2
-TYPING_DELAY_MAX_S = 1.5
-
-
-async def _send_typing_after_delay(channel_id: str) -> None:
-    await asyncio.sleep(random.uniform(TYPING_DELAY_MIN_S, TYPING_DELAY_MAX_S))
-    with contextlib.suppress(Exception):
-        await send_typing(channel_id)
-
 import httpx
 import websockets
 from resident_chat_runtime.discord_gateway import DiscordGatewayLoop, GatewayCallbacks
@@ -26,13 +17,47 @@ from resident_chat_runtime.discord_rest import DISCORD_API_BASE, DiscordRestClie
 from app.config import get_settings
 from app.models.user import upsert_user
 from app.services.crypto import encrypt_value
+from app.services.discord_id import _decode_discord_user_id
 from app.services.whitelist import is_allowed_phone
-from app.services.discord_id import discord_bot_user_id
+
+TYPING_DELAY_MIN_S = 0.2
+TYPING_DELAY_MAX_S = 1.5
+
+
+async def _send_typing_after_delay(channel_id: str, *, bot_id: str) -> None:
+    await asyncio.sleep(random.uniform(TYPING_DELAY_MIN_S, TYPING_DELAY_MAX_S))
+    with contextlib.suppress(Exception):
+        await send_typing(channel_id, bot_id=bot_id)
 
 logger = logging.getLogger(__name__)
 
-_client: httpx.AsyncClient | None = None
+# ── Module registry ─────────────────────────────────────────────────────────
+_clients: dict[str, "DiscordClient"] = {}
 
+
+def register_client(bot_id: str, client: "DiscordClient") -> None:
+    """Register a DiscordClient for a bot_id (typically called at startup)."""
+    _clients[bot_id] = client
+
+
+def get_client(bot_id: str) -> "DiscordClient":
+    """Return the registered DiscordClient for bot_id."""
+    return _clients[bot_id]
+
+
+def iter_clients():
+    """Iterate over (bot_id, DiscordClient) pairs."""
+    return iter(_clients.items())
+
+
+async def close_all_clients() -> None:
+    """Close all registered DiscordClient http pools."""
+    for client in list(_clients.values()):
+        await client.aclose()
+    _clients.clear()
+
+
+# ── _DiscordSessionAdapter ──────────────────────────────────────────────────
 
 class _DiscordSessionAdapter:
     def __init__(self, client: httpx.AsyncClient) -> None:
@@ -47,24 +72,147 @@ class _DiscordSessionAdapter:
         return await method_func(path, **kwargs)
 
 
-def _token() -> str:
-    token = get_settings().discord_bot_token
-    if token is None or not token.get_secret_value():
-        raise RuntimeError("Discord provider requires DISCORD_BOT_TOKEN")
-    return token.get_secret_value()
+# ── DiscordClient ───────────────────────────────────────────────────────────
+
+class DiscordClient:
+    """Per-bot Discord REST client.
+
+    Owns its httpx.AsyncClient, token, bot_user_id, and all REST methods.
+    One instance per logical bot identity.
+    """
+
+    def __init__(self, bot_id: str, token: str) -> None:
+        self.bot_id = bot_id
+        self._token = token
+        self._http = httpx.AsyncClient(
+            base_url="https://discord.com/api/v10",
+            timeout=get_settings().media_fetch_timeout_s,
+        )
+        self._adapter = _DiscordSessionAdapter(self._http)
+        self._rest = DiscordRestClient(
+            token=token,
+            session=self._adapter,
+            user_agent="veas",
+        )
+        self.bot_user_id = _decode_discord_user_id(token)
+
+    async def aclose(self) -> None:
+        """Close the underlying httpx connection pool."""
+        await self._http.aclose()
+
+    # ── REST helpers ────────────────────────────────────────────────────
+
+    async def send_text(self, to: str, body: str, *, send_typing_indicator: bool = True) -> dict[str, Any]:
+        """Send a Discord DM and return the existing message-id shaped response."""
+        channel_id = await self.get_dm_channel_id(_discord_user_id(to))
+        if send_typing_indicator:
+            await self.send_typing(channel_id)
+        message_response = await self._rest.send_message(channel_id, content=body)
+        message_response.raise_for_status()
+        return {"messages": [{"id": message_response.json()["id"]}]}
+
+    async def add_reaction(self, to: str, message_id: str, emoji: str) -> None:
+        """Add the bot's reaction to a Discord DM message."""
+        channel_id = await self.get_dm_channel_id(_discord_user_id(to))
+        response = await self._rest.request(
+            "PUT",
+            f"/channels/{channel_id}/messages/{message_id}/reactions/{quote(emoji, safe='')}/@me",
+        )
+        response.raise_for_status()
+
+    async def edit_text(self, to: str, message_id: str, body: str) -> None:
+        """Edit one of the bot's previously sent Discord DM messages."""
+        channel_id = await self.get_dm_channel_id(_discord_user_id(to))
+        response = await self._rest.edit_message(channel_id, message_id, content=body)
+        response.raise_for_status()
+
+    async def delete_text(self, to: str, message_id: str) -> None:
+        """Delete one of the bot's previously sent Discord DM messages."""
+        channel_id = await self.get_dm_channel_id(_discord_user_id(to))
+        response = await self._rest.delete_message(channel_id, message_id)
+        response.raise_for_status()
+
+    async def get_dm_channel_id(self, user_id: str) -> str:
+        """Resolve the DM channel id for a Discord user."""
+        channel_response = await self._rest.request(
+            "POST",
+            "/users/@me/channels",
+            json={"recipient_id": user_id},
+        )
+        channel_response.raise_for_status()
+        return channel_response.json()["id"]
+
+    async def send_typing(self, channel_id: str) -> None:
+        """Send a typing indicator to a Discord channel."""
+        response = await self._rest.send_typing(channel_id)
+        response.raise_for_status()
+
+    async def send_template(
+        self,
+        to: str,
+        template_payload: dict[str, Any],
+        *,
+        send_typing_indicator: bool = True,
+    ) -> dict[str, Any]:
+        """Render and send a WhatsApp-style template to a Discord DM."""
+        params = []
+        for component in template_payload.get("components", []):
+            for parameter in component.get("parameters", []):
+                params.append(str(parameter.get("text", "")))
+        return await self.send_text(
+            to,
+            " ".join(params) or str(template_payload.get("name", "message")),
+            send_typing_indicator=send_typing_indicator,
+        )
 
 
-def _headers() -> dict[str, str]:
-    return {"Authorization": f"Bot {_token()}"}
+# ── Module-level facades ────────────────────────────────────────────────────
+
+async def send_text(to: str, body: str, *, send_typing_indicator: bool = True, bot_id: str) -> dict[str, Any]:
+    """Send a Discord DM and return the existing message-id shaped response.
+
+    pause-check N/A: routes through send_outbound.
+    """
+    return await get_client(bot_id).send_text(to, body, send_typing_indicator=send_typing_indicator)
 
 
-async def _rest_client() -> DiscordRestClient:
-    return DiscordRestClient(
-        token=_token(),
-        session=_DiscordSessionAdapter(await _get_client()),
-        user_agent="veas",
-    )
+async def add_reaction(to: str, message_id: str, emoji: str, *, bot_id: str) -> None:
+    """Add the bot's reaction to a Discord DM message."""
+    await get_client(bot_id).add_reaction(to, message_id, emoji)
 
+
+async def edit_text(to: str, message_id: str, body: str, *, bot_id: str) -> None:
+    """Edit one of the bot's previously sent Discord DM messages."""
+    await get_client(bot_id).edit_text(to, message_id, body)
+
+
+async def delete_text(to: str, message_id: str, *, bot_id: str) -> None:
+    """Delete one of the bot's previously sent Discord DM messages."""
+    await get_client(bot_id).delete_text(to, message_id)
+
+
+async def get_dm_channel_id(user_id: str, *, bot_id: str) -> str:
+    """Resolve a DM channel id for user_id."""
+    return await get_client(bot_id).get_dm_channel_id(user_id)
+
+
+async def send_typing(channel_id: str, *, bot_id: str) -> None:
+    """Send a typing indicator to channel_id."""
+    await get_client(bot_id).send_typing(channel_id)
+
+
+async def send_template(
+    to: str,
+    template_payload: dict[str, Any],
+    *,
+    send_typing_indicator: bool = True,
+    bot_id: str,
+) -> dict[str, Any]:
+    """Render and send a template to a Discord DM."""
+    return await get_client(bot_id).send_template(to, template_payload, send_typing_indicator=send_typing_indicator)
+
+
+# ── Utility helpers ─────────────────────────────────────────────────────────
 
 def _discord_user_id(value: str) -> str:
     return value.removeprefix("discord:").strip()
@@ -80,129 +228,6 @@ def _reaction_sentiment(emoji: str | None) -> str:
     if emoji == "👎":
         return "negative"
     return "mixed"
-
-
-async def init_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(base_url="https://discord.com/api/v10", timeout=get_settings().media_fetch_timeout_s)
-    return _client
-
-
-async def close_client() -> None:
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
-
-
-async def _get_client() -> httpx.AsyncClient:
-    if _client is None:
-        return await init_client()
-    return _client
-
-
-async def send_text(to: str, body: str, *, send_typing_indicator: bool = True) -> dict[str, Any]:
-    """Send a Discord DM and return the existing message-id shaped response.
-
-    pause-check N/A: routes through send_outbound.
-    """
-    rest = await _rest_client()
-    channel_id = await get_dm_channel_id(_discord_user_id(to))
-    if send_typing_indicator:
-        await send_typing(channel_id)
-    message_response = await rest.send_message(channel_id, content=body)
-    message_response.raise_for_status()
-    return {"messages": [{"id": message_response.json()["id"]}]}
-
-
-async def add_reaction(to: str, message_id: str, emoji: str) -> None:
-    """Add the bot's reaction to a Discord DM message."""
-    rest = await _rest_client()
-    channel_id = await get_dm_channel_id(_discord_user_id(to))
-    response = await rest.request(
-        "PUT",
-        f"/channels/{channel_id}/messages/{message_id}/reactions/{quote(emoji, safe='')}/@me",
-    )
-    response.raise_for_status()
-
-
-async def edit_text(to: str, message_id: str, body: str) -> None:
-    """Edit one of the bot's previously sent Discord DM messages."""
-    rest = await _rest_client()
-    channel_id = await get_dm_channel_id(_discord_user_id(to))
-    response = await rest.edit_message(channel_id, message_id, content=body)
-    response.raise_for_status()
-
-
-async def delete_text(to: str, message_id: str) -> None:
-    """Delete one of the bot's previously sent Discord DM messages."""
-    rest = await _rest_client()
-    channel_id = await get_dm_channel_id(_discord_user_id(to))
-    response = await rest.delete_message(channel_id, message_id)
-    response.raise_for_status()
-
-
-async def get_dm_channel_id(user_id: str) -> str:
-    rest = await _rest_client()
-    channel_response = await rest.request(
-        "POST",
-        "/users/@me/channels",
-        json={"recipient_id": user_id},
-    )
-    channel_response.raise_for_status()
-    return channel_response.json()["id"]
-
-
-async def send_typing(channel_id: str) -> None:
-    rest = await _rest_client()
-    response = await rest.send_typing(channel_id)
-    response.raise_for_status()
-
-
-async def send_template(
-    to: str,
-    template_payload: dict[str, Any],
-    *,
-    send_typing_indicator: bool = True,
-) -> dict[str, Any]:
-    params = []
-    for component in template_payload.get("components", []):
-        for parameter in component.get("parameters", []):
-            params.append(str(parameter.get("text", "")))
-    return await send_text(
-        to,
-        " ".join(params) or str(template_payload.get("name", "message")),
-        send_typing_indicator=send_typing_indicator,
-    )
-
-
-async def seed_partner_users(pool: Any) -> None:
-    settings = get_settings()
-    if settings.discord_partner_user_id_a:
-        await upsert_user(
-            pool,
-            settings.discord_partner_name_a,
-            _discord_user_id(settings.discord_partner_user_id_a),
-            settings.default_user_timezone,
-        )
-    if settings.discord_partner_user_id_b:
-        await upsert_user(
-            pool,
-            settings.discord_partner_name_b,
-            _discord_user_id(settings.discord_partner_user_id_b),
-            settings.default_user_timezone,
-        )
-
-
-def _configured_partner_name(user_id: str) -> str | None:
-    settings = get_settings()
-    normalized = _discord_user_id(user_id)
-    if settings.discord_partner_user_id_a and normalized == _discord_user_id(settings.discord_partner_user_id_a):
-        return settings.discord_partner_name_a
-    if settings.discord_partner_user_id_b and normalized == _discord_user_id(settings.discord_partner_user_id_b):
-        return settings.discord_partner_name_b
-    return None
 
 
 def _has_image_attachment(message: dict[str, Any]) -> bool:
@@ -248,8 +273,26 @@ def _discord_base_message_id(message_id: str | None) -> str | None:
     return str(message_id).split(":", 1)[0]
 
 
+# ── Partner user seeding ────────────────────────────────────────────────────
+
+def _configured_partner_name(user_id: str) -> str | None:
+    """Look up partner name from DISCORD_PARTNER_USER_ID_A/B settings.
+
+    Scoped to mediator only — these env vars represent the mediator bot's
+    two partner user ids and their configured names.  Future bots (e.g.
+    Tante Rosi) do not use this mechanism.
+    """
+    settings = get_settings()
+    normalized = _discord_user_id(user_id)
+    if settings.discord_partner_user_id_a and normalized == _discord_user_id(settings.discord_partner_user_id_a):
+        return settings.discord_partner_name_a
+    if settings.discord_partner_user_id_b and normalized == _discord_user_id(settings.discord_partner_user_id_b):
+        return settings.discord_partner_name_b
+    return None
+
+
 def message_to_meta_payload(message: dict[str, Any]) -> dict[str, Any]:
-    author = message["author"]
+    author = message.get("author", {})
     user_id = str(author["id"])
     name = _configured_partner_name(user_id) or author.get("global_name") or author.get("username") or user_id
     sent_at = datetime.now(UTC)
@@ -326,12 +369,52 @@ def message_to_meta_payload(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class DiscordGatewayBot:
-    """Small Discord Gateway client for DM text ingestion."""
+async def seed_partner_users(pool: Any) -> None:
+    """Seed partner users from DISCORD_PARTNER_USER_ID_A/B settings.
 
-    def __init__(self, pool: Any, coalescer: Any | None) -> None:
+    Mediator-scoped only — called once during lifespan when bot_id=='mediator'.
+    Future bots (e.g. Tante Rosi) do not use partner-based seeding.
+    """
+    settings = get_settings()
+    if settings.discord_partner_user_id_a:
+        await upsert_user(
+            pool,
+            settings.discord_partner_name_a,
+            _discord_user_id(settings.discord_partner_user_id_a),
+            settings.default_user_timezone,
+        )
+    if settings.discord_partner_user_id_b:
+        await upsert_user(
+            pool,
+            settings.discord_partner_name_b,
+            _discord_user_id(settings.discord_partner_user_id_b),
+            settings.default_user_timezone,
+        )
+
+
+# ── DiscordGatewayBot ───────────────────────────────────────────────────────
+
+class DiscordGatewayBot:
+    """Per-bot Discord Gateway client for DM text ingestion.
+
+    Each instance owns one logical bot identity, its own DiscordClient,
+    and (optionally) its own DiscordPacer.
+    """
+
+    def __init__(
+        self,
+        bot_id: str,
+        client: DiscordClient,
+        pool: Any,
+        coalescer: Any | None,
+        *,
+        pacer: Any | None = None,
+    ) -> None:
+        self.bot_id = bot_id
+        self.client = client
         self.pool = pool
         self.coalescer = coalescer
+        self.pacer = pacer
         self._closed = asyncio.Event()
         self._heartbeat_task: asyncio.Task | None = None
         self._gateway_loop = DiscordGatewayLoop(
@@ -372,7 +455,7 @@ class DiscordGatewayBot:
                     {
                         "op": 2,
                         "d": {
-                            "token": _token(),
+                            "token": self.client._token,
                             "intents": (1 << 12) | (1 << 14) | (1 << 15),
                             "properties": {"os": "macos", "browser": "veas", "device": "veas"},
                         },
@@ -395,8 +478,7 @@ class DiscordGatewayBot:
     async def _handle_gateway_event(self, payload: dict[str, Any]) -> None:
         if payload.get("t") != "TYPING_START" or self.coalescer is None:
             return
-        pacer = getattr(self.coalescer, "pacer", None)
-        if pacer is None:
+        if self.pacer is None:
             return
         data = payload.get("d")
         if not isinstance(data, dict):
@@ -410,7 +492,7 @@ class DiscordGatewayBot:
             _discord_user_id(user_id),
             get_settings().default_user_timezone,
         )
-        pacer.mark_user_typing(typing_user.id, channel_id=str(data.get("channel_id") or ""))
+        self.pacer.mark_user_typing(typing_user.id, channel_id=str(data.get("channel_id") or ""))
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         from app.services.inbound import process_inbound
@@ -457,13 +539,25 @@ class DiscordGatewayBot:
         user_id = str(event.get("user_id", ""))
         if not is_allowed_discord_user(user_id):
             return
+
+        # Resolve scope via the BOT's address, NEVER the reacting user's id.
+        # Must be hoisted above early-return so bot_id/topic_id are always
+        # defined for logger invocations (fixes NameError on unknown-message-id path).
+        from app.services.inbound import _resolve_scope
+        from app.bots.registry import get_relationship_topic_id
+
+        bot_user_id = self.client.bot_user_id
+        scope = await _resolve_scope(self.pool, 'discord', bot_user_id) if bot_user_id else None
+        _bot_id = scope.bot_id if scope else 'mediator'
+        _topic_id = scope.topic_id if scope else get_relationship_topic_id()
+
         target_id = await self.pool.fetchval(
             "SELECT id FROM messages WHERE whatsapp_message_id=$1 AND direction='outbound'",
             str(event.get("message_id", "")),
         )
         if target_id is None:
             logger.info("ignoring discord reaction for unknown outbound message_id=%s", event.get("message_id"),
-                         extra={"bot_id": bot_id, "topic_id": str(topic_id) if topic_id else None})
+                         extra={"bot_id": _bot_id, "topic_id": str(_topic_id) if _topic_id else None})
             return
         emoji = event.get("emoji", {}).get("name")
         reacting_user = await upsert_user(
@@ -472,13 +566,6 @@ class DiscordGatewayBot:
             _discord_user_id(user_id),
             get_settings().default_user_timezone,
         )
-        # Resolve scope via the BOT's address, NEVER the reacting user's id.
-        from app.services.inbound import _resolve_scope
-        from app.bots.registry import get_relationship_topic_id
-        bot_user_id = discord_bot_user_id()
-        scope = await _resolve_scope(self.pool, 'discord', bot_user_id) if bot_user_id else None
-        bot_id = scope.bot_id if scope else 'mediator'
-        topic_id = scope.topic_id if scope else get_relationship_topic_id()
         await self.pool.fetchrow(
             """
             INSERT INTO feedback (from_user_id, target_type, target_id, sentiment, content, source, bot_id, topic_id)
@@ -489,13 +576,18 @@ class DiscordGatewayBot:
             target_id,
             _reaction_sentiment(emoji),
             emoji,
-            bot_id,
-            topic_id,
+            _bot_id,
+            _topic_id,
         )
 
 
-async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, limit: int = 50) -> int:
-    """Fetch recent partner DM history so messages sent while offline are ingested."""
+# ── Catch-up ────────────────────────────────────────────────────────────────
+
+async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, client: DiscordClient, limit: int = 50) -> int:
+    """Fetch recent partner DM history so messages sent while offline are ingested.
+
+    Accepts a per-bot DiscordClient so catch-up uses the correct token.
+    """
     from app.services.inbound import process_inbound
 
     settings = get_settings()
@@ -505,10 +597,9 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, limit: i
         if value
     ]
     processed = 0
-    rest = await _rest_client()
     for partner_id in partner_ids:
         user_id = _discord_user_id(partner_id)
-        channel_id = await get_dm_channel_id(user_id)
+        channel_id = await client.get_dm_channel_id(user_id)
         last_seen_id = await pool.fetchval(
             """
             SELECT m.whatsapp_message_id
@@ -523,7 +614,7 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, limit: i
             """,
             user_id,
         )
-        response = await rest.fetch_channel_messages(
+        response = await client._rest.fetch_channel_messages(
             channel_id,
             limit=limit,
             after=_discord_base_message_id(last_seen_id),

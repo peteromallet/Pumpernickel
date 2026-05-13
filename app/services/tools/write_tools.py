@@ -1870,6 +1870,20 @@ async def _fetch_dyad_message(ctx: TurnContext, message_id: Any) -> Any | None:
 
 async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput) -> EditOutboundMessageOutput:
     started = _start()
+    if ctx.partner is None:
+        logger.warning(
+            "edit_outbound_message called with solo bot (no partner); unsupported",
+            extra=obs_fields(ctx),
+        )
+        result = EditOutboundMessageOutput(
+            action="unsupported",
+            message_id=args.message_id,
+            provider_message_id=None,
+            reason="message editing is not available for solo bots",
+        )
+        await _log_tool_call(ctx, "edit_outbound_message", args, started, result)
+        return result
+
     row = await _fetch_dyad_message(ctx, args.message_id)
     if (
         row is None
@@ -1909,7 +1923,7 @@ async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput
         return result
 
     recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
-    await discord.edit_text(recipient_phone, row["whatsapp_message_id"], args.content)
+    await discord.edit_text(recipient_phone, row["whatsapp_message_id"], args.content, bot_id=ctx.bot_id or "mediator")
     await ctx.pool.execute(
         """
         UPDATE messages
@@ -1937,6 +1951,19 @@ async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput
 
 async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageInput) -> DeleteOutboundMessageOutput:
     started = _start()
+    if ctx.partner is None:
+        logger.warning(
+            "delete_outbound_message called with solo bot (no partner); unsupported",
+            extra=obs_fields(ctx),
+        )
+        result = DeleteOutboundMessageOutput(
+            action="unsupported",
+            message_id=args.message_id,
+            reason="message deletion is not available for solo bots",
+        )
+        await _log_tool_call(ctx, "delete_outbound_message", args, started, result)
+        return result
+
     row = await _fetch_dyad_message(ctx, args.message_id)
     if (
         row is None
@@ -1964,7 +1991,7 @@ async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageI
         return result
 
     recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
-    await discord.delete_text(recipient_phone, row["whatsapp_message_id"])
+    await discord.delete_text(recipient_phone, row["whatsapp_message_id"], bot_id=ctx.bot_id or "mediator")
     await ctx.pool.execute(
         "UPDATE messages SET deleted_at = now(), processing_state='expired' WHERE id=$1",
         args.message_id,
@@ -1981,6 +2008,21 @@ async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageI
 
 async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> ReactToMessageOutput:
     started = _start()
+    if ctx.partner is None:
+        logger.warning(
+            "react_to_message called with solo bot (no partner); unsupported",
+            extra=obs_fields(ctx),
+        )
+        result = ReactToMessageOutput(
+            action="unsupported",
+            message_id=args.message_id,
+            provider_message_id=None,
+            emoji=args.emoji,
+            reason="bot reactions are not available for solo bots",
+        )
+        await _log_tool_call(ctx, "react_to_message", args, started, result)
+        return result
+
     row = await _fetch_dyad_message(ctx, args.message_id)
     if row is None or row["whatsapp_message_id"] is None or row["deleted_at"] is not None:
         result = ReactToMessageOutput(
@@ -2008,7 +2050,7 @@ async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> React
         target_phone = ctx.user.phone if row["sender_id"] == ctx.user.id else ctx.partner.phone
     else:
         target_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
-    await discord.add_reaction(target_phone, row["whatsapp_message_id"], args.emoji)
+    await discord.add_reaction(target_phone, row["whatsapp_message_id"], args.emoji, bot_id=ctx.bot_id or "mediator")
     result = ReactToMessageOutput(
         action="reacted",
         message_id=args.message_id,

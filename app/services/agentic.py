@@ -404,7 +404,7 @@ def _extract_reaction_directive(text: str) -> tuple[str | None, str]:
     return emoji, "\n".join(kept_lines).strip()
 
 
-async def _react_to_triggering_message(pool: Any, user: User, triggering_message_ids: list[UUID], emoji: str) -> bool:
+async def _react_to_triggering_message(pool: Any, user: User, triggering_message_ids: list[UUID], emoji: str, *, bot_id: str) -> bool:
     settings = get_settings()
     if settings.messaging_provider.strip().lower() != "discord" or not triggering_message_ids:
         return False
@@ -419,7 +419,7 @@ async def _react_to_triggering_message(pool: Any, user: User, triggering_message
     )
     if row is None or not row.get("whatsapp_message_id"):
         return False
-    await discord.add_reaction(user.phone, row["whatsapp_message_id"], emoji)
+    await discord.add_reaction(user.phone, row["whatsapp_message_id"], emoji, bot_id=bot_id)
     return True
 
 
@@ -897,7 +897,7 @@ async def _run_agentic(
                     assistant_text = clean_user_facing_text(assistant_text)
                     reaction_emoji, assistant_text = _extract_reaction_directive(assistant_text)
                     if reaction_emoji is not None:
-                        if await _react_to_triggering_message(active_pool, user, triggering_message_ids, reaction_emoji):
+                        if await _react_to_triggering_message(active_pool, user, triggering_message_ids, reaction_emoji, bot_id=ctx.bot_id or "mediator"):
                             await _append_reasoning(active_pool, turn_id, f"Reacted to triggering message with {reaction_emoji}.")
                             await claim_onboarding_welcome(active_pool, user.id)
                             responded_to_user = True

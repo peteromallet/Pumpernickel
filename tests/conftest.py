@@ -5,12 +5,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.config import get_settings
 from app.main import app
+
+
+class _UndefinedTableError(Exception):
+    """Simulates asyncpg.UndefinedTableError for stale-DB fallback testing."""
 
 
 def _coerce_jsonb(value):
@@ -151,6 +156,9 @@ class FakePool:
         # Tests that want resolve_user_address to return a non-phone value seed
         # rows here directly.  Default empty so existing tests fall back to phone.
         self.user_identities: dict[tuple[str, str], UUID] = {}
+        # Multi-gateway: channels rows keyed by (transport, address).
+        self.channels: dict[tuple[str, str], dict[str, Any]] = {}
+        self._raise_undefined_table_on_channels: bool = False
 
     def link_topic(self, artifact_table: str, artifact_id: UUID, topic_id: UUID) -> None:
         """Register a topic link for an artifact row.
@@ -178,6 +186,10 @@ class FakePool:
 
     async def close(self) -> None:
         self.closed = True
+
+    def channels_raise_undefined_table(self) -> None:
+        """Next channels query will raise UndefinedTableError."""
+        self._raise_undefined_table_on_channels = True
 
     async def fetchrow(self, sql: str, *args):
         compact = " ".join(sql.split())
@@ -335,6 +347,22 @@ class FakePool:
                 "id": row["id"],
                 "media_type": row.get("media_type"),
                 "media_url": row.get("media_url"),
+            }
+        if compact.startswith("SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at FROM messages WHERE id=$1 AND ( sender_id = ANY($2::uuid[]) OR recipient_id = ANY($2::uuid[]) )"):
+            message_id, user_ids = args
+            row = self.messages.get(message_id)
+            if row is None:
+                return None
+            if row.get("sender_id") not in user_ids and row.get("recipient_id") not in user_ids:
+                return None
+            return {
+                "id": row["id"],
+                "direction": row.get("direction"),
+                "sender_id": row.get("sender_id"),
+                "recipient_id": row.get("recipient_id"),
+                "content": row.get("content"),
+                "whatsapp_message_id": row.get("whatsapp_message_id"),
+                "deleted_at": row.get("deleted_at"),
             }
         if compact.startswith("SELECT id, direction, sender_id, recipient_id, media_type, media_url, deleted_at FROM messages"):
             message_id, user_ids = args
@@ -1620,6 +1648,16 @@ class FakePool:
             return [row for user_id, row in self.users.items() if user_id != args[0]]
         if compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default, pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date, pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id <>"):
             return [row for user_id, row in self.users.items() if user_id != args[0]]
+        if compact.startswith("SELECT bot_id, address FROM channels WHERE transport"):
+            if self._raise_undefined_table_on_channels:
+                self._raise_undefined_table_on_channels = False
+                raise _UndefinedTableError("relation \"channels\" does not exist")
+            transport_val = args[0] if args else "discord"
+            return [
+                {"bot_id": row["bot_id"], "address": row["address"]}
+                for (_t, addr), row in self.channels.items()
+                if _t == transport_val
+            ]
         if compact.startswith("SELECT transport, address FROM user_identities WHERE user_id"):
             uid = args[0]
             return [

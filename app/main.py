@@ -38,9 +38,60 @@ def _log_startup_diagnostics() -> None:
     for item in build_startup_diagnostics(env=env_statuses):
         logger.info("startup diagnostic %s=%s", item.name, item.detail)
 
+# ── Per-bot Discord token diagnostics ─────────────────────────────
+    settings = get_settings()
+    per_bot_tokens = settings.discord_bot_tokens
+    legacy_token = settings.discord_bot_token
+    overrides = settings.discord_bot_user_id_overrides
+
+    configured_ids = sorted(per_bot_tokens)
+    if configured_ids:
+        logger.info(
+            "startup diagnostic discord_configured_bot_ids=%s "
+            "(tokens provided via DISCORD_BOT_TOKEN_<BOT_ID>)",
+            ",".join(configured_ids),
+        )
+    else:
+        logger.info("startup diagnostic discord_configured_bot_ids=none")
+
+    if legacy_token and legacy_token.get_secret_value():
+        logger.info(
+            "startup diagnostic discord_legacy_token=present "
+            "(single DISCORD_BOT_TOKEN set — will fall back for mediator "
+            "when no per-bot token matches)"
+        )
+    else:
+        logger.info("startup diagnostic discord_legacy_token=absent")
+
+    # Log which bot_ids have *no* token (configured via overrides but no token)
+    override_ids = sorted(overrides)
+    if override_ids:
+        logger.info(
+            "startup diagnostic discord_bot_user_id_overrides=%s "
+            "(DISCORD_BOT_USER_ID_<BOT_ID> env vars)",
+            ",".join(override_ids),
+        )
+        missing = [bid for bid in override_ids if bid not in per_bot_tokens]
+        if missing:
+            logger.info(
+                "startup diagnostic discord_bot_ids_missing_token=%s "
+                "(have user-id override but no per-bot token — will be "
+                "skipped unless legacy DISCORD_BOT_TOKEN applies)",
+                ",".join(sorted(missing)),
+            )
+
 
 def _discord_provider_enabled(settings: Settings) -> bool:
     return settings.messaging_provider.strip().lower() == "discord"
+
+
+def _make_send_typing(bot_id: str):
+    """Return an async callable that sends a typing indicator as *bot_id*."""
+
+    async def _send_typing(channel_id: str) -> None:
+        await discord.send_typing(channel_id, bot_id=bot_id)
+
+    return _send_typing
 
 
 async def _run_paced_agentic_turn(
@@ -49,6 +100,7 @@ async def _run_paced_agentic_turn(
     decision: PacingDecision,
     *,
     pacer: DiscordPacer | None = None,
+    bot_id: str = "mediator",
 ) -> None:
     before_paced_send = None
     thinking_typing_stop: asyncio.Event | None = None
@@ -66,7 +118,7 @@ async def _run_paced_agentic_turn(
 
     if pacer is not None and decision.signal_snapshot.get("source") == "live":
         try:
-            channel_id = await discord.get_dm_channel_id(user.phone)
+            channel_id = await discord.get_dm_channel_id(user.phone, bot_id=bot_id)
             thinking_typing_stop = asyncio.Event()
             thinking_typing_task = asyncio.create_task(
                 pacer.perform_thinking_typing_until_stopped(user, channel_id, thinking_typing_stop)
@@ -84,7 +136,7 @@ async def _run_paced_agentic_turn(
             nonlocal channel_id
             await stop_thinking_typing()
             if channel_id is None:
-                channel_id = await discord.get_dm_channel_id(user.phone)
+                channel_id = await discord.get_dm_channel_id(user.phone, bot_id=bot_id)
             await pacer.perform_send_typing(user, channel_id, answer_text, send_kind=send_kind, part_index=part_index)
 
     try:
@@ -98,7 +150,7 @@ async def _run_paced_agentic_turn(
         await stop_thinking_typing()
 
 
-async def _send_paced_reaction(pool: Any, message_ids: list[UUID], user: User, decision: PacingDecision) -> None:
+async def _send_paced_reaction(pool: Any, message_ids: list[UUID], user: User, decision: PacingDecision, *, bot_id: str) -> None:
     if not message_ids or not decision.reaction:
         return
     row = await pool.fetchrow(
@@ -112,19 +164,26 @@ async def _send_paced_reaction(pool: Any, message_ids: list[UUID], user: User, d
     )
     if row is None or not row.get("whatsapp_message_id"):
         return
-    await discord.add_reaction(user.phone, row["whatsapp_message_id"], decision.reaction)
+    await discord.add_reaction(user.phone, row["whatsapp_message_id"], decision.reaction, bot_id=bot_id)
 
 
-def _build_coalescer(pool: Any, settings: Settings) -> tuple[BurstCoalescer, DiscordPacer | None]:
+def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> tuple[BurstCoalescer, DiscordPacer | None]:
+    """Build a per-bot coalescer + pacer pair.
+
+    Each bot gets its own DiscordPacer (keyed by bot_id) and glue
+    closures that capture that bot_id so outbound Discord calls
+    (get_dm_channel_id, add_reaction, send_typing) route through the
+    correct DiscordClient.
+    """
     if _discord_provider_enabled(settings) and settings.discord_pacing_enabled:
-        pacer = DiscordPacer(pool, settings=settings, send_typing=discord.send_typing)
+        pacer = DiscordPacer(pool, settings=settings, send_typing=_make_send_typing(bot_id))
 
         async def on_live_typing(user: User, stop_event: asyncio.Event) -> None:
-            channel_id = await discord.get_dm_channel_id(user.phone)
+            channel_id = await discord.get_dm_channel_id(user.phone, bot_id=bot_id)
             await pacer.perform_initial_typing_until_stopped(user, channel_id, stop_event)
 
         async def on_paced_reaction(message_ids: list[UUID], user: User, decision: PacingDecision) -> None:
-            await _send_paced_reaction(pool, message_ids, user, decision)
+            await _send_paced_reaction(pool, message_ids, user, decision, bot_id=bot_id)
 
         return (
             BurstCoalescer(
@@ -137,6 +196,7 @@ def _build_coalescer(pool: Any, settings: Settings) -> tuple[BurstCoalescer, Dis
                     user,
                     decision,
                     pacer=pacer,
+                    bot_id=bot_id,
                 ),
                 on_paced_reaction=on_paced_reaction,
                 on_live_typing=on_live_typing,
@@ -147,9 +207,11 @@ def _build_coalescer(pool: Any, settings: Settings) -> tuple[BurstCoalescer, Dis
 
 
 def _configure_coalescer(app: FastAPI, pool: Any, settings: Settings) -> None:
-    coalescer, pacer = _build_coalescer(pool, settings)
+    coalescer, pacer = _build_coalescer_for_bot(pool, settings, bot_id="mediator")
     app.state.coalescer = coalescer
-    app.state.discord_pacer = pacer
+    app.state.discord_pacers: dict[str, DiscordPacer] = {}
+    if pacer is not None:
+        app.state.discord_pacers["mediator"] = pacer
 
 
 @asynccontextmanager
@@ -159,8 +221,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _log_startup_diagnostics()
         pool = app.state.pool
         if settings.messaging_provider.strip().lower() == "discord":
-            await discord.init_client()
-            await discord.seed_partner_users(pool)
+            pass  # Discord clients are initialized per-bot below
         else:
             await whatsapp.init_client()
         agentic.set_pool(pool)
@@ -183,11 +244,110 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         recovery_task = asyncio.create_task(run_recovery_forever(pool, app.state.coalescer))
         app.state.background_tasks.add(recovery_task)
         if settings.messaging_provider.strip().lower() == "discord":
-            await discord.catch_up_recent_messages(pool, app.state.coalescer)
-            discord_bot = discord.DiscordGatewayBot(pool, app.state.coalescer)
-            app.state.discord_bot = discord_bot
-            discord_task = asyncio.create_task(discord_bot.run_forever())
-            app.state.background_tasks.add(discord_task)
+            # ── Per-bot gateway registration ──────────────────────────
+            try:
+                channel_rows = await pool.fetch(
+                    "SELECT bot_id, address FROM channels WHERE transport = 'discord'"
+                )
+            except Exception as _e:
+                if _e.__class__.__name__ == "UndefinedTableError":
+                    logger.warning(
+                        "channels table not found (missing migration 0020?), "
+                        "falling back to legacy path"
+                    )
+                    channel_rows = []
+                else:
+                    raise
+
+            per_bot_tokens = settings.discord_bot_tokens
+            legacy_token = settings.discord_bot_token
+
+            # Determine which bots to start
+            bot_entries: list[tuple[str, str]] = []  # (bot_id, token_value)
+
+            for row in channel_rows:
+                bot_id: str = row["bot_id"]
+                if bot_id in per_bot_tokens:
+                    token_val = per_bot_tokens[bot_id].get_secret_value()
+                elif len(channel_rows) == 1 and legacy_token:
+                    logger.warning(
+                        "using legacy DISCORD_BOT_TOKEN for bot_id=%s (deprecated)",
+                        bot_id,
+                    )
+                    token_val = legacy_token.get_secret_value()
+                else:
+                    logger.warning(
+                        "no token configured for discord bot_id=%s, skipping",
+                        bot_id,
+                    )
+                    continue
+                bot_entries.append((bot_id, token_val))
+
+            if not bot_entries and not channel_rows and legacy_token:
+                logger.info(
+                    "no channels rows found; synthesizing in-memory "
+                    "mediator entry from legacy DISCORD_BOT_TOKEN"
+                )
+                bot_entries.append(("mediator", legacy_token.get_secret_value()))
+
+            app.state.discord_gateways: dict[str, discord.DiscordGatewayBot] = {}
+            for bot_id, token_val in bot_entries:
+                client = discord.DiscordClient(bot_id, token_val)
+                discord.register_client(bot_id, client)
+
+                # Per-bot pacer (create on demand for non-mediator bots)
+                pacer = app.state.discord_pacers.get(bot_id)
+                if (
+                    pacer is None
+                    and _discord_provider_enabled(settings)
+                    and settings.discord_pacing_enabled
+                ):
+                    pacer = DiscordPacer(
+                        pool,
+                        settings=settings,
+                        send_typing=_make_send_typing(bot_id),
+                    )
+                    app.state.discord_pacers[bot_id] = pacer
+
+                gateway = discord.DiscordGatewayBot(
+                    bot_id,
+                    client,
+                    pool,
+                    app.state.coalescer,
+                    pacer=pacer,
+                )
+                app.state.discord_gateways[bot_id] = gateway
+
+                await discord.catch_up_recent_messages(
+                    pool, app.state.coalescer, client=client
+                )
+
+                if bot_id == "mediator":
+                    await discord.seed_partner_users(pool)
+
+                task = asyncio.create_task(gateway.run_forever())
+                app.state.background_tasks.add(task)
+                logger.info("started discord gateway for bot_id=%s", bot_id)
+
+            # ── Summary diagnostics after registration ──────────────────
+            started_ids = sorted(bid for bid, _ in bot_entries)
+            skipped_ids = sorted(
+                row["bot_id"]
+                for row in channel_rows
+                if row["bot_id"] not in {bid for bid, _ in bot_entries}
+            )
+            if started_ids:
+                logger.info(
+                    "startup diagnostic discord_gateways_started=%s",
+                    ",".join(started_ids),
+                )
+            if skipped_ids:
+                logger.info(
+                    "startup diagnostic discord_gateways_skipped_no_token=%s",
+                    ",".join(skipped_ids),
+                )
+            if not started_ids and not skipped_ids:
+                logger.info("startup diagnostic discord_gateways=none_started")
         if settings.scheduler_enabled:
             await seed_heartbeat(pool, settings=settings)
             await seed_weekly_summaries(pool)
@@ -207,11 +367,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             for task in list(app.state.background_tasks):
                 with suppress(asyncio.CancelledError):
                     await task
-            discord_bot = getattr(app.state, "discord_bot", None)
-            if discord_bot is not None:
-                await discord_bot.close()
+            gateways: dict = getattr(app.state, "discord_gateways", {})
+            for gateway in gateways.values():
+                await gateway.close()
             await whatsapp.close_client()
-            await discord.close_client()
+            await discord.close_all_clients()
             hooks.set_pool(None)
 
 

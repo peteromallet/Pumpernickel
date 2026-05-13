@@ -215,13 +215,13 @@ async def test_discord_provider_sends_without_whatsapp_window(fake_pool, monkeyp
     user = _user(fake_pool)
     sent = []
 
-    async def send_text(to, body, *, send_typing_indicator=True):
+    async def send_text(to, body, *, send_typing_indicator=True, bot_id="mediator"):
         sent.append((to, body, send_typing_indicator))
         return {"messages": [{"id": "discord-message"}]}
 
     monkeypatch.setattr("app.services.discord.send_text", send_text)
 
-    row_id = await send_outbound(fake_pool, user, "hello discord")
+    row_id = await send_outbound(fake_pool, user, "hello discord", bot_id="mediator")
 
     assert sent == [(user.phone, "hello discord", True)]
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message"
@@ -237,13 +237,13 @@ async def test_discord_provider_can_suppress_low_level_typing(fake_pool, monkeyp
     user = _user(fake_pool)
     sent = []
 
-    async def send_text(to, body, *, send_typing_indicator=True):
+    async def send_text(to, body, *, send_typing_indicator=True, bot_id="mediator"):
         sent.append((to, body, send_typing_indicator))
         return {"messages": [{"id": "discord-message"}]}
 
     monkeypatch.setattr("app.services.discord.send_text", send_text)
 
-    row_id = await send_outbound(fake_pool, user, "hello discord", send_typing_indicator=False)
+    row_id = await send_outbound(fake_pool, user, "hello discord", send_typing_indicator=False, bot_id="mediator")
 
     assert sent == [(user.phone, "hello discord", False)]
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message"
@@ -447,7 +447,7 @@ async def test_send_outbound_part_uses_runtime_part_key_for_idempotency(fake_poo
     }
     sent = []
 
-    async def send_text(to, body, *, send_typing_indicator=True):
+    async def send_text(to, body, *, send_typing_indicator=True, bot_id="mediator"):
         sent.append(body)
         return {"messages": [{"id": f"discord-{len(sent)}"}]}
 
@@ -460,6 +460,7 @@ async def test_send_outbound_part_uses_runtime_part_key_for_idempotency(fake_poo
         bot_turn_id=turn_id,
         part_key=f"{turn_id}:1",
         part_index=1,
+        bot_id="mediator",
     )
     second = await send_outbound_part(
         fake_pool,
@@ -468,6 +469,7 @@ async def test_send_outbound_part_uses_runtime_part_key_for_idempotency(fake_poo
         bot_turn_id=turn_id,
         part_key=f"{turn_id}:1",
         part_index=1,
+        bot_id="mediator",
     )
 
     assert first["status"] == "sent"
@@ -524,7 +526,7 @@ async def test_send_message_part_paced_followup_uses_composition_and_rhythm(
     async def send_typing(channel_id: str) -> None:
         typing_sent_at.append((channel_id, now))
 
-    async def send_text(to, body, *, send_typing_indicator=True):
+    async def send_text(to, body, *, send_typing_indicator=True, bot_id="mediator"):
         sent.append((to, body, send_typing_indicator, list(sleeps)))
         return {"messages": [{"id": f"discord-{len(sent)}"}]}
 
@@ -545,6 +547,7 @@ async def test_send_message_part_paced_followup_uses_composition_and_rhythm(
         send_typing_indicator=False,
         before_paced_send=before_paced_send,
         sent_message_parts=[],
+        bot_id="mediator",
     )
     monkeypatch.setattr("app.services.discord.send_text", send_text)
 

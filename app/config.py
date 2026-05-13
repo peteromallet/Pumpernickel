@@ -1,6 +1,8 @@
 """Environment-backed application settings."""
 
-from functools import lru_cache
+import os
+import re
+from functools import cached_property, lru_cache
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -102,6 +104,54 @@ class Settings(BaseSettings):
     # memories.content, observations.content, bot_turns.reasoning).
     # When unset, the app falls back to plaintext storage and logs a warning.
     data_encryption_key: SecretStr | None = None
+
+    # ── Per-bot Discord token discovery ──────────────────────────────────────
+    # Pattern: DISCORD_BOT_TOKEN_<BOT_ID_UPPER> → lowercased bot_id → SecretStr
+    #   e.g. DISCORD_BOT_TOKEN_MEDIATOR → "mediator", DISCORD_BOT_TOKEN_TANTE_ROSI → "tante_rosi"
+    _DISCORD_PER_BOT_TOKEN_RE: re.Pattern = re.compile(
+        r"^DISCORD_BOT_TOKEN_([A-Z0-9_]+)$"
+    )
+    _DISCORD_PER_BOT_USER_ID_RE: re.Pattern = re.compile(
+        r"^DISCORD_BOT_USER_ID_([A-Z0-9_]+)$"
+    )
+
+    @cached_property
+    def discord_bot_tokens(self) -> dict[str, SecretStr]:
+        """Per-bot Discord tokens keyed by lowercased bot_id.
+
+        Scans environ for DISCORD_BOT_TOKEN_<BOT_ID_UPPER>.  The bot_id is the
+        lowercased suffix.  Non-alphanumeric characters in the env-var suffix
+        are preserved (the convention is uppercase letters, digits, and _ only).
+
+        Callers must still handle the legacy DISCORD_BOT_TOKEN field for
+        backward compatibility (see §6 of the multi-gateway brief).
+        """
+        result: dict[str, SecretStr] = {}
+        for key, value in os.environ.items():
+            m = self._DISCORD_PER_BOT_TOKEN_RE.match(key)
+            if m and value:
+                bot_id = m.group(1).lower()
+                result[bot_id] = SecretStr(value)
+        return result
+
+    @cached_property
+    def discord_bot_user_id_overrides(self) -> dict[str, str]:
+        """Per-bot Discord bot user-id overrides keyed by lowercased bot_id.
+
+        Scans environ for DISCORD_BOT_USER_ID_<BOT_ID_UPPER>.  Values must be
+        digit-only strings (the canonical Discord user id format).
+
+        When set, these take precedence over token-decoded user ids in
+        discord_bot_user_id(bot_id).
+        """
+        _DIGIT_ONLY: re.Pattern = re.compile(r"^\d+$")
+        result: dict[str, str] = {}
+        for key, value in os.environ.items():
+            m = self._DISCORD_PER_BOT_USER_ID_RE.match(key)
+            if m and value and _DIGIT_ONLY.match(value):
+                bot_id = m.group(1).lower()
+                result[bot_id] = value
+        return result
 
     @model_validator(mode="after")
     def default_consult_model(self) -> "Settings":

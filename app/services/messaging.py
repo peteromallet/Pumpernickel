@@ -257,7 +257,7 @@ async def send_outbound_part(
 
     try:
         response = await _send_with_retry(
-            lambda: discord.send_text(user.phone, content, send_typing_indicator=send_typing_indicator)
+            lambda: discord.send_text(user.phone, content, send_typing_indicator=send_typing_indicator, bot_id=bot_id)
         )
     except Exception as exc:
         logger.warning("incremental outbound send failed after retries: %s", exc,
@@ -414,7 +414,7 @@ async def send_outbound(
 
     async def send_call() -> dict[str, Any]:
         if provider == "discord":
-            return await discord.send_text(user.phone, content, send_typing_indicator=send_typing_indicator)
+            return await discord.send_text(user.phone, content, send_typing_indicator=send_typing_indicator, bot_id=bot_id)
         if within_window:
             return await whatsapp.send_text(user.phone, content)
         return await whatsapp.send_template(user.phone, template_payload)
