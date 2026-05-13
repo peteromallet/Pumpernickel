@@ -222,12 +222,24 @@ def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> t
     return BurstCoalescer(on_burst_complete=run_agentic_turn), None
 
 
-def _configure_coalescer(app: FastAPI, pool: Any, settings: Settings) -> None:
-    coalescer, pacer = _build_coalescer_for_bot(pool, settings, bot_id="mediator")
-    app.state.coalescer = coalescer
-    app.state.discord_pacers: dict[str, DiscordPacer] = {}
+def _install_bot_coalescer(
+    app: FastAPI,
+    pool: Any,
+    settings: Settings,
+    *,
+    bot_id: str,
+) -> BurstCoalescer:
+    """Build a coalescer + pacer for *bot_id* and store both on app.state.
+
+    Each bot gets its own coalescer with glue closures that capture the
+    correct bot_id; this prevents outbound replies from leaking through the
+    mediator's DiscordClient when a non-mediator gateway dispatches a turn.
+    """
+    coalescer, pacer = _build_coalescer_for_bot(pool, settings, bot_id=bot_id)
+    app.state.coalescers[bot_id] = coalescer
     if pacer is not None:
-        app.state.discord_pacers["mediator"] = pacer
+        app.state.discord_pacers[bot_id] = pacer
+    return coalescer
 
 
 @asynccontextmanager
@@ -254,11 +266,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.bots.registry import populate_topic_ids_from_db
 
         await populate_topic_ids_from_db(pool)
-        _configure_coalescer(app, pool, settings)
+        # Per-bot coalescers + pacers. Populated below — for non-discord
+        # transports we build a mediator coalescer eagerly; for discord we
+        # build one per bot inside the gateway loop so the glue closures
+        # capture the right bot_id (no leaks to the mediator client).
+        app.state.coalescers: dict[str, BurstCoalescer] = {}
+        app.state.discord_pacers: dict[str, DiscordPacer] = {}
+        if not _discord_provider_enabled(settings):
+            _install_bot_coalescer(app, pool, settings, bot_id="mediator")
         app.state.background_tasks: set[asyncio.Task] = set()
-        await recover_on_startup(pool, app.state.coalescer)
-        recovery_task = asyncio.create_task(run_recovery_forever(pool, app.state.coalescer))
-        app.state.background_tasks.add(recovery_task)
         if settings.messaging_provider.strip().lower() == "discord":
             # ── Per-bot gateway registration ──────────────────────────
             logger.info("lifespan: entering discord per-bot gateway registration")
@@ -327,31 +343,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 client = discord.DiscordClient(bot_id, token_val)
                 discord.register_client(bot_id, client)
 
-                # Per-bot pacer (create on demand for non-mediator bots)
+                # Build a per-bot coalescer + pacer pair. Each bot's glue
+                # closures (on_paced_answer, on_live_typing, on_paced_reaction,
+                # send_typing) capture this bot_id so outbound Discord calls
+                # route through the right DiscordClient — no leak to mediator.
+                bot_coalescer = _install_bot_coalescer(app, pool, settings, bot_id=bot_id)
                 pacer = app.state.discord_pacers.get(bot_id)
-                if (
-                    pacer is None
-                    and _discord_provider_enabled(settings)
-                    and settings.discord_pacing_enabled
-                ):
-                    pacer = DiscordPacer(
-                        pool,
-                        settings=settings,
-                        send_typing=_make_send_typing(bot_id),
-                    )
-                    app.state.discord_pacers[bot_id] = pacer
 
                 gateway = discord.DiscordGatewayBot(
                     bot_id,
                     client,
                     pool,
-                    app.state.coalescer,
+                    bot_coalescer,
                     pacer=pacer,
                 )
                 app.state.discord_gateways[bot_id] = gateway
 
                 await discord.catch_up_recent_messages(
-                    pool, app.state.coalescer, client=client, bot_id=bot_id
+                    pool, bot_coalescer, client=client, bot_id=bot_id
                 )
 
                 if bot_id == "mediator":
@@ -380,6 +389,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             if not started_ids and not skipped_ids:
                 logger.info("startup diagnostic discord_gateways=none_started")
+        # Recovery worker is mediator-only-aware today; if no mediator
+        # coalescer was built (e.g. discord with no mediator gateway), skip
+        # with a warning rather than crash.
+        # TODO(multi-bot-recovery): make recovery per-bot.
+        mediator_coalescer = app.state.coalescers.get("mediator")
+        if mediator_coalescer is not None:
+            await recover_on_startup(pool, mediator_coalescer)
+            recovery_task = asyncio.create_task(run_recovery_forever(pool, mediator_coalescer))
+            app.state.background_tasks.add(recovery_task)
+        else:
+            logger.warning(
+                "recovery worker skipped: no mediator coalescer built — "
+                "recovery is not yet multi-bot-aware"
+            )
         if settings.scheduler_enabled:
             await seed_heartbeat(pool, settings=settings)
             await seed_weekly_reflections(pool)

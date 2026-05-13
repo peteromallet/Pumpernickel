@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple
 from uuid import UUID, uuid5, NAMESPACE_URL
 
-from app.bots.registry import get_relationship_topic_id
+from app.bots.registry import (
+    get_bot_spec,
+    get_relationship_topic_id,
+    primary_topic_id_for,
+)
 from app.config import get_settings
 from app.models.user import claim_onboarding_welcome, upsert_user
 from app.services import routing, system_state
@@ -187,7 +191,21 @@ async def _resolve_scope(
     """
     binding_id: UUID | None = None
     dyad_id: UUID | None = None
-    topic_id = get_relationship_topic_id()
+    # Resolve the bot's primary topic — falls back to the relationship topic
+    # if the bot spec is unknown or the lookup fails (e.g. FakePool tests,
+    # early startup before topic ids are cached).
+    topic_id: UUID | None
+    try:
+        bot_spec = get_bot_spec(bot_id)
+        topic_id = await primary_topic_id_for(pool, bot_spec)
+    except Exception as exc:
+        logger.debug(
+            "_resolve_scope: primary_topic_id_for failed for bot_id=%s, "
+            "falling back to relationship topic: %s",
+            bot_id,
+            exc,
+        )
+        topic_id = get_relationship_topic_id()
 
     try:
         user_id = await routing.resolve_sender(pool, transport=transport, address=address)

@@ -149,7 +149,7 @@ async def test_signed_text_post_triggers_agentic_turn_with_user(async_client, mo
     async def callback(message_ids, user):
         calls.append((message_ids, user))
 
-    app.state.coalescer.on_burst_complete = callback
+    app.state.coalescers["mediator"].on_burst_complete = callback
     payload = json.loads(FIXTURE.read_text())
     body = _body(payload)
 
@@ -161,7 +161,7 @@ async def test_signed_text_post_triggers_agentic_turn_with_user(async_client, mo
     await _wait_for_messages(1)
     message_id = next(iter(app.state.pool.messages))
     user_id = next(iter(app.state.pool.users))
-    await app.state.coalescer._fire(user_id)
+    await app.state.coalescers["mediator"]._fire(user_id)
 
     assert response.status_code == 200
     assert calls[0][0] == [message_id]
@@ -174,7 +174,7 @@ async def test_greeting_onboarding_uses_agentic_turn(async_client, monkeypatch) 
     async def callback(message_ids, user):
         calls.append((message_ids, user))
 
-    app.state.coalescer.on_burst_complete = callback
+    app.state.coalescers["mediator"].on_burst_complete = callback
     payload = json.loads(FIXTURE.read_text())
     payload["entry"][0]["changes"][0]["value"]["messages"][0]["text"]["body"] = "Hello"
     body = _body(payload)
@@ -186,7 +186,7 @@ async def test_greeting_onboarding_uses_agentic_turn(async_client, monkeypatch) 
     )
     await _wait_for_messages(1)
     user_id = next(iter(app.state.pool.users))
-    await app.state.coalescer._fire(user_id)
+    await app.state.coalescers["mediator"]._fire(user_id)
 
     assert response.status_code == 200
     inbound = [m for m in app.state.pool.messages.values() if m["direction"] == "inbound"]
@@ -276,7 +276,7 @@ async def test_reaction_webhook_logs_feedback_without_coalescing(async_client) -
         "edit_history": None,
         "edited_at": None,
     }
-    app.state.coalescer._bursts.clear()
+    app.state.coalescers["mediator"]._bursts.clear()
 
     reaction_payload = copy.deepcopy(payload)
     reaction_payload["entry"][0]["changes"][0]["value"]["messages"][0] = {
@@ -304,4 +304,4 @@ async def test_reaction_webhook_logs_feedback_without_coalescing(async_client) -
     assert feedback["target_type"] == "message"
     assert feedback["target_id"] == outbound_id
     assert feedback["sentiment"] == "positive"
-    assert app.state.coalescer._bursts == {}
+    assert app.state.coalescers["mediator"]._bursts == {}

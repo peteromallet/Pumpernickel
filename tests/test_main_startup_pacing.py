@@ -6,9 +6,19 @@ from uuid import uuid4
 import pytest
 
 from app.config import get_settings
-from app.main import _configure_coalescer
+from app.main import _install_bot_coalescer
 from app.models.user import User
 from app.services.pacer import DiscordPacer, PacingDecision
+
+
+def _fresh_app() -> SimpleNamespace:
+    """Build a SimpleNamespace mimicking the lifespan's app.state shape."""
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            coalescers={},
+            discord_pacers={},
+        )
+    )
 
 pytestmark = pytest.mark.anyio
 
@@ -21,27 +31,29 @@ def _settings(monkeypatch, *, provider: str, pacing_enabled: bool = True):
 
 
 def test_configure_coalescer_keeps_legacy_path_for_non_discord(fake_pool, app_env, monkeypatch):
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = _fresh_app()
     settings = _settings(monkeypatch, provider="meta")
 
-    _configure_coalescer(app, fake_pool, settings)
+    _install_bot_coalescer(app, fake_pool, settings, bot_id="mediator")
 
     assert app.state.discord_pacers == {}
-    assert app.state.coalescer.pacer is None
-    assert app.state.coalescer.on_paced_answer is None
-    assert app.state.coalescer.on_paced_reaction is None
+    coalescer = app.state.coalescers["mediator"]
+    assert coalescer.pacer is None
+    assert coalescer.on_paced_answer is None
+    assert coalescer.on_paced_reaction is None
 
 
 def test_configure_coalescer_keeps_legacy_path_when_discord_pacing_disabled(fake_pool, app_env, monkeypatch):
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = _fresh_app()
     settings = _settings(monkeypatch, provider="discord", pacing_enabled=False)
 
-    _configure_coalescer(app, fake_pool, settings)
+    _install_bot_coalescer(app, fake_pool, settings, bot_id="mediator")
 
     assert app.state.discord_pacers == {}
-    assert app.state.coalescer.pacer is None
-    assert app.state.coalescer.on_paced_answer is None
-    assert app.state.coalescer.on_paced_reaction is None
+    coalescer = app.state.coalescers["mediator"]
+    assert coalescer.pacer is None
+    assert coalescer.on_paced_answer is None
+    assert coalescer.on_paced_reaction is None
 
 
 async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
@@ -51,7 +63,7 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
 ):
     from app import main
 
-    app = SimpleNamespace(state=SimpleNamespace())
+    app = _fresh_app()
     settings = _settings(monkeypatch, provider="discord")
 
     answer_calls = []
@@ -94,15 +106,16 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     monkeypatch.setattr(main.discord, "send_typing", fake_send_typing)
     monkeypatch.setattr(main.discord, "get_dm_channel_id", fake_get_dm_channel_id)
 
-    _configure_coalescer(app, fake_pool, settings)
+    _install_bot_coalescer(app, fake_pool, settings, bot_id="mediator")
 
     mediator_pacer = app.state.discord_pacers["mediator"]
+    coalescer = app.state.coalescers["mediator"]
     assert isinstance(mediator_pacer, DiscordPacer)
-    assert app.state.coalescer.pacer is mediator_pacer
-    assert app.state.coalescer.debounce_seconds == settings.discord_pacing_burst_window_s
-    assert app.state.coalescer.on_paced_answer is not None
-    assert app.state.coalescer.on_paced_reaction is not None
-    assert app.state.coalescer.on_live_typing is not None
+    assert coalescer.pacer is mediator_pacer
+    assert coalescer.debounce_seconds == settings.discord_pacing_burst_window_s
+    assert coalescer.on_paced_answer is not None
+    assert coalescer.on_paced_reaction is not None
+    assert coalescer.on_live_typing is not None
     monkeypatch.setattr(mediator_pacer, "perform_send_typing", fake_perform_send_typing)
     monkeypatch.setattr(
         mediator_pacer,
@@ -123,7 +136,7 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     }
     decision = PacingDecision(action="answer", reason="ready", signal_snapshot={"source": "live"})
 
-    await app.state.coalescer.on_paced_answer([message_id], user, decision)
+    await coalescer.on_paced_answer([message_id], user, decision)
     assert len(answer_calls) == 1
     assert answer_calls[0][:4] == ([message_id], user, decision, None)
     assert answer_calls[0][4] is not None
@@ -131,5 +144,5 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     assert typing_calls == [(user.id, "channel-1", "human-paced answer", "final", None)]
 
     reaction_decision = PacingDecision(action="react", reason="ack", reaction="👍")
-    await app.state.coalescer.on_paced_reaction([message_id], user, reaction_decision)
+    await coalescer.on_paced_reaction([message_id], user, reaction_decision)
     assert reaction_calls == [("15555550100", "discord-message-1", "👍")]
