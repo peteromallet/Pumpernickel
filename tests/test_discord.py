@@ -126,7 +126,7 @@ async def test_discord_gateway_drops_non_partner(fake_pool, monkeypatch: pytest.
     get_settings.cache_clear()
     calls = []
 
-    async def process_inbound(pool, payload, coalescer=None):
+    async def process_inbound(pool, payload, coalescer=None, **kwargs):
         calls.append(payload)
 
     monkeypatch.setattr("app.services.inbound.process_inbound", process_inbound)
@@ -220,7 +220,7 @@ async def test_discord_gateway_processes_image_only_message(
     get_settings.cache_clear()
     calls = []
 
-    async def process_inbound(pool, payload, coalescer=None):
+    async def process_inbound(pool, payload, coalescer=None, **kwargs):
         calls.append(payload)
 
     monkeypatch.setattr("app.services.inbound.process_inbound", process_inbound)
@@ -256,7 +256,7 @@ async def test_discord_gateway_processes_audio_only_message(
     get_settings.cache_clear()
     calls = []
 
-    async def process_inbound(pool, payload, coalescer=None):
+    async def process_inbound(pool, payload, coalescer=None, **kwargs):
         calls.append(payload)
 
     monkeypatch.setattr("app.services.inbound.process_inbound", process_inbound)
@@ -293,7 +293,7 @@ async def test_discord_gateway_accepts_partner(fake_pool, monkeypatch: pytest.Mo
     get_settings.cache_clear()
     calls = []
 
-    async def process_inbound(pool, payload, coalescer=None):
+    async def process_inbound(pool, payload, coalescer=None, **kwargs):
         calls.append(payload)
 
     async def send_typing_after_delay(channel_id):
@@ -461,7 +461,7 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
 
     coalescer = Coalescer()
 
-    count = await catch_up_recent_messages(fake_pool, coalescer, client=test_client)
+    count = await catch_up_recent_messages(fake_pool, coalescer, client=test_client, bot_id="mediator")
 
     assert count == 2
     assert calls == [("/channels/channel-1/messages", {"limit": 50, "after": None})]
@@ -529,7 +529,7 @@ async def test_catch_up_recent_messages_strips_attachment_suffix_for_after(
             return Response()
     test_client2._rest = MockRest2()
 
-    assert await catch_up_recent_messages(fake_pool, None, client=test_client2) == 0
+    assert await catch_up_recent_messages(fake_pool, None, client=test_client2, bot_id="mediator") == 0
     assert calls == [
         (
             "/channels/channel-1/messages",

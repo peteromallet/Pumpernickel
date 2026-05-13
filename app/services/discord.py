@@ -607,7 +607,13 @@ class DiscordGatewayBot:
             return
         if not message.get("content") and not _has_supported_attachment(message):
             return
-        await process_inbound(self.pool, message_to_meta_payload(message), self.coalescer)
+        await process_inbound(
+            self.pool,
+            message_to_meta_payload(message),
+            self.coalescer,
+            transport="discord",
+            bot_id=self.bot_id,
+        )
 
     async def _handle_message_update(self, message: dict[str, Any]) -> None:
         author_id = str(message.get("author", {}).get("id", ""))
@@ -641,16 +647,14 @@ class DiscordGatewayBot:
         if not is_allowed_discord_user(user_id):
             return
 
-        # Resolve scope via the BOT's address, NEVER the reacting user's id.
-        # Must be hoisted above early-return so bot_id/topic_id are always
-        # defined for logger invocations (fixes NameError on unknown-message-id path).
-        from app.services.inbound import _resolve_scope
+        # Scope is carried explicitly from the gateway: this DiscordGatewayBot
+        # already knows its own bot_id. The reacting user's address is irrelevant
+        # to bot resolution (it would never appear in `channels` anyway — that
+        # table stores bot addresses, not user addresses).
         from app.bots.registry import get_relationship_topic_id
 
-        bot_user_id = self.client.bot_user_id
-        scope = await _resolve_scope(self.pool, 'discord', bot_user_id) if bot_user_id else None
-        _bot_id = scope.bot_id if scope else 'mediator'
-        _topic_id = scope.topic_id if scope else get_relationship_topic_id()
+        _bot_id = self.bot_id
+        _topic_id = get_relationship_topic_id()
 
         target_id = await self.pool.fetchval(
             "SELECT id FROM messages WHERE whatsapp_message_id=$1 AND direction='outbound'",
@@ -684,10 +688,11 @@ class DiscordGatewayBot:
 
 # ── Catch-up ────────────────────────────────────────────────────────────────
 
-async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, client: DiscordClient, limit: int = 50) -> int:
+async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, client: DiscordClient, bot_id: str, limit: int = 50) -> int:
     """Fetch recent partner DM history so messages sent while offline are ingested.
 
-    Accepts a per-bot DiscordClient so catch-up uses the correct token.
+    Accepts a per-bot DiscordClient so catch-up uses the correct token, plus an
+    explicit bot_id so the inbound writes are correctly attributed.
     """
     from app.services.inbound import process_inbound
 
@@ -732,6 +737,8 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, client: 
                 pool,
                 message_to_meta_payload(message),
                 coalescer,
+                transport="discord",
+                bot_id=bot_id,
                 coalescer_source="catch_up",
             )
             processed += 1

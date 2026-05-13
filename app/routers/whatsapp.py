@@ -36,7 +36,12 @@ async def receive_webhook(request: Request) -> dict[str, str]:
 
     pool = request.app.state.pool
     coalescer = getattr(request.app.state, "coalescer", None)
-    task = asyncio.create_task(process_inbound(pool, json.loads(body), coalescer))
+    # TODO(multi-wa): we currently only run one WhatsApp bot (mediator). When we add
+    # a second WA number, resolve bot_id from
+    # payload['entry'][0]['changes'][0]['value']['metadata']['phone_number_id'].
+    task = asyncio.create_task(
+        process_inbound(pool, json.loads(body), coalescer, transport="whatsapp", bot_id="mediator")
+    )
     background_tasks = request.app.state.background_tasks
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
@@ -55,7 +60,10 @@ async def receive_twilio_webhook(request: Request) -> Response:
 
     pool = request.app.state.pool
     coalescer = getattr(request.app.state, "coalescer", None)
-    task = asyncio.create_task(process_inbound(pool, twilio_form_to_meta_payload(form), coalescer))
+    # TODO(multi-wa): single WA bot today; resolve from form/payload when we add more.
+    task = asyncio.create_task(
+        process_inbound(pool, twilio_form_to_meta_payload(form), coalescer, transport="whatsapp", bot_id="mediator")
+    )
     background_tasks = request.app.state.background_tasks
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)

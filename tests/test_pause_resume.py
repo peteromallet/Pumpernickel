@@ -88,7 +88,7 @@ async def test_pause_from_either_partner_sets_global_state_supersedes_and_notifi
     coalescer = RecordingCoalescer()
     user_b = fake_pool.users[user_b_id]
 
-    await process_inbound(fake_pool, _payload(user_b, _message(user_b, "wamid.pause", "text", "/pause")), coalescer)
+    await process_inbound(fake_pool, _payload(user_b, _message(user_b, "wamid.pause", "text", "/pause")), coalescer, transport="whatsapp", bot_id="mediator")
 
     assert await system_state.is_paused(fake_pool)
     assert fake_pool.system_state["global_pause"]["paused_by_user_id"] == user_b_id
@@ -127,7 +127,7 @@ async def test_paused_text_document_voice_and_image_persist_without_enqueue(fake
         ("paused.voice", "audio", None),
         ("paused.image", "image", None),
     ):
-        await process_inbound(fake_pool, _payload(user, _message(user, wa_id, wa_type, body)), coalescer)
+        await process_inbound(fake_pool, _payload(user, _message(user, wa_id, wa_type, body)), coalescer, transport="whatsapp", bot_id="mediator")
 
     assert {message["whatsapp_message_id"] for message in fake_pool.messages.values()} >= {
         "paused.text",
@@ -148,14 +148,14 @@ async def test_resume_clears_pause_seeds_weekly_and_does_not_replay_backlog(fake
     await system_state.pause(fake_pool, user_a_id)
     coalescer = RecordingCoalescer()
 
-    await process_inbound(fake_pool, _payload(user, _message(user, "paused.backlog", "text", "stored only")), coalescer)
+    await process_inbound(fake_pool, _payload(user, _message(user, "paused.backlog", "text", "stored only")), coalescer, transport="whatsapp", bot_id="mediator")
     assert coalescer.calls == []
 
-    await process_inbound(fake_pool, _payload(user, _message(user, "resume.command", "text", "/resume")), coalescer)
+    await process_inbound(fake_pool, _payload(user, _message(user, "resume.command", "text", "/resume")), coalescer, transport="whatsapp", bot_id="mediator")
 
     assert not await system_state.is_paused(fake_pool)
     assert coalescer.calls == []
     assert any(job["job_type"] == "weekly_summary" and job["status"] == "pending" for job in fake_pool.scheduled_jobs.values())
 
-    await process_inbound(fake_pool, _payload(user, _message(user, "after.resume", "text", "new work")), coalescer)
+    await process_inbound(fake_pool, _payload(user, _message(user, "after.resume", "text", "new work")), coalescer, transport="whatsapp", bot_id="mediator")
     assert len(coalescer.calls) == 1

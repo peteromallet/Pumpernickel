@@ -371,7 +371,10 @@ async def _seed_inbound(pool: Any, scenario: Scenario, user: User) -> list[UUID]
     if classify:
         coalescer = _CollectingCoalescer()
         for index, message in enumerate(scenario.inbound):
-            await inbound.process_inbound(pool, _payload(user, message, index), coalescer)
+            await inbound.process_inbound(
+                pool, _payload(user, message, index), coalescer,
+                transport="whatsapp", bot_id="mediator",
+            )
         return coalescer.message_ids
     ids: list[UUID] = []
     for index, message in enumerate(scenario.inbound):

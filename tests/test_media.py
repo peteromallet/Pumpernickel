@@ -360,7 +360,7 @@ async def test_process_inbound_text_plus_image_waits_for_vision_before_text_add(
         ]
     }
 
-    await process_inbound(fake_pool, payload, coalescer)
+    await process_inbound(fake_pool, payload, coalescer, transport="whatsapp", bot_id="mediator")
 
     # Both items should have arrived at the coalescer (one media, one live).
     sources = sorted(call["source"] for call in coalescer.calls)
@@ -445,7 +445,7 @@ async def test_process_inbound_text_plus_image_still_replies_when_vision_fails(
         ]
     }
 
-    await process_inbound(fake_pool, payload, coalescer)
+    await process_inbound(fake_pool, payload, coalescer, transport="whatsapp", bot_id="mediator")
 
     # Vision failure path does not enqueue the image into the coalescer, but
     # the text item still must, so the user gets a reply.
@@ -480,8 +480,8 @@ async def test_explain_stored_image_downloads_analyzes_and_persists(fake_pool, m
 
 
 async def test_edit_runs_before_idempotent_insert(fake_pool) -> None:
-    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_text.json").read_text()))
-    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_edit.json").read_text()))
+    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_text.json").read_text()), transport="whatsapp", bot_id="mediator")
+    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_edit.json").read_text()), transport="whatsapp", bot_id="mediator")
 
     message = next(iter(fake_pool.messages.values()))
     assert message["edited_at"] is not None
@@ -490,8 +490,8 @@ async def test_edit_runs_before_idempotent_insert(fake_pool) -> None:
 
 
 async def test_delete_sets_deleted_at_and_purge_rewrites_content(fake_pool) -> None:
-    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_text.json").read_text()))
-    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_delete.json").read_text()))
+    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_text.json").read_text()), transport="whatsapp", bot_id="mediator")
+    await process_inbound(fake_pool, json.loads((FIXTURE_DIR / "inbound_delete.json").read_text()), transport="whatsapp", bot_id="mediator")
 
     message = next(iter(fake_pool.messages.values()))
     assert message["deleted_at"] is not None

@@ -351,7 +351,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 app.state.discord_gateways[bot_id] = gateway
 
                 await discord.catch_up_recent_messages(
-                    pool, app.state.coalescer, client=client
+                    pool, app.state.coalescer, client=client, bot_id=bot_id
                 )
 
                 if bot_id == "mediator":

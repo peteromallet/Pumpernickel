@@ -417,6 +417,8 @@ class FakePool:
             else:
                 user_id, content, wa_id, sent_at, media_type, media_url, duration, media_analysis, *rest = args
             charge = rest[0] if rest else None
+            inbound_bot_id = rest[1] if len(rest) > 1 else None
+            inbound_topic_id = rest[2] if len(rest) > 2 else None
             if any(m["whatsapp_message_id"] == wa_id for m in self.messages.values()):
                 return None
             row = {
@@ -433,6 +435,8 @@ class FakePool:
                 "media_url": media_url,
                 "media_duration_seconds": duration,
                 "media_analysis": media_analysis,
+                "bot_id": inbound_bot_id,
+                "topic_id": inbound_topic_id,
                 "edit_history": None,
                 "edited_at": None,
                 "deleted_at": None,

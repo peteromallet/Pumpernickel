@@ -2,7 +2,7 @@
 
 import logging
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 from uuid import UUID, uuid5, NAMESPACE_URL
 
 from app.bots.registry import get_relationship_topic_id
@@ -166,24 +166,28 @@ class ResolvedScope(NamedTuple):
     dyad_id: UUID | None
 
 
-async def _resolve_scope(pool: Any, transport: str, address: str) -> ResolvedScope:
-    """Resolve bot + sender + binding for an inbound transport+address pair.
+async def _resolve_scope(
+    pool: Any,
+    *,
+    transport: Literal["discord", "whatsapp"],
+    bot_id: str,
+    address: str,
+) -> ResolvedScope:
+    """Resolve binding for an inbound transport+sender-address pair under a known bot.
 
-    Falls back to mediator defaults on any miss, including when the routing
-    tables are unavailable (test FakePool, early startup, etc.).
+    The bot_id is supplied by the caller (gateway/webhook), never inferred from
+    the sender's address. We previously tried to look up bot_id by querying the
+    channels table with the sender's address — but channels stores BOT addresses,
+    not sender addresses, so that lookup was always wrong and silently fell back
+    to "mediator". That bug is gone now.
+
+    The binding lookup remains: given (bot_id, sender), find the bot_binding row
+    so we can carry binding_id/dyad_id forward. Tolerant of missing routing
+    tables (FakePool, early startup) — returns the supplied bot_id either way.
     """
-    bot_id: str = "mediator"
     binding_id: UUID | None = None
     dyad_id: UUID | None = None
     topic_id = get_relationship_topic_id()
-
-    try:
-        resolved_bot = await routing.resolve_bot(pool, transport=transport, address=address)
-        if resolved_bot is not None:
-            bot_id = resolved_bot
-    except Exception:
-        logger.debug("_resolve_scope: resolve_bot failed — using mediator default", exc_info=True,
-                     extra={"bot_id": bot_id, "topic_id": str(topic_id) if topic_id else None})
 
     try:
         user_id = await routing.resolve_sender(pool, transport=transport, address=address)
@@ -194,10 +198,10 @@ async def _resolve_scope(pool: Any, transport: str, address: str) -> ResolvedSco
                     binding_id = binding.binding_id
                     dyad_id = binding.dyad_id
             except Exception:
-                logger.debug("_resolve_scope: resolve_binding failed — using mediator default", exc_info=True,
+                logger.debug("_resolve_scope: resolve_binding failed — binding stays None", exc_info=True,
                              extra={"bot_id": bot_id, "topic_id": str(topic_id) if topic_id else None})
     except Exception:
-        logger.debug("_resolve_scope: resolve_sender failed — using mediator default", exc_info=True,
+        logger.debug("_resolve_scope: resolve_sender failed — binding stays None", exc_info=True,
                      extra={"bot_id": bot_id, "topic_id": str(topic_id) if topic_id else None})
 
     return ResolvedScope(
@@ -253,6 +257,8 @@ async def process_inbound(
     payload: dict[str, Any],
     coalescer: Any | None = None,
     *,
+    transport: Literal["discord", "whatsapp"],
+    bot_id: str,
     coalescer_source: str = "live",
 ) -> None:
     for entry in payload.get("entry", []):
@@ -282,7 +288,7 @@ async def process_inbound(
                     logger.warning("dropping non-whitelisted sender %s", phone)
                     continue
 
-                scope = await _resolve_scope(pool, "whatsapp", phone)
+                scope = await _resolve_scope(pool, transport=transport, bot_id=bot_id, address=phone)
 
                 user = await upsert_user(
                     pool,
