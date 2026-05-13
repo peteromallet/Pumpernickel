@@ -22,7 +22,7 @@ CHARGE_LABELS = {"routine", "notable", "charged", "crisis"}
 
 _CHARGE_INSTRUCTIONS = """Classify one inbound relationship-assistant message by emotional charge.
 
-Return JSON only with this shape:
+Return raw JSON only — no prose, no markdown code fences. Exact shape:
 {"charge":"routine","reason":"short explanation"}
 
 Labels:
@@ -55,8 +55,21 @@ def _response_text(response: Any) -> str:
     return "\n".join(part for part in parts if part).strip()
 
 
+def _strip_code_fences(text: str) -> str:
+    """Strip ```json / ``` markdown fences models sometimes wrap JSON in."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
 def _parse_charge(text: str) -> tuple[ChargeLabel, str]:
-    data = json.loads(text)
+    data = json.loads(_strip_code_fences(text))
     charge = str(data["charge"]).strip().lower()
     if charge not in CHARGE_LABELS:
         raise ValueError(f"unknown charge label: {charge}")

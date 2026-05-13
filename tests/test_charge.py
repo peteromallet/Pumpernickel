@@ -100,3 +100,22 @@ async def test_classify_charge_fallback_uses_keywords_for_crisis_content(app_env
     assert classification.charge == "crisis"
     assert classification.prompt_version == FAILED_CHARGE_PROMPT_VERSION
     assert "keyword fallback" in classification.reason
+
+
+async def test_classify_charge_strips_markdown_json_fence(app_env, fake_pool) -> None:
+    client = FakeClient('```json\n{"charge":"charged","reason":"fenced output"}\n```')
+
+    classification = await classify_charge(fake_pool, "message text", client=client)
+
+    assert classification.charge == "charged"
+    assert classification.reason == "fenced output"
+    assert classification.prompt_version == "v1"
+
+
+async def test_classify_charge_strips_bare_backtick_fence(app_env, fake_pool) -> None:
+    client = FakeClient('```\n{"charge":"notable","reason":"bare fence"}\n```')
+
+    classification = await classify_charge(fake_pool, "message text", client=client)
+
+    assert classification.charge == "notable"
+    assert classification.reason == "bare fence"
