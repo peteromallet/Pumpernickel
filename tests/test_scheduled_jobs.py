@@ -15,11 +15,27 @@ from app.services.scheduled_task_recurrence import (
     normalize_recurrence,
     recurrence_after_fire,
 )
-from app.services.scheduled_job_handlers import ScheduledJobHandlers, next_weekly_summary_at, seed_weekly_summaries
+from app.services.scheduled_job_handlers import (
+    ScheduledJobHandlers,
+    WEEKLY_REFLECTION_BRIEF,
+    next_weekly_reflection_at,
+    seed_weekly_reflections,
+)
 from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
 from app.services import system_state
 
 pytestmark = pytest.mark.anyio
+
+
+def _scheduler_settings(**overrides):
+    values = {
+        "scheduler_batch_size": 10,
+        "heartbeat_interval_hours": 24,
+        "scheduler_poll_interval_s": 1,
+        "default_seed_bot_id": "test-bot",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def _job(pool, *, job_type: str, user_id=None, scheduled_for=None, status="pending", attempt_count=0, max_attempts=2):
@@ -37,20 +53,19 @@ def _job(pool, *, job_type: str, user_id=None, scheduled_for=None, status="pendi
         "claimed_at": None,
         "claimed_by": None,
         "created_at": datetime.now(UTC),
+        "bot_id": "test-bot",
+        "topic_id": uuid4(),
     }
     return job_id
 
 
-def _user(pool, *, weekly_summary_day=1, weekly_summary_time="09:00", timezone="UTC"):
+def _user(pool, *, timezone="UTC"):
     user_id = uuid4()
     pool.users[user_id] = {
         "id": user_id,
         "name": "Maya",
         "phone": "15555550100",
         "timezone": timezone,
-        "weekly_summary_enabled": True,
-        "weekly_summary_day": weekly_summary_day,
-        "weekly_summary_time": weekly_summary_time,
         "onboarding_state": "welcomed",
     }
     return user_id
@@ -111,7 +126,7 @@ async def test_worker_claims_concurrently_without_double_firing(fake_pool):
     async def handler(job):
         fired.append(job["id"])
 
-    settings = SimpleNamespace(scheduler_batch_size=10, heartbeat_interval_hours=24, scheduler_poll_interval_s=1)
+    settings = _scheduler_settings()
     worker_a = ScheduledJobWorker(fake_pool, handlers={"checkin": handler}, settings=settings, worker_id="a")
     worker_b = ScheduledJobWorker(fake_pool, handlers={"checkin": handler}, settings=settings, worker_id="b")
 
@@ -129,7 +144,7 @@ async def test_worker_retries_once_then_cancels_failed_job(fake_pool):
     async def failing(_job):
         raise RuntimeError("boom")
 
-    settings = SimpleNamespace(scheduler_batch_size=10, heartbeat_interval_hours=24, scheduler_poll_interval_s=1)
+    settings = _scheduler_settings()
     worker = ScheduledJobWorker(fake_pool, handlers={"checkin": failing}, settings=settings, worker_id="worker")
 
     first = await worker.run_due_once(now=now)
@@ -141,6 +156,56 @@ async def test_worker_retries_once_then_cancels_failed_job(fake_pool):
     assert second.cancelled == 1
     assert fake_pool.scheduled_jobs[job_id]["status"] == "cancelled"
     assert fake_pool.scheduled_jobs[job_id]["cancellation_reason"] == "handler error after retry"
+
+
+async def test_worker_withholds_user_job_without_stored_scope_identity(fake_pool):
+    now = datetime(2026, 4, 30, 12, 0, tzinfo=UTC)
+    user_id = _user(fake_pool)
+    job_id = _job(fake_pool, job_type="checkin", user_id=user_id, scheduled_for=now)
+    fake_pool.scheduled_jobs[job_id]["topic_id"] = None
+    fired = []
+
+    async def handler(job):
+        fired.append(job["id"])
+
+    worker = ScheduledJobWorker(
+        fake_pool,
+        handlers={"checkin": handler},
+        settings=_scheduler_settings(),
+        worker_id="missing-scope",
+    )
+
+    result = await worker.run_due_once(now=now)
+
+    assert result.claimed == 1
+    assert result.fired == 0
+    assert fired == []
+    assert fake_pool.scheduled_jobs[job_id]["status"] == "withheld"
+
+
+async def test_worker_withholds_user_job_without_bot_identity(fake_pool):
+    now = datetime(2026, 4, 30, 12, 0, tzinfo=UTC)
+    user_id = _user(fake_pool)
+    job_id = _job(fake_pool, job_type="scheduled_task", user_id=user_id, scheduled_for=now)
+    fake_pool.scheduled_jobs[job_id]["bot_id"] = None
+    fired = []
+
+    async def handler(job):
+        fired.append(job["id"])
+
+    worker = ScheduledJobWorker(
+        fake_pool,
+        handlers={"scheduled_task": handler},
+        settings=_scheduler_settings(),
+        worker_id="missing-bot-scope",
+    )
+
+    result = await worker.run_due_once(now=now)
+
+    assert result.claimed == 1
+    assert result.fired == 0
+    assert fired == []
+    assert fake_pool.scheduled_jobs[job_id]["status"] == "withheld"
 
 
 async def test_scheduled_task_worker_dispatches_due_payload_and_marks_one_shot_fired(fake_pool, monkeypatch):
@@ -155,11 +220,11 @@ async def test_scheduled_task_worker_dispatches_due_payload_and_marks_one_shot_f
     }
     dispatched = []
 
-    async def fake_run_agentic_job(user, metadata):
-        dispatched.append((user.id, metadata))
+    async def fake_run_agentic_job(user, metadata, *, scope):
+        dispatched.append((user.id, metadata, scope))
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_run_agentic_job)
-    settings = SimpleNamespace(scheduler_batch_size=10, heartbeat_interval_hours=24, scheduler_poll_interval_s=1)
+    settings = _scheduler_settings()
     worker = ScheduledJobWorker(
         fake_pool,
         handlers=ScheduledJobHandlers(fake_pool).as_dict(),
@@ -172,22 +237,23 @@ async def test_scheduled_task_worker_dispatches_due_payload_and_marks_one_shot_f
     assert result.claimed == 1
     assert result.fired == 1
     assert fake_pool.scheduled_jobs[job_id]["status"] == "fired"
-    assert dispatched == [
-        (
-            user_id,
-            {
-                "kind": "scheduled_task",
-                "context": {
-                    "task_id": str(task_id),
-                    "brief": "Prepare the due task.",
-                    "recurrence": None,
-                    "job_id": str(job_id),
-                    "scheduled_for": now.isoformat(),
-                    "delayed": False,
-                },
+    assert len(dispatched) == 1
+    assert dispatched[0][:2] == (
+        user_id,
+        {
+            "kind": "scheduled_task",
+            "context": {
+                "task_id": str(task_id),
+                "brief": "Prepare the due task.",
+                "recurrence": None,
+                "job_id": str(job_id),
+                "scheduled_for": now.isoformat(),
+                "delayed": False,
             },
-        )
-    ]
+        },
+    )
+    assert dispatched[0][2].bot_id == fake_pool.scheduled_jobs[job_id]["bot_id"]
+    assert dispatched[0][2].topic_id == fake_pool.scheduled_jobs[job_id]["topic_id"]
     assert not [
         job
         for job in fake_pool.scheduled_jobs.values()
@@ -205,11 +271,12 @@ async def test_scheduled_task_worker_failure_retries_without_reseed(fake_pool, m
         "recurrence": {"type": "daily", "interval": 1},
     }
 
-    async def fake_failure(_user, _metadata):
+    async def fake_failure(_user, _metadata, *, scope):
+        assert scope.bot_id == fake_pool.scheduled_jobs[job_id]["bot_id"]
         raise RuntimeError("agent failed")
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_failure)
-    settings = SimpleNamespace(scheduler_batch_size=10, heartbeat_interval_hours=24, scheduler_poll_interval_s=1)
+    settings = _scheduler_settings()
     worker = ScheduledJobWorker(
         fake_pool,
         handlers=ScheduledJobHandlers(fake_pool).as_dict(),
@@ -240,7 +307,7 @@ async def test_pause_claims_only_heartbeat_and_preserves_user_jobs(fake_pool):
     async def checkin_handler(job):
         fired.append(("checkin", job["id"]))
 
-    settings = SimpleNamespace(scheduler_batch_size=10, heartbeat_interval_hours=24, scheduler_poll_interval_s=1)
+    settings = _scheduler_settings()
     worker = ScheduledJobWorker(fake_pool, handlers={"checkin": checkin_handler}, settings=settings, worker_id="paused")
     await system_state.pause(fake_pool, user_id, now=now)
 
@@ -312,8 +379,8 @@ async def test_scheduled_task_recovery_delayed_state_reaches_trigger_metadata(fa
     }
     seen = []
 
-    async def fake_run_agentic_job(_user, metadata):
-        seen.append(metadata)
+    async def fake_run_agentic_job(_user, metadata, *, scope):
+        seen.append((metadata, scope))
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_run_agentic_job)
 
@@ -322,61 +389,33 @@ async def test_scheduled_task_recovery_delayed_state_reaches_trigger_metadata(fa
 
     assert fake_pool.scheduled_jobs[delayed_job_id]["delayed"] is True
     assert fake_pool.scheduled_jobs[delayed_job_id]["context"]["delayed"] is True
-    assert seen[0]["kind"] == "scheduled_task"
-    assert seen[0]["context"]["job_id"] == str(delayed_job_id)
-    assert seen[0]["context"]["task_id"] == str(task_id)
-    assert seen[0]["context"]["delayed"] is True
+    assert seen[0][0]["kind"] == "scheduled_task"
+    assert seen[0][0]["context"]["job_id"] == str(delayed_job_id)
+    assert seen[0][0]["context"]["task_id"] == str(task_id)
+    assert seen[0][0]["context"]["delayed"] is True
+    assert seen[0][1].bot_id == fake_pool.scheduled_jobs[delayed_job_id]["bot_id"]
 
 
-async def test_weekly_summary_sends_template_runs_decay_and_reseeds(fake_pool, monkeypatch):
-    now = datetime(2026, 4, 30, 12, 0, tzinfo=UTC)
-    user_id = _user(fake_pool, weekly_summary_day=4, weekly_summary_time="09:00")
-    job_id = _job(fake_pool, job_type="weekly_summary", user_id=user_id, scheduled_for=now)
-    fake_pool.scheduled_jobs[job_id]["status"] = "fired"
-    sent = []
-    decayed = []
-
-    async def fake_send(pool, user, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, bot_id=None, topic_id=None):
-        sent.append((user, content, template_fallback))
-        return uuid4()
-
-    async def fake_decay(pool, **kwargs):
-        decayed.append(pool)
-
-    monkeypatch.setattr("app.services.scheduled_job_handlers.send_outbound", fake_send)
-    monkeypatch.setattr("app.services.scheduled_job_handlers.run_decay_housekeeping", fake_decay)
-
-    await ScheduledJobHandlers(fake_pool).handle_weekly_summary(fake_pool.scheduled_jobs[job_id])
-
-    assert sent[0][2].name == "weekly_summary"
-    assert decayed == [fake_pool]
-    pending_weeklies = [job for job in fake_pool.scheduled_jobs.values() if job["job_type"] == "weekly_summary" and job["status"] == "pending"]
-    assert len(pending_weeklies) == 1
-
-
-async def test_discord_checkin_runs_agentic_job_without_whatsapp_window(fake_pool, monkeypatch):
-    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
-    get_settings.cache_clear()
+async def test_checkin_always_runs_agentic_job(fake_pool, monkeypatch):
     user_id = _user(fake_pool)
-    fake_pool.users[user_id]["phone"] = "456"
     job_id = _job(fake_pool, job_type="checkin", user_id=user_id)
     ran = []
-    sent = []
 
-    async def fake_run_agentic_job(user, metadata):
-        ran.append((user.id, metadata))
-
-    async def fake_send(*args, **kwargs):
-        sent.append((args, kwargs))
+    async def fake_run_agentic_job(user, metadata, *, scope):
+        ran.append((user.id, metadata, scope.bot_id, scope.topic_id))
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_run_agentic_job)
-    monkeypatch.setattr("app.services.scheduled_job_handlers.send_outbound", fake_send)
 
     await ScheduledJobHandlers(fake_pool).handle_checkin(fake_pool.scheduled_jobs[job_id])
 
-    assert ran == [(user_id, {"kind": "checkin", "context": {"delayed": False}})]
-    assert sent == []
-    get_settings.cache_clear()
+    assert ran == [
+        (
+            user_id,
+            {"kind": "checkin", "context": {"delayed": False}},
+            fake_pool.scheduled_jobs[job_id]["bot_id"],
+            fake_pool.scheduled_jobs[job_id]["topic_id"],
+        )
+    ]
 
 
 async def test_scheduled_task_handler_dispatches_agentic_job_without_reseed_for_one_shot(fake_pool, monkeypatch):
@@ -391,8 +430,8 @@ async def test_scheduled_task_handler_dispatches_agentic_job_without_reseed_for_
     }
     ran = []
 
-    async def fake_run_agentic_job(user, metadata):
-        ran.append((user.id, metadata))
+    async def fake_run_agentic_job(user, metadata, *, scope):
+        ran.append((user.id, metadata, scope))
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_run_agentic_job)
 
@@ -412,6 +451,7 @@ async def test_scheduled_task_handler_dispatches_agentic_job_without_reseed_for_
                     "delayed": False,
                 },
             },
+            fake_pool.scheduled_jobs[job_id]["_scope"],
         )
     ]
     assert [
@@ -433,8 +473,8 @@ async def test_scheduled_task_handler_reseeds_recurring_success_idempotently(fak
     }
     ran = []
 
-    async def fake_run_agentic_job(user, metadata):
-        ran.append((user.id, metadata["context"]["job_id"]))
+    async def fake_run_agentic_job(user, metadata, *, scope):
+        ran.append((user.id, metadata["context"]["job_id"], scope.bot_id))
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_run_agentic_job)
     handlers = ScheduledJobHandlers(fake_pool)
@@ -449,7 +489,7 @@ async def test_scheduled_task_handler_reseeds_recurring_success_idempotently(fak
         and job["status"] == "pending"
         and job.get("context", {}).get("source_job_id") == str(job_id)
     ]
-    assert ran == [(user_id, str(job_id)), (user_id, str(job_id))]
+    assert ran == [(user_id, str(job_id), fake_pool.scheduled_jobs[job_id]["bot_id"]), (user_id, str(job_id), fake_pool.scheduled_jobs[job_id]["bot_id"])]
     assert len(next_rows) == 1
     assert next_rows[0]["scheduled_for"] == datetime(2026, 5, 6, 9, 30, tzinfo=UTC)
     assert next_rows[0]["context"]["task_id"] == str(task_id)
@@ -474,7 +514,8 @@ async def test_scheduled_task_handler_honors_current_task_cancel_and_failure_no_
             "recurrence": {"type": "daily", "interval": 1},
         }
 
-    async def fake_cancel_after_current(_user, metadata):
+    async def fake_cancel_after_current(_user, metadata, *, scope):
+        assert scope.bot_id == fake_pool.scheduled_jobs[cancelled_id]["bot_id"]
         job_id = uuid4()
         for candidate_id, job in fake_pool.scheduled_jobs.items():
             if str(candidate_id) == metadata["context"]["job_id"]:
@@ -487,7 +528,8 @@ async def test_scheduled_task_handler_honors_current_task_cancel_and_failure_no_
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_cancel_after_current)
     await ScheduledJobHandlers(fake_pool).handle_scheduled_task(fake_pool.scheduled_jobs[cancelled_id])
 
-    async def fake_failure(_user, _metadata):
+    async def fake_failure(_user, _metadata, *, scope):
+        assert scope.bot_id == fake_pool.scheduled_jobs[failed_id]["bot_id"]
         raise RuntimeError("agent failed")
 
     monkeypatch.setattr("app.services.scheduled_job_handlers.run_agentic_job", fake_failure)
@@ -501,19 +543,34 @@ async def test_scheduled_task_handler_honors_current_task_cancel_and_failure_no_
     ]
 
 
-async def test_seed_helpers_use_durable_weekly_timing_and_single_heartbeat(fake_pool):
-    now = datetime(2026, 4, 30, 12, 0, tzinfo=UTC)
-    user_id = _user(fake_pool, weekly_summary_day=5, weekly_summary_time="09:30", timezone="Europe/Berlin")
+async def test_seed_weekly_reflections_targets_sunday_and_is_idempotent(fake_pool):
+    now = datetime(2026, 4, 30, 12, 0, tzinfo=UTC)  # Thursday
+    user_id = _user(fake_pool, timezone="Europe/Berlin")
 
-    expected = next_weekly_summary_at(fake_pool.users[user_id], now=now)
-    await seed_weekly_summaries(fake_pool, now=now)
-    await seed_weekly_summaries(fake_pool, now=now)
-    weekly = [job for job in fake_pool.scheduled_jobs.values() if job["job_type"] == "weekly_summary"]
+    expected = next_weekly_reflection_at("Europe/Berlin", now=now)
+    await seed_weekly_reflections(fake_pool, now=now)
+    await seed_weekly_reflections(fake_pool, now=now)
+
+    weekly = [
+        job
+        for job in fake_pool.scheduled_jobs.values()
+        if job["job_type"] == "scheduled_task"
+        and job["context"].get("kind") == "weekly_reflection"
+    ]
     assert len(weekly) == 1
+    assert weekly[0]["user_id"] == user_id
     assert weekly[0]["scheduled_for"] == expected
+    assert weekly[0]["context"]["brief"] == WEEKLY_REFLECTION_BRIEF
+    assert weekly[0]["context"]["recurrence"] == {
+        "version": 1,
+        "type": "weekly",
+        "interval": 1,
+        "weekdays": [6],
+    }
 
-    await seed_heartbeat(fake_pool, settings=SimpleNamespace(heartbeat_interval_hours=24), now=now)
-    await seed_heartbeat(fake_pool, settings=SimpleNamespace(heartbeat_interval_hours=24), now=now)
+    seed_settings = _scheduler_settings()
+    await seed_heartbeat(fake_pool, settings=seed_settings, now=now)
+    await seed_heartbeat(fake_pool, settings=seed_settings, now=now)
     assert len([job for job in fake_pool.scheduled_jobs.values() if job["job_type"] == "heartbeat"]) == 1
 
 

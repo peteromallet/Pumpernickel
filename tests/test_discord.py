@@ -456,8 +456,8 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
         def __init__(self) -> None:
             self.calls = []
 
-        async def add(self, user_id, message_id, user, *, source: str = "live", bot_id: str | None = None) -> None:
-            self.calls.append((user_id, message_id, user, source))
+        async def add(self, user_id, message_id, user, *, source: str = "live", scope) -> None:
+            self.calls.append((user_id, message_id, user, source, scope))
 
     coalescer = Coalescer()
 
@@ -503,6 +503,8 @@ async def test_catch_up_recent_messages_strips_attachment_suffix_for_after(
         "edit_history": None,
         "edited_at": None,
         "deleted_at": None,
+        "bot_id": "mediator",
+        "topic_id": uuid4(),
     }
     calls = []
 
@@ -563,6 +565,8 @@ async def test_discord_gateway_logs_reaction_feedback(fake_pool, monkeypatch: py
         "edit_history": None,
         "edited_at": None,
         "deleted_at": None,
+        "bot_id": "mediator",
+        "topic_id": uuid4(),
     }
 
     bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)

@@ -26,7 +26,7 @@ def _is_unique_violation(exc: Exception) -> bool:
 
 async def _schedule_once(
     conn: Any, user_id: UUID, scheduled_for: datetime, context: dict[str, Any],
-    *, bot_id: str = 'mediator', topic_id: UUID | None = None,
+    *, bot_id: str, topic_id: UUID | None = None,
 ) -> tuple[Any | None, Any]:
     if topic_id is None:
         topic_id = get_relationship_topic_id()
@@ -60,7 +60,7 @@ async def schedule_checkin_record(
     *,
     scheduled_for: datetime,
     context: dict[str, Any],
-    bot_id: str = 'mediator',
+    bot_id: str,
     topic_id: UUID | None = None,
 ) -> tuple[Any | None, Any]:
     scheduled_for = require_aware_utc(scheduled_for)

@@ -13,6 +13,7 @@ import re
 logger = logging.getLogger(__name__)
 
 _DISCORD_BOT_USER_ID_RE = re.compile(r"^\d+$")
+_LEGACY_DISCORD_BOT = "mediator"
 
 
 def _decode_discord_user_id(token: str) -> str | None:
@@ -45,7 +46,7 @@ def discord_bot_user_id(bot_id: str) -> str | None:
     1. Per-bot override  — DISCORD_BOT_USER_ID_<BOT_ID_UPPER> (digit-only).
     2. Per-bot token      — DISCORD_BOT_TOKEN_<BOT_ID_UPPER>, decoded via
                             _decode_discord_user_id.
-    3. Mediator fallback  — (only when *bot_id* == 'mediator'): try
+    3. Legacy fallback    — only for the mediator bot id: try
                             DISCORD_BOT_USER_ID, then DISCORD_BOT_TOKEN
                             decode (same logic as the pre-multi-gateway era).
 
@@ -66,7 +67,7 @@ def discord_bot_user_id(bot_id: str) -> str | None:
         return _decode_discord_user_id(tokens[bot_id].get_secret_value())
 
     # (c) Mediator legacy fallback — DISCORD_BOT_USER_ID / DISCORD_BOT_TOKEN
-    if bot_id == "mediator":
+    if bot_id == _LEGACY_DISCORD_BOT:
         from_env = os.environ.get("DISCORD_BOT_USER_ID")
         if from_env and _DISCORD_BOT_USER_ID_RE.match(from_env):
             return from_env

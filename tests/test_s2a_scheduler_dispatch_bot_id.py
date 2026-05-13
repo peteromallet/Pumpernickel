@@ -69,10 +69,10 @@ class TestDispatchCallsHandlersWithBotId:
         )
 
     def test_heartbeat_seed_stamps_bot_id(self):
-        """seed_heartbeat stamps bot_id='mediator'."""
+        """seed_heartbeat stamps the seed-only configured bot id."""
         content = open("app/services/scheduled_jobs.py").read()
-        assert "'mediator'" in content, (
-            "heartbeat seed must stamp bot_id='mediator'"
+        assert "settings.default_seed_bot_id" in content, (
+            "heartbeat seed must stamp settings.default_seed_bot_id"
         )
 
 

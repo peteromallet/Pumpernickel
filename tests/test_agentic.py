@@ -8,7 +8,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.models.user import User
+from app.bots.registry import get_relationship_topic_id
 from app.services import agentic, hooks, whatsapp
+from app.services.scope import InboundScope
 from app.services.tools import write_tools
 from tests.conftest import FakePool
 
@@ -248,6 +250,20 @@ def _patch_whatsapp(monkeypatch: pytest.MonkeyPatch, sent: list[tuple[str, str, 
     monkeypatch.setattr(whatsapp, "send_template", fake_send_template)
 
 
+def _scope_for(user: User) -> InboundScope:
+    topic_id = get_relationship_topic_id()
+    assert topic_id is not None
+    return InboundScope(
+        bot_id="mediator",
+        transport="whatsapp",
+        user_id=user.id,
+        topic_id=topic_id,
+        channel_id=None,
+        binding_id=uuid4(),
+        dyad_id=uuid4(),
+    )
+
+
 async def test_agentic_e2e_ordering_cache_spend_and_oob(app_env, monkeypatch):
     pool = TrackingPool()
     user, partner, message_id = _seed_pair(pool, charge="charged")
@@ -275,8 +291,8 @@ async def test_agentic_e2e_ordering_cache_spend_and_oob(app_env, monkeypatch):
         _response([]),
     ]
 
-    async def counting_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None) -> dict:
-        check_oob_calls.append((content, recipient_id, protected_owner_ids))
+    async def counting_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+        check_oob_calls.append((content, recipient_id, protected_owner_ids, bot_id, topic_id))
         return {"verdict": "ok", "reason": "test", "rewrite": None}
 
     monkeypatch.setattr(hooks, "check_oob", counting_oob)
@@ -284,7 +300,7 @@ async def test_agentic_e2e_ordering_cache_spend_and_oob(app_env, monkeypatch):
     monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
     agentic.set_pool(pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(pool.bot_turns.values()))
     labels = pool.labels()
@@ -313,10 +329,12 @@ async def test_agentic_e2e_ordering_cache_spend_and_oob(app_env, monkeypatch):
         "add_watch_item",
         "schedule_checkin",
     ]
-    assert check_oob_calls == [
-        (outbound, user.id, [user.id, partner.id]),
-        (outbound, user.id, [user.id, partner.id]),
+    assert len(check_oob_calls) == 2
+    assert [call[:4] for call in check_oob_calls] == [
+        (outbound, user.id, [user.id, partner.id], "mediator"),
+        (outbound, user.id, [user.id, partner.id], "mediator"),
     ]
+    assert all(call[4] is not None for call in check_oob_calls)
     assert pool.spend_records and all(value > 0 for value in pool.spend_records)
     assert sum(pool.spend_records[:5], Decimal("0")) == Decimal("0.002190")
     assert sum(pool.spend_records[5:], Decimal("0")) == Decimal("0.002628")
@@ -340,16 +358,16 @@ async def test_agentic_why_query_uses_get_bot_actions(app_env, monkeypatch):
     ]
 
     _patch_whatsapp(monkeypatch, whatsapp_sent)
-    monkeypatch.setattr(hooks, "check_oob", lambda content, recipient_id: {"verdict": "ok", "reason": "test", "rewrite": None})
-
-    async def async_oob(content: str, recipient_id: UUID) -> dict:
+    async def async_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+        assert bot_id == "mediator"
+        assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "rewrite": None}
 
     monkeypatch.setattr(hooks, "check_oob", async_oob)
     monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
     agentic.set_pool(pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     assert "read:get_bot_actions" in pool.labels()
 
@@ -365,7 +383,9 @@ async def test_agentic_uses_oob_rewrite_before_sending(app_env, monkeypatch):
         _response([]),
     ]
 
-    async def rewriting_oob(content: str, recipient_id: UUID) -> dict:
+    async def rewriting_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+        assert bot_id == "mediator"
+        assert topic_id is not None
         oob_calls.append(content)
         if content == "Draft with protected detail.":
             return {
@@ -381,7 +401,7 @@ async def test_agentic_uses_oob_rewrite_before_sending(app_env, monkeypatch):
     monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
     agentic.set_pool(pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     outbound = next(row for row in pool.messages.values() if row.get("direction") == "outbound")
     assert outbound["content"] == "Safer version."
@@ -402,8 +422,8 @@ async def test_agentic_current_user_oob_block_prevents_provider_delivery(app_env
         _response([]),
     ]
 
-    async def blocking_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None) -> dict:
-        oob_calls.append((content, recipient_id, protected_owner_ids))
+    async def blocking_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+        oob_calls.append((content, recipient_id, protected_owner_ids, bot_id, topic_id))
         return {
             "verdict": "block",
             "reason": "current-user firm OOB",
@@ -416,10 +436,12 @@ async def test_agentic_current_user_oob_block_prevents_provider_delivery(app_env
     monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
     agentic.set_pool(pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     assert whatsapp_sent == []
-    assert oob_calls == [(blocked_text, user.id, [user.id, partner.id])]
+    assert len(oob_calls) == 1
+    assert oob_calls[0][:4] == (blocked_text, user.id, [user.id, partner.id], "mediator")
+    assert oob_calls[0][4] is not None
     assert not any(row.get("direction") == "outbound" for row in pool.messages.values())
     assert "Outbound blocked before send by OOB checker" in next(iter(pool.bot_turns.values()))["reasoning"]
 
@@ -448,16 +470,16 @@ async def test_agentic_crisis_escalation_routes_to_partner_with_template(app_env
     ]
 
     _patch_whatsapp(monkeypatch, whatsapp_sent)
-    monkeypatch.setattr(hooks, "check_oob", lambda content, recipient_id: {"verdict": "ok", "reason": "test", "rewrite": None})
-
-    async def async_oob(content: str, recipient_id: UUID) -> dict:
+    async def async_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+        assert bot_id == "mediator"
+        assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "rewrite": None}
 
     monkeypatch.setattr(hooks, "check_oob", async_oob)
     original_send = write_tools.send_outbound
 
-    async def spy_send(pool_arg, recipient, content, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, bot_id=None, topic_id=None):
-        escalation_spy.append((recipient, content, template_fallback, bot_turn_id, protected_owner_ids))
+    async def spy_send(pool_arg, recipient, content, *, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, scope):
+        escalation_spy.append((recipient, content, template_fallback, bot_turn_id, protected_owner_ids, scope.bot_id, scope.topic_id))
         return await original_send(
             pool_arg,
             recipient,
@@ -465,15 +487,14 @@ async def test_agentic_crisis_escalation_routes_to_partner_with_template(app_env
             template_fallback=template_fallback,
             bot_turn_id=bot_turn_id,
             protected_owner_ids=protected_owner_ids,
-            bot_id=bot_id,
-            topic_id=topic_id,
+            scope=scope,
         )
 
     monkeypatch.setattr(write_tools, "send_outbound", spy_send)
     monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
     agentic.set_pool(pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     supportive_outbound = next(
         row for row in pool.messages.values() if row.get("recipient_id") == user.id and row.get("direction") == "outbound"
@@ -481,13 +502,15 @@ async def test_agentic_crisis_escalation_routes_to_partner_with_template(app_env
     banned = ("attachment", "adhd", "avoidant")
     assert all(token not in supportive_outbound["content"].lower() for token in banned)
     assert escalation_spy
-    recipient, content, template_fallback, turn_id, protected_owner_ids = escalation_spy[0]
+    recipient, content, template_fallback, turn_id, protected_owner_ids, bot_id, topic_id = escalation_spy[0]
     assert recipient.id == partner.id
     assert recipient.id != user.id
     assert content == escalation_content
     assert template_fallback.name == "escalation"
     assert template_fallback.params == [partner.name, user.name, escalation_content]
     assert protected_owner_ids == [user.id, partner.id]
+    assert bot_id == "mediator"
+    assert topic_id is not None
     assert turn_id in pool.bot_turns
     turn = pool.bot_turns[turn_id]
     assert "ESCALATION_SENT gate=crisis reason=crisis charge" in turn["reasoning"]

@@ -15,8 +15,8 @@ class RecordingCoalescer:
     def __init__(self) -> None:
         self.calls = []
 
-    async def add(self, *args, source: str = "live", bot_id: str | None = None) -> None:
-        self.calls.append((*args, source))
+    async def add(self, *args, source: str = "live", scope) -> None:
+        self.calls.append((*args, source, scope))
 
 
 def _seed_user(pool, *, name: str, phone: str):
@@ -27,9 +27,6 @@ def _seed_user(pool, *, name: str, phone: str):
         "phone": phone,
         "timezone": "UTC",
         "onboarding_state": "welcomed",
-        "weekly_summary_enabled": True,
-        "weekly_summary_day": 1,
-        "weekly_summary_time": "09:00",
     }
     return user_id
 
@@ -66,7 +63,7 @@ async def test_pause_from_either_partner_sets_global_state_supersedes_and_notifi
     user_a_id = _seed_user(fake_pool, name="Maya", phone="15555550100")
     user_b_id = _seed_user(fake_pool, name="Ben", phone="15555550101")
     now = datetime.now(UTC)
-    for job_type in ("checkin", "weekly_summary", "watch_item_due", "oob_review", "deferred_turn", "heartbeat"):
+    for job_type in ("checkin", "scheduled_task", "watch_item_due", "oob_review", "deferred_turn", "heartbeat"):
         job_id = uuid4()
         fake_pool.scheduled_jobs[job_id] = {
             "id": job_id,
@@ -80,8 +77,8 @@ async def test_pause_from_either_partner_sets_global_state_supersedes_and_notifi
         }
     sent = []
 
-    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, bot_id=None, topic_id=None):
-        sent.append((recipient.id, template_fallback.name, template_fallback.params, ignore_pause))
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, scope):
+        sent.append((recipient.id, template_fallback.name, template_fallback.params, ignore_pause, scope.bot_id))
         return uuid4()
 
     monkeypatch.setattr("app.services.inbound.send_outbound", fake_send)
@@ -98,7 +95,7 @@ async def test_pause_from_either_partner_sets_global_state_supersedes_and_notifi
     assert all(row[1] == "pause_confirmation" and row[3] is True for row in sent)
     statuses = {job["job_type"]: job["status"] for job in fake_pool.scheduled_jobs.values()}
     assert statuses["heartbeat"] == "pending"
-    for job_type in ("checkin", "weekly_summary", "watch_item_due", "oob_review", "deferred_turn"):
+    for job_type in ("checkin", "scheduled_task", "watch_item_due", "oob_review", "deferred_turn"):
         assert statuses[job_type] == "superseded"
 
 
@@ -110,11 +107,11 @@ async def test_paused_text_document_voice_and_image_persist_without_enqueue(fake
     coalescer = RecordingCoalescer()
     media_calls = []
 
-    async def fake_voice(pool, message_id, media_id, user_obj, passed_coalescer, duration=None):
+    async def fake_voice(pool, message_id, media_id, user_obj, passed_coalescer, duration=None, **kwargs):
         media_calls.append(("voice", message_id, passed_coalescer))
         pool.messages[message_id]["content"] = "transcribed"
 
-    async def fake_image(pool, message_id, media_id, user_obj, passed_coalescer):
+    async def fake_image(pool, message_id, media_id, user_obj, passed_coalescer, **kwargs):
         media_calls.append(("image", message_id, passed_coalescer))
         pool.messages[message_id]["media_analysis"] = {"description": "image"}
 
@@ -141,7 +138,7 @@ async def test_paused_text_document_voice_and_image_persist_without_enqueue(fake
     assert all(message["processing_state"] == "raw" for message in fake_pool.messages.values() if message["direction"] == "inbound")
 
 
-async def test_resume_clears_pause_seeds_weekly_and_does_not_replay_backlog(fake_pool, app_env):
+async def test_resume_clears_pause_seeds_weekly_reflection_and_does_not_replay_backlog(fake_pool, app_env):
     user_a_id = _seed_user(fake_pool, name="Maya", phone="15555550100")
     _seed_user(fake_pool, name="Ben", phone="15555550101")
     user = fake_pool.users[user_a_id]
@@ -155,7 +152,12 @@ async def test_resume_clears_pause_seeds_weekly_and_does_not_replay_backlog(fake
 
     assert not await system_state.is_paused(fake_pool)
     assert coalescer.calls == []
-    assert any(job["job_type"] == "weekly_summary" and job["status"] == "pending" for job in fake_pool.scheduled_jobs.values())
+    assert any(
+        job["job_type"] == "scheduled_task"
+        and job["status"] == "pending"
+        and (job.get("context") or {}).get("kind") == "weekly_reflection"
+        for job in fake_pool.scheduled_jobs.values()
+    )
 
     await process_inbound(fake_pool, _payload(user, _message(user, "after.resume", "text", "new work")), coalescer, transport="whatsapp", bot_id="mediator")
     assert len(coalescer.calls) == 1

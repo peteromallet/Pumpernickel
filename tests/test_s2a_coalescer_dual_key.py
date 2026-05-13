@@ -1,7 +1,7 @@
-"""S2b coalescer tests: bot_id-required contract.
+"""S2b coalescer tests: scope-required contract.
 
 Verifies the post-S2b contract:
-- add() raises TypeError when bot_id is omitted
+- add() raises TypeError when scope is omitted
 - CompositeKey is tuple[UUID, str] (non-nullable)
 - Composite-key lookup works in _fire_batch
 - No legacy (user_id, None) fallback exists
@@ -17,6 +17,7 @@ import pytest
 
 from app.services.debouncer import BurstCoalescer, CompositeKey
 from app.models.user import User
+from tests._scope_helpers import make_resolved_scope
 
 
 async def _noop(*args, **kwargs):
@@ -28,11 +29,11 @@ def _user(uid=None):
 
 
 class TestCoalescerBotIdRequired:
-    """Bot ID required contract — omission raises TypeError."""
+    """Scope required contract — omission raises TypeError."""
 
     @pytest.mark.asyncio
-    async def test_add_requires_bot_id(self):
-        """add() without bot_id keyword raises TypeError."""
+    async def test_add_requires_scope(self):
+        """add() without scope keyword raises TypeError."""
         coalescer = BurstCoalescer(_noop, debounce_seconds=0.01, max_seconds=0.02)
         user = _user()
         msg_id = uuid4()
@@ -46,8 +47,9 @@ class TestCoalescerBotIdRequired:
         coalescer = BurstCoalescer(_noop, debounce_seconds=0.01, max_seconds=0.02)
         user = _user()
         msg_id = uuid4()
+        scope = make_resolved_scope(user_id=user.id, bot_id="custom_bot")
 
-        await coalescer.add(user.id, msg_id, user, bot_id="custom_bot")
+        await coalescer.add(user.id, msg_id, user, scope=scope)
         keys = list(coalescer._bursts.keys())
         assert keys, "Expected at least one key"
         for k in keys:
@@ -61,14 +63,15 @@ class TestCoalescerBotIdRequired:
         """_fire_batch finds and fires bursts via composite-key lookup."""
         called = []
 
-        async def on_burst(msg_ids, user):
+        async def on_burst(msg_ids, user, *, scope):
             called.append(msg_ids)
 
         coalescer = BurstCoalescer(on_burst, debounce_seconds=0.01, max_seconds=0.02)
         user = _user()
         msg_id = uuid4()
+        scope = make_resolved_scope(user_id=user.id, bot_id="bot_a")
 
-        await coalescer.add(user.id, msg_id, user, bot_id="bot_a")
+        await coalescer.add(user.id, msg_id, user, scope=scope)
         await asyncio.sleep(0.05)
         await coalescer._fire(user.id)
         await asyncio.sleep(0.05)

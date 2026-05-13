@@ -146,8 +146,8 @@ async def test_idempotent_redelivery_writes_one_message(async_client) -> None:
 async def test_signed_text_post_triggers_agentic_turn_with_user(async_client, monkeypatch) -> None:
     calls = []
 
-    async def callback(message_ids, user):
-        calls.append((message_ids, user))
+    async def callback(message_ids, user, *, scope):
+        calls.append((message_ids, user, scope))
 
     app.state.coalescers["mediator"].on_burst_complete = callback
     payload = json.loads(FIXTURE.read_text())
@@ -171,8 +171,8 @@ async def test_signed_text_post_triggers_agentic_turn_with_user(async_client, mo
 async def test_greeting_onboarding_uses_agentic_turn(async_client, monkeypatch) -> None:
     calls = []
 
-    async def callback(message_ids, user):
-        calls.append((message_ids, user))
+    async def callback(message_ids, user, *, scope):
+        calls.append((message_ids, user, scope))
 
     app.state.coalescers["mediator"].on_burst_complete = callback
     payload = json.loads(FIXTURE.read_text())

@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from app.bots.base import BotSpec, ReadScopes, WriteScopes
+from app.bots.ids import MEDIATOR_BOT_ID
 from app.bots.mediator import MEDIATOR_BOT
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
     from app.bots.mediator import MediatorBotSpec, MEDIATOR_STEP_INSTRUCTIONS
 
     rebuilt = MediatorBotSpec(
-        bot_id="mediator",
+        bot_id=MEDIATOR_BOT_ID,
         prompt_renderer=MEDIATOR_BOT.prompt_renderer,
         step_instructions=MEDIATOR_STEP_INSTRUCTIONS,
         skeleton_overrides=MEDIATOR_BOT.skeleton_overrides,

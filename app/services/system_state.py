@@ -14,7 +14,6 @@ from typing import Any
 from uuid import UUID
 
 USER_FACING_JOB_TYPES = (
-    "weekly_summary",
     "checkin",
     "watch_item_due",
     "oob_review",

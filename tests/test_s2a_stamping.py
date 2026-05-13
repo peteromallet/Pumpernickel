@@ -21,7 +21,6 @@ import pytest
 from app.bots.base import BotSpec
 from app.models.user import User
 from app.services.turn_context import TurnContext
-from app.services.inbound import ResolvedScope
 from tests._scope_helpers import (
     _bot_spec_mediator,
     make_mediator_ctx,
@@ -130,10 +129,12 @@ class TestStampingScopeColumns:
         assert ctx.binding_id is not None
         assert ctx.participants_shape == "dyad"
 
-    def test_resolved_scope_has_dyad_id(self):
-        """ResolvedScope carries dyad_id distinct from binding_id."""
+    def test_inbound_scope_has_dyad_id(self):
+        """InboundScope carries dyad_id distinct from binding_id."""
         scope = make_resolved_scope(binding_id=uuid4(), dyad_id=uuid4())
         assert scope.bot_id == "mediator"
+        assert scope.transport == "discord"
+        assert scope.user_id is not None
         assert scope.topic_id is not None
         assert scope.binding_id is not None
         assert scope.dyad_id is not None

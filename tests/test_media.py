@@ -8,6 +8,7 @@ import pytest
 from app.models.user import User
 from app.services.deletion import purge_expired_deletions
 from app.services.inbound import process_inbound
+from app.services.scope import InboundScope
 from app.services.transcription import handle_voice
 from app.services.vision import handle_image
 from app.services.vision import explain_stored_image
@@ -22,8 +23,8 @@ class Recorder:
     def __init__(self) -> None:
         self.calls = []
 
-    async def add(self, user_id, message_id, user, *, source: str = "live", bot_id: str | None = None):
-        self.calls.append((user_id, message_id, user, source))
+    async def add(self, user_id, message_id, user, *, source: str = "live", scope):
+        self.calls.append((user_id, message_id, user, source, scope))
 
 
 def _user_and_message(fake_pool):
@@ -56,6 +57,18 @@ def _user_and_message(fake_pool):
     return user, message_id
 
 
+def _scope(user: User) -> InboundScope:
+    return InboundScope(
+        bot_id="mediator",
+        transport="whatsapp",
+        user_id=user.id,
+        topic_id=uuid4(),
+        channel_id=None,
+        binding_id=uuid4(),
+        dyad_id=uuid4(),
+    )
+
+
 async def test_voice_success_persists_transcript_and_keeps_raw(fake_pool, monkeypatch) -> None:
     user, message_id = _user_and_message(fake_pool)
     recorder = Recorder()
@@ -73,7 +86,7 @@ async def test_voice_success_persists_transcript_and_keeps_raw(fake_pool, monkey
     monkeypatch.setattr("app.services.storage.upload_media", upload_media)
     monkeypatch.setattr("app.services.transcription._groq_transcribe", transcribe)
 
-    await handle_voice(fake_pool, message_id, "media-audio", user, recorder, duration=42)
+    await handle_voice(fake_pool, message_id, "media-audio", user, recorder, duration=42, scope=_scope(user))
     message = fake_pool.messages[message_id]
 
     assert message["content"] == "clear transcript"
@@ -81,7 +94,8 @@ async def test_voice_success_persists_transcript_and_keeps_raw(fake_pool, monkey
     assert message["media_url"].endswith(f"voice/{message_id}")
     assert message["media_duration_seconds"] == 42
     assert message["processing_state"] == "raw"
-    assert recorder.calls == [(user.id, message_id, user, "media")]
+    assert recorder.calls[0][:4] == (user.id, message_id, user, "media")
+    assert recorder.calls[0][4].user_id == user.id
 
 
 async def test_image_success_persists_analysis_and_enqueues_as_media(fake_pool, monkeypatch) -> None:
@@ -101,7 +115,7 @@ async def test_image_success_persists_analysis_and_enqueues_as_media(fake_pool, 
     monkeypatch.setattr("app.services.storage.upload_media", upload_media)
     monkeypatch.setattr("app.services.vision._openai_analyze", analyze)
 
-    await handle_image(fake_pool, message_id, "media-image", user, recorder)
+    await handle_image(fake_pool, message_id, "media-image", user, recorder, scope=_scope(user))
     message = fake_pool.messages[message_id]
 
     assert message["media_analysis"]["kind"] == "image"
@@ -109,7 +123,8 @@ async def test_image_success_persists_analysis_and_enqueues_as_media(fake_pool, 
     assert message["media_analysis"]["explanation"] == "image description"
     assert message["media_analysis"]["description"] == "image description"
     assert message["media_url"].endswith(f"image/{message_id}")
-    assert recorder.calls == [(user.id, message_id, user, "media")]
+    assert recorder.calls[0][:4] == (user.id, message_id, user, "media")
+    assert recorder.calls[0][4].user_id == user.id
 
 
 async def test_image_openai_failure_falls_back_to_anthropic(fake_pool, monkeypatch) -> None:
@@ -140,13 +155,14 @@ async def test_image_openai_failure_falls_back_to_anthropic(fake_pool, monkeypat
     monkeypatch.setattr("app.services.vision._openai_analyze", fail_openai)
     monkeypatch.setattr("app.services.vision._anthropic_analyze", anthropic_analyze)
 
-    await handle_image(fake_pool, message_id, "media-image", user, recorder)
+    await handle_image(fake_pool, message_id, "media-image", user, recorder, scope=_scope(user))
     message = fake_pool.messages[message_id]
 
     assert message["media_analysis"]["provider"] == "anthropic"
     assert message["media_analysis"]["explanation"] == "fallback image description"
     assert message["processing_state"] == "raw"
-    assert recorder.calls == [(user.id, message_id, user, "media")]
+    assert recorder.calls[0][:4] == (user.id, message_id, user, "media")
+    assert recorder.calls[0][4].user_id == user.id
 
 
 async def test_voice_double_failure_expires_with_audio_retained(fake_pool, monkeypatch) -> None:
@@ -168,8 +184,8 @@ async def test_voice_double_failure_expires_with_audio_retained(fake_pool, monke
     async def no_sleep(seconds):
         return None
 
-    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, bot_id=None, topic_id=None):
-        sent.append((recipient, content, template_fallback))
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, scope):
+        sent.append((recipient, content, template_fallback, scope.bot_id))
         return uuid4()
 
     monkeypatch.setattr("app.services.whatsapp.fetch_media", fetch_media)
@@ -178,7 +194,7 @@ async def test_voice_double_failure_expires_with_audio_retained(fake_pool, monke
     monkeypatch.setattr("app.services.transcription.asyncio.sleep", no_sleep)
     monkeypatch.setattr("app.services.transcription.send_outbound", fake_send)
 
-    await handle_voice(fake_pool, message_id, "media-audio", user)
+    await handle_voice(fake_pool, message_id, "media-audio", user, scope=_scope(user))
     message = fake_pool.messages[message_id]
 
     assert attempts == 2
@@ -206,12 +222,13 @@ async def test_voice_spend_over_threshold_still_transcribes(fake_pool, monkeypat
     monkeypatch.setattr("app.services.storage.upload_media", upload_media)
     monkeypatch.setattr("app.services.transcription._groq_transcribe", transcribe)
 
-    await handle_voice(fake_pool, message_id, "media-audio", user, recorder)
+    await handle_voice(fake_pool, message_id, "media-audio", user, recorder, scope=_scope(user))
     message = fake_pool.messages[message_id]
 
     assert message["content"] == "still transcribed"
     assert message["processing_state"] == "raw"
-    assert recorder.calls == [(user.id, message_id, user, "media")]
+    assert recorder.calls[0][:4] == (user.id, message_id, user, "media")
+    assert recorder.calls[0][4].user_id == user.id
 
 
 async def test_image_spend_over_threshold_still_runs_vision(fake_pool, monkeypatch) -> None:
@@ -232,14 +249,15 @@ async def test_image_spend_over_threshold_still_runs_vision(fake_pool, monkeypat
     monkeypatch.setattr("app.services.storage.upload_media", upload_media)
     monkeypatch.setattr("app.services.vision._openai_analyze", analyze)
 
-    await handle_image(fake_pool, message_id, "media-image", user, recorder)
+    await handle_image(fake_pool, message_id, "media-image", user, recorder, scope=_scope(user))
     message = fake_pool.messages[message_id]
 
     assert message["media_url"].endswith(f"image/{message_id}")
     assert message["media_analysis"]["explanation"] == "still analyzed"
     assert message["media_analysis"]["description"] == "still analyzed"
     assert message["processing_state"] == "raw"
-    assert recorder.calls == [(user.id, message_id, user, "media")]
+    assert recorder.calls[0][:4] == (user.id, message_id, user, "media")
+    assert recorder.calls[0][4].user_id == user.id
 
 
 async def test_image_vision_failure_retains_media_and_keeps_raw(fake_pool, monkeypatch) -> None:
@@ -255,8 +273,8 @@ async def test_image_vision_failure_retains_media_and_keeps_raw(fake_pool, monke
     async def fail(image_bytes, content_type):
         raise RuntimeError("vision down")
 
-    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, bot_id=None, topic_id=None):
-        sent.append((recipient, content, template_fallback))
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, scope):
+        sent.append((recipient, content, template_fallback, scope.bot_id))
         return uuid4()
 
     monkeypatch.setattr("app.services.whatsapp.fetch_media", fetch_media)
@@ -265,7 +283,7 @@ async def test_image_vision_failure_retains_media_and_keeps_raw(fake_pool, monke
     monkeypatch.setattr("app.services.vision._anthropic_analyze", fail)
     monkeypatch.setattr("app.services.vision.send_outbound", fake_send)
 
-    await handle_image(fake_pool, message_id, "media-image", user)
+    await handle_image(fake_pool, message_id, "media-image", user, scope=_scope(user))
     message = fake_pool.messages[message_id]
 
     assert message["media_url"].endswith(f"image/{message_id}")
@@ -302,12 +320,13 @@ async def test_process_inbound_text_plus_image_waits_for_vision_before_text_add(
         def __init__(self) -> None:
             self.calls = []
 
-        async def add(self, user_id, message_id, user, *, source="live", bot_id=None):
+        async def add(self, user_id, message_id, user, *, source="live", scope):
             row = fake_pool.messages.get(message_id)
             self.calls.append(
                 {
                     "message_id": message_id,
                     "source": source,
+                    "scope": scope,
                     "media_type": row.get("media_type") if row else None,
                     "media_analysis": row.get("media_analysis") if row else None,
                 }
@@ -402,7 +421,8 @@ async def test_process_inbound_text_plus_image_still_replies_when_vision_fails(
     async def fail(image_bytes, content_type):
         raise RuntimeError("vision down")
 
-    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, bot_id=None, topic_id=None):
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, ignore_pause=False, scope):
+        assert scope.bot_id == "mediator"
         return uuid4()
 
     monkeypatch.setattr("app.services.inbound.classify_charge", fake_classify_charge)

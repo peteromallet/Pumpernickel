@@ -183,12 +183,8 @@ def _render_twilio_template_body(template_payload: dict[str, Any]) -> str:
         for parameter in component.get("parameters", []):
             params.append(str(parameter.get("text", "")))
     name = str(template_payload.get("name", "message"))
-    if name == "weekly_summary" and len(params) >= 3:
-        return f"Hi {params[0]}, this week we had {params[1]} conversations and touched on {params[2]} ongoing things. Want to talk through anything? Just ask."
     if name == "escalation" and len(params) >= 3:
         return f"Hi {params[0]}, this is your assistant. {params[1]} has shared something I think is worth your attention soon. {params[2]}"
-    if name == "checkin_nudge" and params:
-        return f"Hi {params[0]}, been a bit -- anything on your mind? Just message me back when you're ready."
     if name == "pause_confirmation" and len(params) >= 2:
         return f"Hi {params[0]}, {params[1]} has paused our conversations for now. I'll be quiet on both threads until either of you messages me again."
     if name == "media_failure" and len(params) >= 2:

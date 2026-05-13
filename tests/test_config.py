@@ -53,8 +53,6 @@ def test_config_loads(monkeypatch) -> None:
         "DISCORD_PACING_LLM_JUDGEMENT_ENABLED": "true",
         "DISCORD_PACING_LLM_MIN_AMBIGUITY": "0.5",
         "DISCORD_PACING_EVENT_RETENTION_DAYS": "45",
-        "WEEKLY_SUMMARY_DEFAULT_DAY": "2",
-        "WEEKLY_SUMMARY_DEFAULT_TIME": "09:00",
         "HEARTBEAT_INTERVAL_HOURS": "12",
         "ANTHROPIC_INPUT_USD_PER_MTOK": "3.5",
         "ANTHROPIC_OUTPUT_USD_PER_MTOK": "16.5",
@@ -118,8 +116,6 @@ def test_config_loads(monkeypatch) -> None:
     assert settings.discord_pacing_llm_judgement_enabled is True
     assert settings.discord_pacing_llm_min_ambiguity == 0.5
     assert settings.discord_pacing_event_retention_days == 45
-    assert settings.weekly_summary_default_day == 2
-    assert settings.weekly_summary_default_time == "09:00"
     assert settings.heartbeat_interval_hours == 12
     assert settings.anthropic_input_usd_per_mtok == 3.5
     assert settings.anthropic_output_usd_per_mtok == 16.5

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.services.cross_thread_privacy import bridge_candidate_visible_to_target, normalize_sharing_default, raw_message_visibility
-from app.services.turn_context import TurnContext
+from app.services.turn_context import TurnContext, scope_from_turn_context
 from app.config import get_settings
 from app.services.messaging import send_outbound_part
 from app.services.oob_check import check_oob_with_policy, summarize_partner_oob
@@ -262,8 +262,7 @@ async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> Sen
             protected_owner_ids=ctx.protected_owner_ids,
             send_typing_indicator=ctx.send_typing_indicator,
             before_provider_send=before_provider_send,
-            bot_id=ctx.bot_id,
-            topic_id=ctx.primary_topic_id,
+            scope=scope_from_turn_context(ctx),
         )
     except NewerInboundDuringPacedSend:
         return SendMessagePartOutput(
@@ -791,6 +790,7 @@ async def check_oob(ctx: TurnContext, args: CheckOOBInput) -> CheckOOBOutput:
         recipient_id=args.recipient_id,
         protected_owner_ids=args.protected_owner_ids,
         sender_intent=args.sender_intent,
+        topic_id=ctx.primary_topic_id,
     )
 
 

@@ -22,6 +22,7 @@ from app.services.hot_context_solo import build_hot_context_solo, render_hot_con
 from app.services.messaging import send_outbound, sent_contents_for_turn
 from app.services.spend import is_under_cap, record_llm_cost
 from app.services.crypto import encrypt_value
+from app.services.scope import InboundScope
 from app.services.text_safety import clean_user_facing_text
 from app.services.tools.registry import STEP_ALLOWED_TOOLS, call_tool, to_anthropic_tools
 from app.services.turn_audit import record_turn_event
@@ -428,17 +429,29 @@ async def _check_outbound_oob(
     content: str,
     recipient_id: UUID,
     protected_owner_ids: list[UUID] | None = None,
+    *,
+    scope: InboundScope,
 ) -> dict[str, Any]:
     hook = hooks.check_oob
     if hook is None:
         return {"verdict": "ok", "reason": "OOB hook disabled", "suggested_rewrite": None, "checker_failed": False}
     try:
-        verdict = await hook(pool, content, recipient_id, protected_owner_ids=protected_owner_ids)
+        verdict = await hook(
+            pool,
+            content,
+            recipient_id,
+            protected_owner_ids=protected_owner_ids,
+            bot_id=scope.bot_id,
+            topic_id=scope.topic_id,
+        )
     except TypeError:
         try:
-            verdict = await hook(pool, content, recipient_id)
+            verdict = await hook(pool, content, recipient_id, protected_owner_ids=protected_owner_ids)
         except TypeError:
-            verdict = await hook(content, recipient_id)
+            try:
+                verdict = await hook(pool, content, recipient_id)
+            except TypeError:
+                verdict = await hook(content, recipient_id)
     if hasattr(verdict, "model_dump"):
         verdict = verdict.model_dump(mode="json")
     verdict.setdefault("suggested_rewrite", verdict.get("rewrite"))
@@ -453,8 +466,10 @@ async def _resolve_outbound_text(
     user: User,
     content: str,
     protected_owner_ids: list[UUID] | None = None,
+    *,
+    scope: InboundScope,
 ) -> str | None:
-    verdict = await _check_outbound_oob(pool, content, user.id, protected_owner_ids)
+    verdict = await _check_outbound_oob(pool, content, user.id, protected_owner_ids, scope=scope)
     if verdict["verdict"] == "ok":
         if verdict.get("checker_failed"):
             await _append_reasoning(pool, turn_id, f"OOB checker failed open before send: {verdict['reason']}")
@@ -466,7 +481,7 @@ async def _resolve_outbound_text(
     if not suggested:
         await _append_reasoning(pool, turn_id, f"Outbound rewrite requested but no rewrite was supplied: {verdict['reason']}")
         return None
-    second = await _check_outbound_oob(pool, suggested, user.id, protected_owner_ids)
+    second = await _check_outbound_oob(pool, suggested, user.id, protected_owner_ids, scope=scope)
     if second["verdict"] != "ok":
         await _append_reasoning(
             pool,
@@ -697,6 +712,7 @@ async def _run_agentic(
     triggering_message_ids: list[UUID],
     user: User,
     *,
+    scope: InboundScope,
     trigger_metadata: dict[str, Any] | None = None,
     pool: Any | None = None,
     prompt_version: str | None = None,
@@ -709,8 +725,8 @@ async def _run_agentic(
         raise RuntimeError("agentic pool has not been set")
 
     settings = get_settings()
-    bot_spec = get_bot_spec(settings.bot_id)
-    primary_topic_id = await primary_topic_id_for(active_pool, bot_spec)
+    bot_spec = get_bot_spec(scope.bot_id)
+    primary_topic_id = scope.topic_id or await primary_topic_id_for(active_pool, bot_spec)
     selected_prompt_version = prompt_version or settings.system_prompt_version
     send_typing_indicator = not bool(trigger_metadata and trigger_metadata.get("pacing"))
     turn_id: UUID | None = None
@@ -721,7 +737,7 @@ async def _run_agentic(
             partner = None
             hot_context = await build_hot_context_solo(
                 active_pool, user, triggering_message_ids, trigger_metadata,
-                primary_topic_id=primary_topic_id, bot_id=bot_spec.bot_id,
+                primary_topic_id=primary_topic_id, bot_id=scope.bot_id,
                 allow_cross_topic_peek=getattr(bot_spec.read_scopes, 'allow_cross_topic_peek', False),
             )
             rendered_hot_context = render_hot_context_solo(hot_context)
@@ -749,7 +765,7 @@ async def _run_agentic(
             prompt_snapshot,
             settings.conversational_model,
             selected_prompt_version,
-            bot_id=bot_spec.bot_id,
+            bot_id=scope.bot_id,
             topic_id=primary_topic_id,
             bot_spec_version=bot_spec_version,
             hot_context_builder_version=bot_spec.hot_context_builder_version,
@@ -765,10 +781,12 @@ async def _run_agentic(
                 "user_in_context": user.id,
                 "model_version": settings.conversational_model,
                 "system_prompt_version": selected_prompt_version,
-                "bot_id": bot_spec.bot_id,
+                "bot_id": scope.bot_id,
                 "topic_id": str(primary_topic_id) if primary_topic_id else None,
-                "channel_id": None,
-                "binding_id": None,
+                "channel_id": scope.channel_id,
+                "binding_id": str(scope.binding_id) if scope.binding_id is not None else None,
+                "dyad_id": str(scope.dyad_id) if scope.dyad_id is not None else None,
+                "transport": scope.transport,
             },
         )
         charge = _trigger_charge(hot_context)
@@ -780,20 +798,16 @@ async def _run_agentic(
             hot_context_signals=hot_context_signals,
         )
         turn_plan = make_turn_plan(skeleton_name)
-        ctx = TurnContext(
-            turn_id,
-            active_pool,
-            user,
-            partner,
-            triggering_message_ids,
-            bot_id=bot_spec.bot_id,
+        ctx = TurnContext.from_scope(
+            scope=scope,
+            turn_id=turn_id,
+            pool=active_pool,
+            user=user,
+            partner=partner,
+            triggering_message_ids=triggering_message_ids,
             bot_spec=bot_spec,
-            binding_id=None,
-            dyad_id=None,
             participants_shape=bot_spec.participants_shape,
-            primary_topic_id=primary_topic_id,
             primary_topic_slug=bot_spec.primary_topic_slug,
-            channel_id=None,
             read_scopes=bot_spec.read_scopes,
             write_scopes=bot_spec.write_scopes,
             cross_topic_policy=bot_spec.cross_topic_policy,
@@ -897,13 +911,20 @@ async def _run_agentic(
                     assistant_text = clean_user_facing_text(assistant_text)
                     reaction_emoji, assistant_text = _extract_reaction_directive(assistant_text)
                     if reaction_emoji is not None:
-                        if await _react_to_triggering_message(active_pool, user, triggering_message_ids, reaction_emoji, bot_id=ctx.bot_id or "mediator"):
+                        if await _react_to_triggering_message(active_pool, user, triggering_message_ids, reaction_emoji, bot_id=scope.bot_id):
                             await _append_reasoning(active_pool, turn_id, f"Reacted to triggering message with {reaction_emoji}.")
                             await claim_onboarding_welcome(active_pool, user.id)
                             responded_to_user = True
                     if assistant_text:
                         dyad_owner_ids = ctx.protected_owner_ids
-                        sendable_text = await _resolve_outbound_text(active_pool, turn_id, user, assistant_text, dyad_owner_ids)
+                        sendable_text = await _resolve_outbound_text(
+                            active_pool,
+                            turn_id,
+                            user,
+                            assistant_text,
+                            dyad_owner_ids,
+                            scope=scope,
+                        )
                         already_sent = [part["content"] for part in sent_parts]
                         if sendable_text is None:
                             await record_turn_event(
@@ -962,8 +983,7 @@ async def _run_agentic(
                                         bot_turn_id=turn_id,
                                         protected_owner_ids=dyad_owner_ids,
                                         send_typing_indicator=send_typing_indicator,
-                                        bot_id=ctx.bot_id,
-                                        topic_id=ctx.primary_topic_id,
+                                        scope=scope,
                                         before_provider_send=(
                                             before_final_provider_send
                                             if before_paced_send is not None and not send_typing_indicator
@@ -1041,7 +1061,7 @@ async def _run_agentic(
         )
     except SpendCapExceeded:
         if turn_id is not None:
-            scheduled = await _defer_for_text_cap(active_pool, user, triggering_message_ids, bot_id=bot_spec.bot_id, topic_id=primary_topic_id)
+            scheduled = await _defer_for_text_cap(active_pool, user, triggering_message_ids, bot_id=scope.bot_id, topic_id=primary_topic_id)
             final_output_message_id = None
             if scheduled:
                 fallback_text = "I'm running into limits today, will catch up tomorrow."
@@ -1078,8 +1098,7 @@ async def _run_agentic(
                             fallback_text,
                             bot_turn_id=turn_id,
                             send_typing_indicator=send_typing_indicator,
-                            bot_id=ctx.bot_id,
-                            topic_id=ctx.primary_topic_id,
+                            scope=scope,
                             before_provider_send=(
                                 before_fallback_provider_send
                                 if before_paced_send is not None and not send_typing_indicator
@@ -1111,11 +1130,11 @@ async def _run_agentic(
         raise
 
 
-async def run_agentic_turn(triggering_message_ids: list[UUID], user: User) -> None:
+async def run_agentic_turn(triggering_message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
     if not triggering_message_ids:
         logger.warning("run_agentic_turn called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
         return
-    await _run_agentic(triggering_message_ids, user)
+    await _run_agentic(triggering_message_ids, user, scope=scope)
 
 
 async def run_agentic_turn_with_metadata(
@@ -1125,6 +1144,7 @@ async def run_agentic_turn_with_metadata(
     pacing_context: Any | None = None,
     trigger_metadata: Mapping[str, Any] | None = None,
     before_paced_send: BeforePacedSend | None = None,
+    scope: InboundScope,
 ) -> None:
     if not triggering_message_ids:
         logger.warning("run_agentic_turn_with_metadata called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
@@ -1132,13 +1152,14 @@ async def run_agentic_turn_with_metadata(
     await _run_agentic(
         triggering_message_ids,
         user,
+        scope=scope,
         trigger_metadata=_trigger_metadata_with_pacing(trigger_metadata, pacing_context),
         before_paced_send=before_paced_send,
     )
 
 
-async def run_agentic_job(user: User, trigger_metadata: dict[str, Any]) -> None:
-    await _run_agentic([], user, trigger_metadata=trigger_metadata)
+async def run_agentic_job(user: User, trigger_metadata: dict[str, Any], *, scope: InboundScope) -> None:
+    await _run_agentic([], user, scope=scope, trigger_metadata=trigger_metadata)
 
 
 async def run_agentic_turn_with_pool(
@@ -1146,12 +1167,13 @@ async def run_agentic_turn_with_pool(
     triggering_message_ids: list[UUID],
     user: User,
     *,
+    scope: InboundScope,
     prompt_version: str,
 ) -> None:
     if not triggering_message_ids:
         logger.warning("run_agentic_turn_with_pool called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
         return
-    await _run_agentic(triggering_message_ids, user, pool=pool, prompt_version=prompt_version)
+    await _run_agentic(triggering_message_ids, user, scope=scope, pool=pool, prompt_version=prompt_version)
 
 
 async def run_agentic_job_with_pool(
@@ -1159,6 +1181,7 @@ async def run_agentic_job_with_pool(
     user: User,
     trigger_metadata: dict[str, Any],
     *,
+    scope: InboundScope,
     prompt_version: str,
 ) -> None:
-    await _run_agentic([], user, trigger_metadata=trigger_metadata, pool=pool, prompt_version=prompt_version)
+    await _run_agentic([], user, scope=scope, trigger_metadata=trigger_metadata, pool=pool, prompt_version=prompt_version)

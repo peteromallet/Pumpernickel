@@ -14,12 +14,13 @@ from app.config import Settings, get_settings
 from app.services.deletion import purge_expired_deletions
 from app.services import system_state
 from app.bots.registry import get_relationship_topic_id
+from app.services.scope import scope_from_job_row
 
 logger = logging.getLogger(__name__)
 
 JobHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
-USER_FACING_JOB_TYPES = {"weekly_summary", "checkin", "watch_item_due", "oob_review", "scheduled_task"}
+USER_FACING_JOB_TYPES = {"checkin", "watch_item_due", "oob_review", "scheduled_task"}
 
 
 def _utc_now() -> datetime:
@@ -81,7 +82,7 @@ class ScheduledJobWorker:
         fired = retried = cancelled = 0
         for job in jobs:
             try:
-                await self._dispatch(job)
+                dispatched = await self._dispatch(job)
             except Exception as exc:
                 logger.exception("scheduled job %s failed", job["id"])
                 retrying = await self._record_failure(job, exc, now=now)
@@ -90,10 +91,11 @@ class ScheduledJobWorker:
                 else:
                     cancelled += 1
             else:
-                await self._mark_fired(job["id"], now=now)
-                fired += 1
-                if job["job_type"] == "heartbeat":
-                    await seed_heartbeat(self.pool, settings=self.settings, now=now)
+                if dispatched:
+                    await self._mark_fired(job["id"], now=now)
+                    fired += 1
+                    if job["job_type"] == "heartbeat":
+                        await seed_heartbeat(self.pool, settings=self.settings, now=now)
         return RunDueResult(
             claimed=result.claimed,
             fired=fired,
@@ -133,25 +135,33 @@ class ScheduledJobWorker:
         )
         return [dict(row) for row in rows]
 
-    async def _dispatch(self, job: dict[str, Any]) -> None:
+    async def _dispatch(self, job: dict[str, Any]) -> bool:
+        if job.get("job_type") in USER_FACING_JOB_TYPES:
+            try:
+                scope = scope_from_job_row(job)
+            except ValueError as exc:
+                logger.warning("scheduled job %s withheld: missing scope identity: %s", job["id"], exc)
+                await self._mark_withheld(job["id"])
+                return False
+            job["_scope"] = scope
         # pause-check: withhold if globally paused or per-(user, bot) paused
         if (
-            job.get("user_id") is not None
-            and job.get("bot_id") is not None
-            and await system_state.user_bot_paused(self.pool, job["user_id"], job["bot_id"])
+            job.get("job_type") in USER_FACING_JOB_TYPES
+            and await system_state.user_bot_paused(self.pool, job["_scope"].user_id, job["_scope"].bot_id)
         ):
             logger.debug(
                 "scheduled job %s withheld: per-(user, bot) pause active for user=%s bot=%s",
                 job["id"],
-                job["user_id"],
-                job["bot_id"],
+                job["_scope"].user_id,
+                job["_scope"].bot_id,
             )
             await self._mark_withheld(job["id"])
-            return
+            return False
         handler = self.handlers.get(job["job_type"])
         if handler is None:
             raise RuntimeError(f"no scheduled job handler registered for {job['job_type']}")
         await handler(job)
+        return True
 
     async def _handle_heartbeat(self, job: dict[str, Any]) -> None:
         logger.info("scheduled heartbeat fired job_id=%s scheduled_for=%s", job["id"], job["scheduled_for"])
@@ -245,7 +255,7 @@ async def seed_heartbeat(
     return await pool.fetchrow(
         """
         INSERT INTO scheduled_jobs (user_id, job_type, scheduled_for, context, status, bot_id, topic_id)
-        SELECT NULL, 'heartbeat', $1, '{}'::jsonb, 'pending', 'mediator', $2
+        SELECT NULL, 'heartbeat', $1, '{}'::jsonb, 'pending', $2, $3
         WHERE NOT EXISTS (
             SELECT 1
             FROM scheduled_jobs
@@ -254,5 +264,6 @@ async def seed_heartbeat(
         RETURNING id, scheduled_for
         """,
         scheduled_for,
+        settings.default_seed_bot_id,
         get_relationship_topic_id(),
     )

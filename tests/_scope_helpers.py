@@ -2,7 +2,7 @@
 
 Provides:
 - make_mediator_ctx: builds a TurnContext with mediator defaults
-- make_resolved_scope: creates a mock ResolvedScope
+- make_resolved_scope: creates a mock InboundScope
 - StampingFakePool: FakePool subclass using SUBSTRING MATCHING only for
   tracking INSERTS into artifact_tables and artifact_topics.
 """
@@ -79,22 +79,20 @@ def make_mediator_ctx(
 
 
 def make_resolved_scope(**overrides: Any):
-    """Create a mock ResolvedScope with sensible defaults.
-
-    ResolvedScope is defined in app.services.inbound (NamedTuple).
-    We import it lazily to avoid circular imports.
-    """
-    from app.services.inbound import ResolvedScope
+    """Create a mock InboundScope with sensible defaults."""
+    from app.services.scope import InboundScope
 
     defaults: dict[str, Any] = dict(
         bot_id="mediator",
+        transport="discord",
+        user_id=uuid4(),
         topic_id=uuid4(),
         channel_id=None,
         binding_id=uuid4(),
         dyad_id=uuid4(),
     )
     defaults.update(overrides)
-    return ResolvedScope(**defaults)
+    return InboundScope(**defaults)
 
 
 # ---------------------------------------------------------------------------

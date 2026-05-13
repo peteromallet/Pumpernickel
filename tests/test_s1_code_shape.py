@@ -5,6 +5,8 @@ Does NOT modify conftest.py or any dirty test file.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -41,6 +43,8 @@ def test_turn_context_defaults_all_none():
     )
 
     assert ctx.bot_id is None
+    assert ctx.transport is None
+    assert ctx.user_id is None
     assert ctx.bot_spec is None
     assert ctx.binding_id is None
     assert ctx.participants_shape is None
@@ -104,7 +108,7 @@ def test_turn_context_new_fields_positional_preserved():
 
 
 def test_turn_context_field_count():
-    """TurnContext has the correct number of fields (existing + 10 new)."""
+    """TurnContext has the correct number of fields (existing + identity fields)."""
     from dataclasses import fields
 
     field_names = {f.name for f in fields(TurnContext)}
@@ -118,9 +122,12 @@ def test_turn_context_field_count():
     #           primary_topic_id, primary_topic_slug, channel_id,
     #           read_scopes, write_scopes, cross_topic_policy = 10
     # S2a adds: dyad_id = 1
-    # Total: 29
-    assert len(field_names) == 29
+    # InboundScope refactor adds: transport, user_id = 2
+    # Total: 31
+    assert len(field_names) == 31
     assert "bot_id" in field_names
+    assert "transport" in field_names
+    assert "user_id" in field_names
     assert "cross_topic_policy" in field_names
 
 
@@ -235,3 +242,23 @@ def test_bot_spec_in_all():
     import app.bots
 
     assert "BotSpec" in app.bots.__all__
+
+
+def test_inbound_scope_import_topology_has_single_canonical_module():
+    """InboundScope must not be re-exported from inbound.py.
+
+    Regression guard: downstream imports should depend on app.services.scope,
+    otherwise the old inbound-owned ResolvedScope shape can creep back in and
+    create import cycles.
+    """
+    root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+    for path in [*root.joinpath("app").rglob("*.py"), *root.joinpath("tests").rglob("*.py")]:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module == "app.services.inbound" and any(alias.name == "InboundScope" for alias in node.names):
+                offenders.append(str(path.relative_to(root)))
+
+    assert offenders == []

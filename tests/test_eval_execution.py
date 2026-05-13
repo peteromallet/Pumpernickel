@@ -260,8 +260,10 @@ async def test_eval_turn_uses_explicit_pool_prompt_version_and_fake_whatsapp(fak
     user, _, message_id = _seed_pair(eval_pool)
     observed: dict[str, object] = {}
 
-    async def oob_ok(pool, content, recipient_id):
+    async def oob_ok(pool, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id):
         assert pool is eval_pool
+        assert bot_id == "mediator"
+        assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "suggested_rewrite": None}
 
     async def fake_run_step(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages, **kwargs):

@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.main import _install_bot_coalescer
 from app.models.user import User
 from app.services.pacer import DiscordPacer, PacingDecision
+from tests._scope_helpers import make_resolved_scope
 
 
 def _fresh_app() -> SimpleNamespace:
@@ -78,6 +79,7 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
         pacing_context=None,
         trigger_metadata=None,
         before_paced_send=None,
+        scope=None,
     ):
         answer_calls.append((message_ids, user, pacing_context, trigger_metadata, before_paced_send))
         if before_paced_send is not None:
@@ -124,6 +126,7 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     )
 
     user = User(uuid4(), "Maya", "15555550100", "UTC")
+    scope = make_resolved_scope(user_id=user.id)
     message_id = uuid4()
     fake_pool.messages[message_id] = {
         "id": message_id,
@@ -136,7 +139,7 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     }
     decision = PacingDecision(action="answer", reason="ready", signal_snapshot={"source": "live"})
 
-    await coalescer.on_paced_answer([message_id], user, decision)
+    await coalescer.on_paced_answer([message_id], user, decision, scope=scope)
     assert len(answer_calls) == 1
     assert answer_calls[0][:4] == ([message_id], user, decision, None)
     assert answer_calls[0][4] is not None
@@ -144,5 +147,5 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     assert typing_calls == [(user.id, "channel-1", "human-paced answer", "final", None)]
 
     reaction_decision = PacingDecision(action="react", reason="ack", reaction="👍")
-    await coalescer.on_paced_reaction([message_id], user, reaction_decision)
+    await coalescer.on_paced_reaction([message_id], user, reaction_decision, scope=scope)
     assert reaction_calls == [("15555550100", "discord-message-1", "👍")]

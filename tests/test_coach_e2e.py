@@ -26,6 +26,7 @@ from app.models.user import User
 from app.services import agentic, hooks, whatsapp
 from app.services.onboarding_solo import ensure_onboarding_state
 from app.services.prompts_solo import render_solo_system_prompt
+from app.services.scope import InboundScope
 from app.services.tools.registry import _step_allowed, to_anthropic_tools
 from app.services.turn_context import partner_of
 from tests.conftest import FakePool
@@ -44,6 +45,18 @@ USAGE = {
 }
 
 CAREER_TOPIC_ID = UUID("00000000-0000-4000-8000-000000000010")
+
+
+def _coach_scope_for(user: User) -> InboundScope:
+    return InboundScope(
+        bot_id="coach",
+        transport="whatsapp",
+        user_id=user.id,
+        topic_id=CAREER_TOPIC_ID,
+        channel_id=None,
+        binding_id=uuid4(),
+        dyad_id=None,
+    )
 
 
 def _response(content, stop_reason="end_turn", usage=None):
@@ -376,7 +389,9 @@ async def test_coach_e2e_turn(app_env, monkeypatch):
     whatsapp_sent: list = []
     _patch_whatsapp(monkeypatch, whatsapp_sent)
 
-    async def ok_oob(pool_arg, content, recipient_id, protected_owner_ids=None):
+    async def ok_oob(pool_arg, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id):
+        assert bot_id == "coach"
+        assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "rewrite": None}
 
     monkeypatch.setattr(hooks, "check_oob", ok_oob)
@@ -387,6 +402,7 @@ async def test_coach_e2e_turn(app_env, monkeypatch):
     await agentic.run_agentic_turn_with_metadata(
         [msg_id],
         user,
+        scope=_coach_scope_for(user),
         trigger_metadata={"kind": "scheduled_task"},
     )
 

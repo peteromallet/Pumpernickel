@@ -354,6 +354,7 @@ def message_to_meta_payload(message: dict[str, Any]) -> dict[str, Any]:
                 "changes": [
                     {
                         "value": {
+                            "channel_id": str(message.get("channel_id")) if message.get("channel_id") is not None else None,
                             "contacts": [
                                 {
                                     "wa_id": user_id,
@@ -372,7 +373,7 @@ def message_to_meta_payload(message: dict[str, Any]) -> dict[str, Any]:
 async def seed_partner_users(pool: Any) -> None:
     """Seed partner users from DISCORD_PARTNER_USER_ID_A/B settings.
 
-    Mediator-scoped only — called once during lifespan when bot_id=='mediator'.
+    Mediator-scoped only — called once during lifespan for the mediator gateway.
     Future bots (e.g. Tante Rosi) do not use partner-based seeding.
     """
     settings = get_settings()
@@ -647,23 +648,18 @@ class DiscordGatewayBot:
         if not is_allowed_discord_user(user_id):
             return
 
-        # Scope is carried explicitly from the gateway: this DiscordGatewayBot
-        # already knows its own bot_id. The reacting user's address is irrelevant
-        # to bot resolution (it would never appear in `channels` anyway — that
-        # table stores bot addresses, not user addresses).
-        from app.bots.registry import get_relationship_topic_id
-
         _bot_id = self.bot_id
-        _topic_id = get_relationship_topic_id()
 
-        target_id = await self.pool.fetchval(
-            "SELECT id FROM messages WHERE whatsapp_message_id=$1 AND direction='outbound'",
+        target = await self.pool.fetchrow(
+            "SELECT id, topic_id FROM messages WHERE whatsapp_message_id=$1 AND direction='outbound' AND bot_id=$2",
             str(event.get("message_id", "")),
+            _bot_id,
         )
-        if target_id is None:
+        if target is None:
             logger.info("ignoring discord reaction for unknown outbound message_id=%s", event.get("message_id"),
-                         extra={"bot_id": _bot_id, "topic_id": str(_topic_id) if _topic_id else None})
+                         extra={"bot_id": _bot_id, "topic_id": None})
             return
+        _topic_id = target["topic_id"]
         emoji = event.get("emoji", {}).get("name")
         reacting_user = await upsert_user(
             self.pool,
@@ -678,7 +674,7 @@ class DiscordGatewayBot:
             RETURNING id
             """,
             reacting_user.id,
-            target_id,
+            target["id"],
             _reaction_sentiment(emoji),
             emoji,
             _bot_id,

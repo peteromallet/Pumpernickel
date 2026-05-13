@@ -279,12 +279,6 @@ class FakePool:
                 return None
             user["onboarding_state"] = "welcomed"
             return {"id": user_id}
-        if compact.startswith("SELECT id, name, phone, timezone, weekly_summary_enabled"):
-            row = dict(self.users[args[0]])
-            row.setdefault("weekly_summary_enabled", True)
-            row.setdefault("weekly_summary_day", 1)
-            row.setdefault("weekly_summary_time", "09:00")
-            return row
         if compact.startswith("SELECT id, name, phone, timezone, COALESCE(style_notes"):
             row = dict(self.users[args[0]])
             row.setdefault("style_notes", "")
@@ -374,12 +368,21 @@ class FakePool:
             return row
         if compact.startswith("INSERT INTO messages"):
             if "direction, recipient_id" in compact:
-                # Outbound: basic form is (recipient_id, content, content_encrypted, state).
-                # Incremental-send form appends (bot_turn_id, outbound_part_key, outbound_part_index).
+                # Outbound: basic form appends (bot_id, topic_id).
+                # Incremental-send form appends (bot_turn_id, outbound_part_key, outbound_part_index, bot_id, topic_id).
                 recipient_id, content, _content_encrypted, state, *part_args = args
-                bot_turn_id = part_args[0] if len(part_args) >= 1 else None
-                outbound_part_key = part_args[1] if len(part_args) >= 2 else None
-                outbound_part_index = part_args[2] if len(part_args) >= 3 else None
+                if "bot_turn_id, outbound_part_key, outbound_part_index" in compact:
+                    bot_turn_id = part_args[0] if len(part_args) >= 1 else None
+                    outbound_part_key = part_args[1] if len(part_args) >= 2 else None
+                    outbound_part_index = part_args[2] if len(part_args) >= 3 else None
+                    outbound_bot_id = part_args[3] if len(part_args) >= 4 else None
+                    outbound_topic_id = part_args[4] if len(part_args) >= 5 else None
+                else:
+                    bot_turn_id = None
+                    outbound_part_key = None
+                    outbound_part_index = None
+                    outbound_bot_id = part_args[0] if len(part_args) >= 1 else None
+                    outbound_topic_id = part_args[1] if len(part_args) >= 2 else None
                 if outbound_part_key is not None:
                     existing = next(
                         (row for row in self.messages.values() if row.get("outbound_part_key") == outbound_part_key),
@@ -407,6 +410,8 @@ class FakePool:
                     "bot_turn_id": bot_turn_id,
                     "outbound_part_key": outbound_part_key,
                     "outbound_part_index": outbound_part_index,
+                    "bot_id": outbound_bot_id,
+                    "topic_id": outbound_topic_id,
                 }
                 self.messages[row["id"]] = row
                 return {"id": row["id"]}
@@ -440,6 +445,8 @@ class FakePool:
                 "edit_history": None,
                 "edited_at": None,
                 "deleted_at": None,
+                "bot_id": inbound_bot_id,
+                "topic_id": inbound_topic_id,
             }
             self.messages[row["id"]] = row
             return {"id": row["id"]}
@@ -451,9 +458,13 @@ class FakePool:
                 system_prompt_version,
                 model_version,
                 prompt_snapshot,
-                *encrypted,
+                prompt_snapshot_encrypted,
+                bot_id,
+                topic_id,
+                bot_spec_version,
+                hot_context_builder_version,
+                tool_schema_version,
             ) = args
-            prompt_snapshot_encrypted = encrypted[0] if encrypted else None
             row = {
                 "id": uuid4(),
                 "triggered_by_message_id": triggered_by_message_id,
@@ -471,6 +482,11 @@ class FakePool:
                 "final_output_message_id": None,
                 "tool_call_count": 0,
                 "duration_ms": None,
+                "bot_id": bot_id,
+                "topic_id": topic_id,
+                "bot_spec_version": bot_spec_version,
+                "hot_context_builder_version": hot_context_builder_version,
+                "tool_schema_version": tool_schema_version,
             }
             self.bot_turns[row["id"]] = row
             return {"id": row["id"], "started_at": row["started_at"]}
@@ -1182,32 +1198,6 @@ class FakePool:
             }
             self.scheduled_jobs[row["id"]] = row
             return {"id": row["id"], "scheduled_for": scheduled_for}
-        if compact.startswith("INSERT INTO scheduled_jobs") and "'weekly_summary'" in compact:
-            user_id, scheduled_for, context_json = args[:3]
-            source_job_id = args[-1] if len(args) > 3 else None
-            if any(
-                job["user_id"] == user_id
-                and job["job_type"] == "weekly_summary"
-                and job["status"] == "pending"
-                and job["id"] != source_job_id
-                for job in self.scheduled_jobs.values()
-            ):
-                return None
-            row = {
-                "id": uuid4(),
-                "user_id": user_id,
-                "job_type": "weekly_summary",
-                "scheduled_for": scheduled_for,
-                "context": _coerce_jsonb(context_json),
-                "status": "pending",
-                "attempt_count": 0,
-                "max_attempts": 2,
-                "delayed": False,
-                "claimed_at": None,
-                "claimed_by": None,
-            }
-            self.scheduled_jobs[row["id"]] = row
-            return {"id": row["id"], "scheduled_for": scheduled_for}
         if compact.startswith("INSERT INTO scheduled_jobs") and "'deferred_turn'" in compact:
             if len(args) >= 5:
                 user_id, scheduled_for, context_json, bot_id, topic_id = args[:5]
@@ -1517,12 +1507,55 @@ class FakePool:
             scope_id = args[1]
             row = self.topic_status.get((topic_id, scope_id))
             return dict(row) if row else None
+        if compact.startswith("SELECT id, topic_id FROM messages WHERE whatsapp_message_id"):
+            wa_id = args[0]
+            bot_id = args[1] if len(args) > 1 else None
+            for row in self.messages.values():
+                if (
+                    row.get("whatsapp_message_id") == wa_id
+                    and row.get("direction") == "outbound"
+                    and (bot_id is None or row.get("bot_id") == bot_id)
+                ):
+                    return {"id": row["id"], "topic_id": row.get("topic_id")}
+            return None
+        if compact.startswith("SELECT id, sender_id AS user_id, sender_id, bot_id, topic_id"):
+            row = self.messages.get(args[0])
+            if row is None:
+                return None
+            return {
+                "id": row["id"],
+                "user_id": row.get("sender_id"),
+                "sender_id": row.get("sender_id"),
+                "bot_id": row.get("bot_id"),
+                "topic_id": row.get("topic_id"),
+                "channel_id": row.get("channel_id"),
+                "binding_id": row.get("binding_id"),
+                "dyad_id": row.get("dyad_id"),
+            }
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):
         compact = " ".join(sql.split())
         if compact == "SELECT 1":
             return 1
+        if compact.startswith("SELECT timezone FROM users WHERE id"):
+            row = self.users.get(args[0])
+            return row.get("timezone") if row else None
+        if (
+            compact.startswith("SELECT 1 FROM scheduled_jobs")
+            and "job_type = 'scheduled_task'" in compact
+            and "context->>'kind' = 'weekly_reflection'" in compact
+        ):
+            user_id = args[0]
+            for job in self.scheduled_jobs.values():
+                if (
+                    job.get("user_id") == user_id
+                    and job.get("job_type") == "scheduled_task"
+                    and job.get("status") == "pending"
+                    and (job.get("context") or {}).get("kind") == "weekly_reflection"
+                ):
+                    return 1
+            return None
         if compact.startswith("SELECT MAX(sent_at) FROM messages WHERE id = ANY"):
             wanted = set(args[0] or [])
             sent = [m["sent_at"] for m in self.messages.values() if m["id"] in wanted]
@@ -1669,16 +1702,11 @@ class FakePool:
                 for (transport, address), owner in self.user_identities.items()
                 if owner == uid
             ]
-        if compact.startswith("SELECT id, name, phone, timezone, weekly_summary_enabled") and "WHERE weekly_summary_enabled = true" in compact:
-            rows = []
-            for row in self.users.values():
-                out = dict(row)
-                out.setdefault("weekly_summary_enabled", True)
-                out.setdefault("weekly_summary_day", 1)
-                out.setdefault("weekly_summary_time", "09:00")
-                if out["weekly_summary_enabled"]:
-                    rows.append(out)
-            return rows
+        if compact.startswith("SELECT id, timezone FROM users"):
+            return [
+                {"id": row["id"], "timezone": row.get("timezone", "UTC")}
+                for row in self.users.values()
+            ]
         if compact.startswith("SELECT u.id AS user_id"):
             start, end, *rest = args
             allowed_users = set(rest[0]) if rest else set(self.users)
@@ -1942,7 +1970,15 @@ class FakePool:
                     and turn.get("final_output_message_id") is None
                 ):
                     turn["failure_reason"] = "crashed"
-                    rows.append({"triggering_message_ids": turn["triggering_message_ids"]})
+                    rows.append(
+                        {
+                            "id": turn["id"],
+                            "triggering_message_ids": turn["triggering_message_ids"],
+                            "user_id": turn.get("user_in_context"),
+                            "bot_id": turn.get("bot_id"),
+                            "topic_id": turn.get("topic_id"),
+                        }
+                    )
             return rows
         if compact.startswith("WITH due AS"):
             now, limit, heartbeat_only, worker_id = args
@@ -1970,17 +2006,28 @@ class FakePool:
                         "attempt_count": job.get("attempt_count", 0),
                         "max_attempts": job.get("max_attempts", 2),
                         "delayed": job.get("delayed", False),
+                        "bot_id": job.get("bot_id"),
+                        "topic_id": job.get("topic_id"),
                     }
                 )
             return rows
-        if compact.startswith("SELECT m.id, m.sender_id FROM messages m"):
+        if compact.startswith("SELECT m.id, m.sender_id"):
             referenced = {
                 message_id
                 for turn in self.bot_turns.values()
                 for message_id in turn.get("triggering_message_ids", [])
             }
             return [
-                {"id": m["id"], "sender_id": m["sender_id"]}
+                {
+                    "id": m["id"],
+                    "user_id": m["sender_id"],
+                    "sender_id": m["sender_id"],
+                    "bot_id": m.get("bot_id"),
+                    "topic_id": m.get("topic_id"),
+                    "channel_id": m.get("channel_id"),
+                    "binding_id": m.get("binding_id"),
+                    "dyad_id": m.get("dyad_id"),
+                }
                 for m in self.messages.values()
                 if m["processing_state"] == "raw" and m["direction"] == "inbound" and m["id"] not in referenced
             ]
@@ -2245,6 +2292,10 @@ class FakePool:
             else:
                 self.llm_spend_log[provider] = current + Decimal(dollars)
             return "INSERT 0 1"
+        if compact.startswith("INSERT INTO user_identities"):
+            transport, address, user_id, *_rest = args
+            self.user_identities[(transport, address)] = user_id
+            return "INSERT 0 1"
         if compact.startswith("UPDATE observations SET related_theme_ids ="):
             theme_id, observation_ids = args
             for observation_id in observation_ids:
@@ -2429,6 +2480,10 @@ class FakePool:
             now, job_id = args
             self.scheduled_jobs[job_id].update(status="fired", fired_at=now, claimed_at=None, claimed_by=None)
             return "UPDATE 1"
+        if compact.startswith("UPDATE scheduled_jobs SET status = 'withheld'"):
+            now, job_id = args
+            self.scheduled_jobs[job_id].update(status="withheld", claimed_at=None, claimed_by=None, updated_at=now)
+            return "UPDATE 1"
         if compact.startswith("UPDATE scheduled_jobs SET attempt_count = $1"):
             attempt_count, error, now, job_id = args
             self.scheduled_jobs[job_id].update(
@@ -2610,6 +2665,40 @@ def fake_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def fake_pool(app_env: None) -> FakePool:
     return FakePool()
+
+
+@pytest.fixture
+def make_inbound_scope():
+    """Build an InboundScope for tests that call scope-only runtime APIs."""
+    from app.models.user import User
+    from app.services.scope import InboundScope
+
+    def _make(
+        user: User | None = None,
+        *,
+        bot_id: str = "mediator",
+        transport: str = "discord",
+        user_id: UUID | None = None,
+        topic_id: UUID | None = None,
+        channel_id: str | None = None,
+        binding_id: UUID | None = None,
+        dyad_id: UUID | None = None,
+    ) -> InboundScope:
+        resolved_user_id = user_id or (user.id if user is not None else uuid4())
+        resolved_dyad_id = dyad_id
+        if resolved_dyad_id is None and bot_id != "tante_rosi":
+            resolved_dyad_id = uuid4()
+        return InboundScope(
+            bot_id=bot_id,
+            transport=transport,
+            user_id=resolved_user_id,
+            topic_id=topic_id or uuid4(),
+            channel_id=channel_id,
+            binding_id=binding_id or uuid4(),
+            dyad_id=resolved_dyad_id,
+        )
+
+    return _make
 
 
 @pytest.fixture

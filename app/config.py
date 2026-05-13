@@ -7,6 +7,7 @@ from functools import cached_property, lru_cache
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_DEFAULT_SEED_BOT = "mediator"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     oob_checker_model: str = "claude-sonnet-4-6"  # Delivery/read-tool OOB checker model.
     scoring_model: str = "claude-haiku-4-5-20251001"  # Observation scoring and OOB topic clustering model.
     hot_context_token_budget: int = 6000  # Approximate prompt budget for hot context.
-    bot_id: str = "mediator"  # Bot profile consumed by the shared agentic runner.
+    default_seed_bot_id: str = _DEFAULT_SEED_BOT  # Seed-only bot id for mediator-owned scheduled jobs.
     system_prompt_version: str = "v3"  # Version tag stored with each bot turn.
     assistant_name: str = "the assistant"  # Rendered into the main system prompt.
     scheduler_enabled: bool = True
@@ -90,8 +91,6 @@ class Settings(BaseSettings):
     discord_pacing_llm_judgement_enabled: bool = True
     discord_pacing_llm_min_ambiguity: float = Field(default=0.45, ge=0.0, le=1.0)
     discord_pacing_event_retention_days: int = Field(default=30, ge=1, le=365)
-    weekly_summary_default_day: int = 1  # Monday, matching Postgres EXTRACT(DOW) convention where Sunday is 0.
-    weekly_summary_default_time: str = "09:00"
     heartbeat_interval_hours: int = 24
     anthropic_input_usd_per_mtok: float = 3.0  # Cache creation is 1.25x input.
     anthropic_output_usd_per_mtok: float = 15.0  # Cache reads are 0.10x input.

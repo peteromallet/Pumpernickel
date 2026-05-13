@@ -1,6 +1,7 @@
 """Image analysis pipeline."""
 
 import base64
+import inspect
 import logging
 from typing import Any
 
@@ -11,9 +12,9 @@ from app.config import get_settings
 from app.models.user import User
 from app.services import storage, system_state, whatsapp
 from app.services.messaging import send_outbound
+from app.services.scope import InboundScope
 from app.services.spend import is_under_cap, record_llm_cost
 from app.services.templates import TemplateCall
-from app.bots.registry import get_relationship_topic_id
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,8 @@ async def handle_image(
     media_id: str,
     user: User,
     coalescer: Any | None = None,
+    *,
+    scope: InboundScope,
 ) -> None:
     paused = await system_state.is_paused(pool)
     should_enqueue = coalescer is not None and not paused
@@ -195,8 +198,7 @@ async def handle_image(
                 user,
                 "I can't analyze images right now -- could you describe it in text?",
                 template_fallback=TemplateCall("media_failure", [user.name, "image"]),
-                bot_id='mediator',
-                topic_id=get_relationship_topic_id(),
+                scope=scope,
             )
         return
 
@@ -215,11 +217,21 @@ async def handle_image(
                 user,
                 "I couldn't process your last image -- could you try resending or describe it in text?",
                 template_fallback=TemplateCall("media_failure", [user.name, "image"]),
-                bot_id='mediator',
-                topic_id=get_relationship_topic_id(),
+                scope=scope,
             )
     else:
         await pool.execute("UPDATE messages SET media_analysis=$1 WHERE id=$2", analysis, message_id)
         await record_llm_cost(pool, "vision", 0.001)
         if should_enqueue:
-            await coalescer.add(user.id, message_id, user, source="media", bot_id='mediator')
+            await _coalescer_add(coalescer, user, message_id, scope=scope)
+
+
+async def _coalescer_add(coalescer: Any, user: User, message_id: Any, *, scope: InboundScope) -> None:
+    kwargs: dict[str, Any] = {"source": "media"}
+    try:
+        parameters = inspect.signature(coalescer.add).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "scope" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        kwargs["scope"] = scope
+    await coalescer.add(user.id, message_id, user, **kwargs)

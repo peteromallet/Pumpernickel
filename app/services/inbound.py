@@ -1,8 +1,9 @@
 """Inbound transport payload processing."""
 
 import logging
+import inspect
 from datetime import UTC, datetime
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal
 from uuid import UUID, uuid5, NAMESPACE_URL
 
 from app.bots.registry import (
@@ -16,6 +17,7 @@ from app.services import routing, system_state
 from app.services.charge import classify_charge
 from app.services.crypto import encrypt_value
 from app.services.messaging import send_outbound
+from app.services.scope import InboundScope, InboundTransport
 from app.services.scheduled_job_handlers import seed_weekly_reflections
 from app.services.templates import TemplateCall
 from app.services.transcription import handle_voice
@@ -98,8 +100,7 @@ async def _handle_reaction(
     user_id,
     reaction: dict[str, Any],
     *,
-    bot_id: str | None = None,
-    topic_id: UUID | None = None,
+    scope: InboundScope,
 ) -> None:
     target_wa_id = reaction.get("message_id")
     if not target_wa_id:
@@ -110,7 +111,7 @@ async def _handle_reaction(
     )
     if target_id is None:
         logger.info("ignoring reaction for unknown outbound message_id=%s", target_wa_id,
-                     extra={"bot_id": bot_id or "mediator", "topic_id": str(topic_id) if topic_id else None})
+                     extra=obs_fields(scope))
         return
     emoji = reaction.get("emoji")
     await pool.fetchrow(
@@ -123,22 +124,28 @@ async def _handle_reaction(
         target_id,
         _reaction_sentiment(emoji),
         emoji,
-        bot_id,
-        topic_id,
+        scope.bot_id,
+        scope.topic_id,
     )
 
 
-async def _control_recipients(pool: Any, user) -> list[Any]:
+async def _control_recipients(pool: Any, user, *, scope: InboundScope) -> list[Any]:
     recipients = [user]
+    bot_spec = get_bot_spec(scope.bot_id)
+    if bot_spec.participants_shape == "solo":
+        return recipients
     try:
         recipients.append(await partner_of(pool, user))
     except ValueError:
-        # obs N/A: scope unresolved before partner lookup
-        logger.warning("pause/resume command from user_id=%s but partner lookup did not return exactly one user", user.id)
+        logger.warning(
+            "pause/resume command from user_id=%s but partner lookup did not return exactly one user",
+            user.id,
+            extra=obs_fields(scope),
+        )
     return recipients
 
 
-async def _send_pause_confirmation(pool: Any, recipients: list[Any], paused_by) -> None:
+async def _send_pause_confirmation(pool: Any, recipients: list[Any], paused_by, *, scope: InboundScope) -> None:
     for recipient in recipients:
         await send_outbound(
             pool,
@@ -146,15 +153,14 @@ async def _send_pause_confirmation(pool: Any, recipients: list[Any], paused_by) 
             PAUSE_CONFIRMATION,
             template_fallback=TemplateCall("pause_confirmation", [recipient.name, paused_by.name]),
             ignore_pause=True,
-            bot_id='mediator',
-            topic_id=get_relationship_topic_id(),
+            scope=scope,
         )
 
 
-async def _handle_pause_command(pool: Any, user) -> None:
+async def _handle_pause_command(pool: Any, user, *, scope: InboundScope) -> None:
     await system_state.pause(pool, user.id)
     await system_state.supersede_pending_user_facing_jobs(pool)
-    await _send_pause_confirmation(pool, await _control_recipients(pool, user), user)
+    await _send_pause_confirmation(pool, await _control_recipients(pool, user, scope=scope), user, scope=scope)
 
 
 async def _handle_resume_command(pool: Any, user) -> None:
@@ -162,38 +168,50 @@ async def _handle_resume_command(pool: Any, user) -> None:
     await seed_weekly_reflections(pool)
 
 
-class ResolvedScope(NamedTuple):
-    bot_id: str
-    topic_id: UUID | None
-    channel_id: str | None
-    binding_id: UUID | None
-    dyad_id: UUID | None
+async def _upsert_user_identity(
+    pool: Any,
+    *,
+    transport: InboundTransport,
+    address: str,
+    user_id: UUID,
+) -> None:
+    try:
+        await pool.execute(
+            """
+            INSERT INTO user_identities (transport, address, user_id, verified_at)
+            VALUES ($1, $2, $3, now())
+            ON CONFLICT (transport, address)
+            DO UPDATE SET user_id = EXCLUDED.user_id,
+                          verified_at = COALESCE(user_identities.verified_at, EXCLUDED.verified_at)
+            """,
+            transport,
+            address,
+            user_id,
+        )
+    except Exception:
+        logger.debug(
+            "_upsert_user_identity: identity write failed; continuing with resolved user",
+            exc_info=True,
+            extra={"transport": transport, "user_id": str(user_id)},
+        )
 
 
 async def _resolve_scope(
     pool: Any,
     *,
-    transport: Literal["discord", "whatsapp"],
+    transport: InboundTransport,
     bot_id: str,
-    address: str,
-) -> ResolvedScope:
-    """Resolve binding for an inbound transport+sender-address pair under a known bot.
+    user_id: UUID,
+    channel_id: str | None,
+) -> InboundScope:
+    """Resolve live inbound scope under a gateway-supplied bot.
 
-    The bot_id is supplied by the caller (gateway/webhook), never inferred from
-    the sender's address. We previously tried to look up bot_id by querying the
-    channels table with the sender's address — but channels stores BOT addresses,
-    not sender addresses, so that lookup was always wrong and silently fell back
-    to "mediator". That bug is gone now.
-
-    The binding lookup remains: given (bot_id, sender), find the bot_binding row
-    so we can carry binding_id/dyad_id forward. Tolerant of missing routing
-    tables (FakePool, early startup) — returns the supplied bot_id either way.
+    The User row and provider identity are created before this point. The
+    binding lookup is therefore keyed by the durable user id, not by a
+    best-effort transport lookup that might miss first-time senders.
     """
     binding_id: UUID | None = None
     dyad_id: UUID | None = None
-    # Resolve the bot's primary topic — falls back to the relationship topic
-    # if the bot spec is unknown or the lookup fails (e.g. FakePool tests,
-    # early startup before topic ids are cached).
     topic_id: UUID | None
     try:
         bot_spec = get_bot_spec(bot_id)
@@ -208,24 +226,23 @@ async def _resolve_scope(
         topic_id = get_relationship_topic_id()
 
     try:
-        user_id = await routing.resolve_sender(pool, transport=transport, address=address)
-        if user_id is not None:
-            try:
-                binding = await routing.resolve_binding(pool, bot_id=bot_id, user_id=user_id)
-                if binding is not None:
-                    binding_id = binding.binding_id
-                    dyad_id = binding.dyad_id
-            except Exception:
-                logger.debug("_resolve_scope: resolve_binding failed — binding stays None", exc_info=True,
-                             extra={"bot_id": bot_id, "topic_id": str(topic_id) if topic_id else None})
+        binding = await routing.resolve_binding(pool, bot_id=bot_id, user_id=user_id)
+        if binding is not None:
+            binding_id = binding.binding_id
+            dyad_id = binding.dyad_id
     except Exception:
-        logger.debug("_resolve_scope: resolve_sender failed — binding stays None", exc_info=True,
+        logger.debug("_resolve_scope: resolve_binding failed — binding stays None", exc_info=True,
                      extra={"bot_id": bot_id, "topic_id": str(topic_id) if topic_id else None})
 
-    return ResolvedScope(
+    if topic_id is None:
+        raise RuntimeError(f"_resolve_scope: no topic_id available for bot_id={bot_id}")
+
+    return InboundScope(
         bot_id=bot_id,
+        transport=transport,
+        user_id=user_id,
         topic_id=topic_id,
-        channel_id=None,
+        channel_id=channel_id,
         binding_id=binding_id,
         dyad_id=dyad_id,
     )
@@ -270,6 +287,26 @@ async def _insert_message(
     )
 
 
+async def _coalescer_add(
+    coalescer: Any,
+    user: Any,
+    message_id: UUID,
+    *,
+    source: str,
+    scope: InboundScope,
+) -> None:
+    kwargs: dict[str, Any] = {"source": source}
+    try:
+        parameters = inspect.signature(coalescer.add).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "scope" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        kwargs["scope"] = scope
+    else:
+        kwargs["bot_id"] = scope.bot_id
+    await coalescer.add(user.id, message_id, user, **kwargs)
+
+
 async def process_inbound(
     pool: Any,
     payload: dict[str, Any],
@@ -306,20 +343,27 @@ async def process_inbound(
                     logger.warning("dropping non-whitelisted sender %s", phone)
                     continue
 
-                scope = await _resolve_scope(pool, transport=transport, bot_id=bot_id, address=phone)
-
                 user = await upsert_user(
                     pool,
                     _contact_name(value, phone),
                     phone,
                     get_settings().default_user_timezone,
                 )
+                await _upsert_user_identity(pool, transport=transport, address=phone, user_id=user.id)
+                channel_id = message.get("channel_id") or value.get("channel_id")
+                scope = await _resolve_scope(
+                    pool,
+                    transport=transport,
+                    bot_id=bot_id,
+                    user_id=user.id,
+                    channel_id=str(channel_id) if channel_id else None,
+                )
                 wa_type = message["type"]
                 sent_at = _parse_sent_at(message)
                 wa_id = message["id"]
 
                 if wa_type == "reaction":
-                    await _handle_reaction(pool, user.id, message.get("reaction", {}), bot_id=scope.bot_id, topic_id=scope.topic_id)
+                    await _handle_reaction(pool, user.id, message.get("reaction", {}), scope=scope)
                     continue
 
                 if wa_type == "text":
@@ -330,7 +374,7 @@ async def process_inbound(
                         charge_label = (await classify_charge(pool, content)).charge
                     row = await _insert_message(pool, user.id, content, wa_id, sent_at, charge=charge_label, bot_id=scope.bot_id, topic_id=scope.topic_id)
                     if row is not None and content.strip() == "/pause":
-                        await _handle_pause_command(pool, user)
+                        await _handle_pause_command(pool, user, scope=scope)
                         continue
                     if row is not None and content.strip() == "/resume":
                         await _handle_resume_command(pool, user)
@@ -338,7 +382,7 @@ async def process_inbound(
                     if row is not None and await system_state.is_paused(pool):
                         continue
                     if row is not None and coalescer is not None and not await system_state.is_paused(pool):
-                        await coalescer.add(user.id, row["id"], user, source=coalescer_source, bot_id=scope.bot_id)
+                        await _coalescer_add(coalescer, user, row["id"], source=coalescer_source, scope=scope)
                     continue
 
                 if wa_type == "audio":
@@ -347,8 +391,8 @@ async def process_inbound(
                     if row is not None:
                         paused = await system_state.is_paused(pool)
                         if not paused and await claim_onboarding_welcome(pool, user.id):
-                            await send_outbound(pool, user, WELCOME_MESSAGE, bot_id=scope.bot_id, topic_id=scope.topic_id)
-                        await handle_voice(pool, row["id"], message["audio"]["id"], user, None if paused else coalescer, duration)
+                            await send_outbound(pool, user, WELCOME_MESSAGE, scope=scope)
+                        await handle_voice(pool, row["id"], message["audio"]["id"], user, None if paused else coalescer, duration, scope=scope)
                     continue
 
                 if wa_type == "image":
@@ -356,8 +400,8 @@ async def process_inbound(
                     if row is not None:
                         paused = await system_state.is_paused(pool)
                         if not paused and await claim_onboarding_welcome(pool, user.id):
-                            await send_outbound(pool, user, WELCOME_MESSAGE, bot_id=scope.bot_id, topic_id=scope.topic_id)
-                        await handle_image(pool, row["id"], message["image"]["id"], user, None if paused else coalescer)
+                            await send_outbound(pool, user, WELCOME_MESSAGE, scope=scope)
+                        await handle_image(pool, row["id"], message["image"]["id"], user, None if paused else coalescer, scope=scope)
                     continue
 
                 row = await _insert_message(
@@ -374,9 +418,9 @@ async def process_inbound(
                 if row is not None and await system_state.is_paused(pool):
                     continue
                 if row is not None and await claim_onboarding_welcome(pool, user.id):
-                    await send_outbound(pool, user, WELCOME_MESSAGE, bot_id=scope.bot_id, topic_id=scope.topic_id)
+                    await send_outbound(pool, user, WELCOME_MESSAGE, scope=scope)
                 if row is not None and coalescer is not None and not await system_state.is_paused(pool):
-                    await coalescer.add(user.id, row["id"], user, source=coalescer_source, bot_id=scope.bot_id)
+                    await _coalescer_add(coalescer, user, row["id"], source=coalescer_source, scope=scope)
 
 
 def twilio_form_to_meta_payload(form: dict[str, str]) -> dict[str, Any]:

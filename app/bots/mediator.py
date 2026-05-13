@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from app.bots.base import BotSpec, ReadScopes, WriteScopes
+from app.bots.ids import MEDIATOR_BOT_ID
 from app.services.prompts import render_system_prompt
 from app.services.turn_plan import TurnPlan
 
@@ -99,7 +100,7 @@ MEDIATOR_STEP_INSTRUCTIONS = {
 }
 
 MEDIATOR_BOT = MediatorBotSpec(
-    bot_id="mediator",
+    bot_id=MEDIATOR_BOT_ID,
     prompt_renderer=render_system_prompt,
     step_instructions=MEDIATOR_STEP_INSTRUCTIONS,
     cross_topic_policy="peek",

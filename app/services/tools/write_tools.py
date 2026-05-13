@@ -20,7 +20,7 @@ from app.services.messaging import send_outbound, _append_turn_reasoning, _call_
 from app.services import discord, scoring
 from app.services.templates import TemplateCall
 from app.services.time_context import temporal_reference
-from app.services.turn_context import TurnContext, obs_fields
+from app.services.turn_context import TurnContext, obs_fields, scope_from_turn_context
 from app.services.scheduled_task_recurrence import normalize_recurrence
 from app.services.tools.common import current_scheduled_task
 from app.services.tools.scope_guard import (
@@ -180,7 +180,7 @@ async def _schedule_context_job(
     scheduled_for: datetime,
     context_key: str,
     context_id: Any,
-    bot_id: str = 'mediator',
+    bot_id: str,
     topic_id: Any = None,
 ) -> None:
     await pool.execute(
@@ -503,7 +503,15 @@ async def send_bridge_candidate(
 
     content = existing["shareable_summary"]
     protected_owner_ids = [existing["source_user_id"], existing["target_user_id"]]
-    verdict = await _call_oob_hook(ctx.pool, content, target.id, protected_owner_ids)
+    turn_scope = scope_from_turn_context(ctx)
+    verdict = await _call_oob_hook(
+        ctx.pool,
+        content,
+        target.id,
+        protected_owner_ids,
+        bot_id=turn_scope.bot_id,
+        topic_id=turn_scope.topic_id,
+    )
     if verdict["verdict"] in {"block", "rewrite"}:
         note = _append_note(existing["internal_note"], f"OOB {verdict['verdict']}: {verdict.get('reason', '')}")
         row = await _set_bridge_candidate_status(
@@ -522,8 +530,7 @@ async def send_bridge_candidate(
         content,
         bot_turn_id=ctx.turn_id,
         protected_owner_ids=protected_owner_ids,
-        bot_id=ctx.bot_id,
-        topic_id=ctx.primary_topic_id,
+        scope=turn_scope,
     )
     row = await _set_bridge_candidate_status(
         ctx,
@@ -1510,6 +1517,8 @@ async def schedule_checkin(ctx: TurnContext, args: ScheduleCheckinInput) -> Sche
         args.user_id,
         scheduled_for=scheduled_for,
         context={"about_what": args.about_what, "reason": args.reason},
+        bot_id=ctx.bot_id,
+        topic_id=ctx.primary_topic_id,
     )
     result = ScheduleCheckinOutput(
         job_id=row["job_id"],
@@ -1839,8 +1848,7 @@ async def escalate_to_partner(ctx: TurnContext, args: EscalateToPartnerInput) ->
         template_fallback=template,
         bot_turn_id=ctx.turn_id,
         protected_owner_ids=[ctx.user.id, ctx.partner.id],
-        bot_id=ctx.bot_id,
-        topic_id=ctx.primary_topic_id,
+        scope=scope_from_turn_context(ctx),
     )
     await _append_turn_reasoning(
         ctx.pool,
@@ -1910,7 +1918,15 @@ async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput
         await _log_tool_call(ctx, "edit_outbound_message", args, started, result)
         return result
 
-    verdict = await _call_oob_hook(ctx.pool, args.content, row["recipient_id"], [ctx.user.id, ctx.partner.id])
+    turn_scope = scope_from_turn_context(ctx)
+    verdict = await _call_oob_hook(
+        ctx.pool,
+        args.content,
+        row["recipient_id"],
+        [ctx.user.id, ctx.partner.id],
+        bot_id=turn_scope.bot_id,
+        topic_id=turn_scope.topic_id,
+    )
     if verdict["verdict"] != "ok":
         result = EditOutboundMessageOutput(
             action="blocked",
@@ -1923,7 +1939,7 @@ async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput
         return result
 
     recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
-    await discord.edit_text(recipient_phone, row["whatsapp_message_id"], args.content, bot_id=ctx.bot_id or "mediator")
+    await discord.edit_text(recipient_phone, row["whatsapp_message_id"], args.content, bot_id=turn_scope.bot_id)
     await ctx.pool.execute(
         """
         UPDATE messages
@@ -1991,7 +2007,8 @@ async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageI
         return result
 
     recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
-    await discord.delete_text(recipient_phone, row["whatsapp_message_id"], bot_id=ctx.bot_id or "mediator")
+    turn_scope = scope_from_turn_context(ctx)
+    await discord.delete_text(recipient_phone, row["whatsapp_message_id"], bot_id=turn_scope.bot_id)
     await ctx.pool.execute(
         "UPDATE messages SET deleted_at = now(), processing_state='expired' WHERE id=$1",
         args.message_id,
@@ -2050,7 +2067,8 @@ async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> React
         target_phone = ctx.user.phone if row["sender_id"] == ctx.user.id else ctx.partner.phone
     else:
         target_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
-    await discord.add_reaction(target_phone, row["whatsapp_message_id"], args.emoji, bot_id=ctx.bot_id or "mediator")
+    turn_scope = scope_from_turn_context(ctx)
+    await discord.add_reaction(target_phone, row["whatsapp_message_id"], args.emoji, bot_id=turn_scope.bot_id)
     result = ReactToMessageOutput(
         action="reacted",
         message_id=args.message_id,

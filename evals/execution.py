@@ -6,7 +6,9 @@ from typing import Any, AsyncIterator, Literal
 from uuid import UUID
 
 from app.models.user import User
+from app.bots.registry import get_relationship_topic_id
 from app.services import agentic, hooks, whatsapp
+from app.services.scope import InboundScope, scope_from_message_row
 from evals.capture import capture_tool_calls
 
 
@@ -62,7 +64,7 @@ async def capture_oob_checks() -> AsyncIterator[list[OobCheckRecord]]:
     checks: list[OobCheckRecord] = []
     original_check_oob = hooks.check_oob
 
-    async def check_oob(*args: Any) -> dict[str, Any]:
+    async def check_oob(*args: Any, **kwargs: Any) -> dict[str, Any]:
         if len(args) == 3:
             pool, content, recipient_id = args
         elif len(args) == 2:
@@ -81,11 +83,14 @@ async def capture_oob_checks() -> AsyncIterator[list[OobCheckRecord]]:
         else:
             try:
                 if pool is None:
-                    verdict = await original_check_oob(content, recipient_id)
+                    verdict = await original_check_oob(content, recipient_id, **kwargs)
                 else:
-                    verdict = await original_check_oob(pool, content, recipient_id)
+                    verdict = await original_check_oob(pool, content, recipient_id, **kwargs)
             except TypeError:
-                verdict = await original_check_oob(content, recipient_id)
+                try:
+                    verdict = await original_check_oob(content, recipient_id, **kwargs)
+                except TypeError:
+                    verdict = await original_check_oob(content, recipient_id)
         if hasattr(verdict, "model_dump"):
             verdict = verdict.model_dump(mode="json")
         verdict = dict(verdict)
@@ -110,6 +115,7 @@ async def run_eval_turn(
     *,
     prompt_version: str,
 ) -> EvalTurnExecution:
+    scope = await _scope_for_eval_turn(pool, triggering_message_ids, user)
     with capture_tool_calls() as transcript:
         async with capture_oob_checks() as oob_checks:
             async with fake_whatsapp_sends() as sends:
@@ -117,6 +123,33 @@ async def run_eval_turn(
                     pool,
                     triggering_message_ids,
                     user,
+                    scope=scope,
                     prompt_version=prompt_version,
                 )
     return EvalTurnExecution(tool_calls=transcript.as_json(), whatsapp_sends=list(sends), oob_checks=list(oob_checks))
+
+
+async def _scope_for_eval_turn(pool: Any, triggering_message_ids: list[UUID], user: User) -> InboundScope:
+    if triggering_message_ids:
+        row = await pool.fetchrow(
+            """
+            SELECT id, sender_id AS user_id, sender_id, bot_id, topic_id, channel_id, binding_id, dyad_id
+            FROM messages
+            WHERE id=$1
+            """,
+            triggering_message_ids[0],
+        )
+        if row is not None and row.get("bot_id") is not None and row.get("topic_id") is not None:
+            return scope_from_message_row(row)
+    topic_id = get_relationship_topic_id()
+    if topic_id is None:
+        raise RuntimeError("eval turn requires a relationship topic id when message scope is absent")
+    return InboundScope(
+        bot_id="mediator",
+        transport=None,
+        user_id=user.id,
+        topic_id=topic_id,
+        channel_id=None,
+        binding_id=None,
+        dyad_id=None,
+    )

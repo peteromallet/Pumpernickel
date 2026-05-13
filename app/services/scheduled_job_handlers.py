@@ -5,22 +5,32 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import Settings, get_settings
-from app.models.user import User, fetch_user_by_id
+from app.models.user import fetch_user_by_id
 from app.services.agentic import run_agentic_job, run_agentic_turn
 from app.services.checkins import schedule_checkin_record
-from app.services.decay import run_decay_housekeeping
 from app.services.deletion import purge_expired_deletions
-from app.services.messaging import send_outbound
 from app.services.scheduled_task_recurrence import next_occurrence_utc, recurrence_after_fire
-from app.services.templates import TemplateCall
 from app.bots.registry import get_relationship_topic_id
+from app.services.scope import InboundScope, scope_from_job_row
 from app.services.topic_filter import join_artifact_topics
 
 logger = logging.getLogger(__name__)
+
+
+WEEKLY_REFLECTION_BRIEF = (
+    "It's the weekly reflection touchpoint. Look across recent conversation, "
+    "open themes, and watch items. If something is unresolved or you've noticed "
+    "a pattern worth naming, gently surface it. If they've been quiet, reach out "
+    "with something specific you noticed — not a generic 'how are you'. If there "
+    "is truly nothing to surface and they are mid-flow in real life, you can stay "
+    "silent this week. Do not recap statistics. If a later moment today would land "
+    "better, you can schedule_task for later in the day with this same brief and "
+    "skip sending now; the weekly recurrence will keep firing on Sundays."
+)
 
 
 def _utc_now() -> datetime:
@@ -36,27 +46,15 @@ def _zoneinfo(name: str) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-def _time_value(value: Any) -> time:
-    if isinstance(value, time):
-        return value
-    if isinstance(value, str):
-        hour, minute, *_ = value.split(":")
-        return time(int(hour), int(minute))
-    return time(9, 0)
-
-
-def next_weekly_summary_at(user_row: dict[str, Any], *, now: datetime | None = None) -> datetime:
+def next_weekly_reflection_at(timezone: str | None, *, now: datetime | None = None) -> datetime:
+    """Next Sunday 09:00 in the user's local timezone, expressed in UTC."""
     now = now or _utc_now()
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
-    zone = _zoneinfo(user_row.get("timezone") or "UTC")
+    zone = _zoneinfo(timezone or "UTC")
     local_now = now.astimezone(zone)
-    target_day = int(user_row.get("weekly_summary_day", 1))
-    current_day = (local_now.weekday() + 1) % 7
-    days_ahead = (target_day - current_day) % 7
-    target_time = _time_value(user_row.get("weekly_summary_time", "09:00"))
-    candidate_date = local_now.date() + timedelta(days=days_ahead)
-    candidate = datetime.combine(candidate_date, target_time, zone)
+    days_ahead = (6 - local_now.weekday()) % 7
+    candidate = datetime.combine(local_now.date() + timedelta(days=days_ahead), time(9, 0), zone)
     if candidate <= local_now:
         candidate += timedelta(days=7)
     return candidate.astimezone(UTC)
@@ -69,7 +67,6 @@ class ScheduledJobHandlers:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "weekly_summary": self.handle_weekly_summary,
             "checkin": self.handle_checkin,
             "watch_item_due": self.handle_watch_item_due,
             "oob_review": self.handle_oob_review,
@@ -78,52 +75,30 @@ class ScheduledJobHandlers:
             "scheduled_task": self.handle_scheduled_task,
         }
 
-    async def handle_weekly_summary(self, job: dict[str, Any]) -> None:
-        user_row = await self._fetch_user_schedule(job["user_id"])
-        user = _user_from_row(user_row)
-        summary = await self._weekly_summary_counts(user.id, topic_id=job.get('topic_id') or get_relationship_topic_id())
-        content = (
-            f"Hi {user.name}, this week we had {summary['conversation_count']} conversations "
-            f"and touched on {summary['ongoing_count']} ongoing things. Want to talk through anything? Just ask."
-        )
-        await send_outbound(
-            self.pool,
-            user,
-            content,
-            template_fallback=TemplateCall(
-                "weekly_summary",
-                [user.name, str(summary["conversation_count"]), str(summary["ongoing_count"])],
-            ),
-            bot_id=job.get('bot_id', 'mediator'),
-            topic_id=job.get('topic_id') or get_relationship_topic_id(),
-        )
-        await run_decay_housekeeping(self.pool)
-        await schedule_next_weekly_summary(
-            self.pool, user_row, now=_utc_now(), source_job_id=job["id"],
-            bot_id=job.get('bot_id', 'mediator'),
-            topic_id=job.get('topic_id') or get_relationship_topic_id(),
-        )
+    async def _user_and_scope_for_job(self, job: dict[str, Any]) -> tuple[Any | None, InboundScope | None]:
+        try:
+            scope = job.get("_scope") or scope_from_job_row(job)
+        except ValueError as exc:
+            logger.warning("skipping scheduled job %s with missing scope identity: %s", job.get("id"), exc)
+            return None, None
+        job["_scope"] = scope
+        user = await fetch_user_by_id(self.pool, scope.user_id)
+        return user, scope
 
     async def handle_checkin(self, job: dict[str, Any]) -> None:
-        user = await fetch_user_by_id(self.pool, job["user_id"])
+        user, scope = await self._user_and_scope_for_job(job)
+        if user is None or scope is None:
+            return
         context = job.get("context") or {}
         metadata = {"kind": "checkin", "context": {**context, "delayed": bool(job.get("delayed"))}}
-        if await _can_send_freeform(self.pool, user, self.settings):
-            await run_agentic_job(user, metadata)
-            return
-        await send_outbound(
-            self.pool,
-            user,
-            f"Hi {user.name}, been a bit -- anything on your mind? Just message me back when you're ready.",
-            template_fallback=TemplateCall("checkin_nudge", [user.name]),
-            bot_id=job.get('bot_id', 'mediator'),
-            topic_id=job.get('topic_id') or get_relationship_topic_id(),
-        )
+        await run_agentic_job(user, metadata, scope=scope)
 
     async def handle_watch_item_due(self, job: dict[str, Any]) -> None:
-        user = await fetch_user_by_id(self.pool, job["user_id"])
+        user, scope = await self._user_and_scope_for_job(job)
+        if user is None or scope is None:
+            return
         context = job.get("context") or {}
-        watch_item = await self._fetch_watch_item(context.get("watch_item_id"), topic_id=job.get('topic_id') or get_relationship_topic_id())
+        watch_item = await self._fetch_watch_item(context.get("watch_item_id"), topic_id=scope.topic_id)
         metadata = {
             "kind": "watch_item_due",
             "context": {
@@ -132,20 +107,12 @@ class ScheduledJobHandlers:
                 "delayed": bool(job.get("delayed")),
             },
         }
-        if await _can_send_freeform(self.pool, user, self.settings):
-            await run_agentic_job(user, metadata)
-            return
-        await schedule_checkin_job(
-            self.pool,
-            user.id,
-            scheduled_for=_utc_now() + timedelta(minutes=15),
-            context={"kind": "watch_item_due", **metadata["context"]},
-            bot_id=job.get('bot_id', 'mediator'),
-            topic_id=job.get('topic_id') or get_relationship_topic_id(),
-        )
+        await run_agentic_job(user, metadata, scope=scope)
 
     async def handle_oob_review(self, job: dict[str, Any]) -> None:
-        user = await fetch_user_by_id(self.pool, job["user_id"])
+        user, scope = await self._user_and_scope_for_job(job)
+        if user is None or scope is None:
+            return
         context = job.get("context") or {}
         await run_agentic_job(
             user,
@@ -153,15 +120,18 @@ class ScheduledJobHandlers:
                 "kind": "oob_review",
                 "context": {**context, "delayed": bool(job.get("delayed"))},
             },
+            scope=scope,
         )
 
     async def handle_heartbeat(self, job: dict[str, Any]) -> None:
         logger.info("scheduled heartbeat fired job_id=%s scheduled_for=%s", job["id"], job["scheduled_for"],
-                     extra={"bot_id": job.get("bot_id", "mediator"), "topic_id": job.get("topic_id")})
+                     extra={"bot_id": job.get("bot_id"), "topic_id": job.get("topic_id")})
         await purge_expired_deletions(self.pool)
 
     async def handle_deferred_turn(self, job: dict[str, Any]) -> None:
-        user = await fetch_user_by_id(self.pool, job["user_id"])
+        user, scope = await self._user_and_scope_for_job(job)
+        if user is None or scope is None:
+            return
         context = job.get("context") or {}
         message_ids = [UUID(value) for value in context.get("triggering_message_ids", [])]
         if message_ids:
@@ -169,10 +139,12 @@ class ScheduledJobHandlers:
                 "UPDATE messages SET processing_state='raw' WHERE id = ANY($1)",
                 message_ids,
             )
-            await run_agentic_turn(message_ids, user)
+            await run_agentic_turn(message_ids, user, scope=scope)
 
     async def handle_scheduled_task(self, job: dict[str, Any]) -> None:
-        user = await fetch_user_by_id(self.pool, job["user_id"])
+        user, scope = await self._user_and_scope_for_job(job)
+        if user is None or scope is None:
+            return
         context = dict(job.get("context") or {})
         await run_agentic_job(
             user,
@@ -180,6 +152,7 @@ class ScheduledJobHandlers:
                 "kind": "scheduled_task",
                 "context": _scheduled_task_trigger_context(job, context),
             },
+            scope=scope,
         )
 
         current = await self.pool.fetchrow(
@@ -209,8 +182,6 @@ class ScheduledJobHandlers:
             "source_job_id": str(job["id"]),
         }
         next_context.pop("scheduled_task_control", None)
-        reschedule_bot_id = job.get('bot_id', 'mediator')
-        reschedule_topic_id = job.get('topic_id') or get_relationship_topic_id()
         await self.pool.fetchrow(
             """
             INSERT INTO scheduled_jobs (user_id, job_type, scheduled_for, context, status, bot_id, topic_id)
@@ -227,54 +198,10 @@ class ScheduledJobHandlers:
             current["user_id"],
             next_scheduled_for,
             next_context,
-            reschedule_bot_id,
-            reschedule_topic_id,
+            scope.bot_id,
+            scope.topic_id,
             str(job["id"]),
         )
-
-    async def _fetch_user_schedule(self, user_id: UUID) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
-            """
-            SELECT id, name, phone, timezone, weekly_summary_enabled,
-                   weekly_summary_day, weekly_summary_time
-            FROM users
-            WHERE id = $1
-            """,
-            user_id,
-        )
-        if row is None:
-            raise ValueError(f"user not found for scheduled job: {user_id}")
-        # §16.3 wi 7: prefer user_identities address; fall back to phone column.
-        from app.services.user_identity import resolve_user_address
-        resolved = await resolve_user_address(self.pool, user_id)
-        record = dict(row)
-        if resolved is not None:
-            record["phone"] = resolved
-        return record
-
-    async def _weekly_summary_counts(self, user_id: UUID, *, topic_id: UUID) -> dict[str, int]:
-        row = await self.pool.fetchrow(
-            f"""
-            SELECT
-                (
-                    SELECT COUNT(*)
-                    FROM messages
-                    WHERE deleted_at IS NULL
-                      AND sent_at >= now() - interval '7 days'
-                      AND (sender_id = $1 OR recipient_id = $1)
-                )::int AS conversation_count,
-                (
-                    (SELECT COUNT(*) FROM themes t {join_artifact_topics('t', '$3')} WHERE t.status = 'active')
-                    +
-                    (SELECT COUNT(*) FROM watch_items w {join_artifact_topics('w', '$4')} WHERE w.owner_user_id = $2 AND w.status = 'open')
-                )::int AS ongoing_count
-            """,
-            user_id, user_id, topic_id, topic_id,
-        )
-        return {
-            "conversation_count": int(row["conversation_count"] or 0),
-            "ongoing_count": int(row["ongoing_count"] or 0),
-        }
 
     async def _fetch_watch_item(self, watch_item_id: Any, *, topic_id: UUID) -> dict[str, Any] | None:
         if watch_item_id is None:
@@ -291,10 +218,6 @@ class ScheduledJobHandlers:
         return dict(row) if row is not None else None
 
 
-def _user_from_row(row: dict[str, Any]) -> User:
-    return User(id=row["id"], name=row["name"], phone=row["phone"], timezone=row["timezone"])
-
-
 def _scheduled_task_trigger_context(job: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     return {
         **context,
@@ -309,80 +232,69 @@ def _scheduled_task_trigger_context(job: dict[str, Any], context: dict[str, Any]
     }
 
 
-async def _can_send_freeform(pool: Any, user: User, settings: Settings | None = None) -> bool:
-    settings = settings or get_settings()
-    if settings.messaging_provider.strip().lower() == "discord":
-        return True
-    return await _within_whatsapp_window(pool, user)
-
-
-async def _within_whatsapp_window(pool: Any, user: User) -> bool:
-    last_inbound_at = await pool.fetchval(
-        "SELECT MAX(sent_at) FROM messages WHERE sender_id=$1 AND direction='inbound'",
-        user.id,
-    )
-    if last_inbound_at is None:
-        return False
-    if last_inbound_at.tzinfo is None:
-        last_inbound_at = last_inbound_at.replace(tzinfo=UTC)
-    return _utc_now() - last_inbound_at < timedelta(hours=24)
-
-
-async def schedule_next_weekly_summary(
+async def seed_weekly_reflection_for_user(
     pool: Any,
-    user_row: dict[str, Any],
+    user_id: UUID,
     *,
+    timezone: str | None = None,
     now: datetime | None = None,
-    source_job_id: Any | None = None,
-    bot_id: str = 'mediator',
+    bot_id: str,
     topic_id: UUID | None = None,
 ) -> Any | None:
-    if not user_row.get("weekly_summary_enabled", True):
-        return None
+    """Insert a Sunday weekly_reflection scheduled_task for this user if none is pending."""
     if topic_id is None:
         topic_id = get_relationship_topic_id()
-    scheduled_for = next_weekly_summary_at(user_row, now=now)
+    if timezone is None:
+        timezone = await pool.fetchval("SELECT timezone FROM users WHERE id=$1", user_id)
+    existing = await pool.fetchval(
+        """
+        SELECT 1 FROM scheduled_jobs
+        WHERE user_id = $1
+          AND job_type = 'scheduled_task'
+          AND status = 'pending'
+          AND context->>'kind' = 'weekly_reflection'
+        LIMIT 1
+        """,
+        user_id,
+    )
+    if existing:
+        return None
+    scheduled_for = next_weekly_reflection_at(timezone, now=now)
+    context = {
+        "kind": "weekly_reflection",
+        "task_id": str(uuid4()),
+        "brief": WEEKLY_REFLECTION_BRIEF,
+        "recurrence": {
+            "version": 1,
+            "type": "weekly",
+            "interval": 1,
+            "weekdays": [6],  # Sunday in Python weekday() convention
+        },
+    }
     return await pool.fetchrow(
         """
         INSERT INTO scheduled_jobs (user_id, job_type, scheduled_for, context, status, bot_id, topic_id)
-        SELECT $1, 'weekly_summary', $2, $3::jsonb, 'pending', $4, $5
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM scheduled_jobs
-            WHERE user_id = $1
-              AND job_type = 'weekly_summary'
-              AND status = 'pending'
-              AND ($6::uuid IS NULL OR id <> $6::uuid)
-        )
+        VALUES ($1, 'scheduled_task', $2, $3::jsonb, 'pending', $4, $5)
         RETURNING id, scheduled_for
         """,
-        user_row["id"],
+        user_id,
         scheduled_for,
-        {"source_job_id": str(source_job_id) if source_job_id is not None else None},
+        context,
         bot_id,
         topic_id,
-        source_job_id,
     )
 
 
 async def seed_weekly_reflections(pool: Any, *, now: datetime | None = None) -> list[Any]:
-    rows = await pool.fetch(
-        """
-        SELECT id, name, phone, timezone, weekly_summary_enabled,
-               weekly_summary_day, weekly_summary_time
-        FROM users
-        WHERE weekly_summary_enabled = true
-        """
-    )
-    # §16.3 wi 7: resolve each user's canonical address via user_identities.
-    from app.services.user_identity import resolve_user_address
+    settings = get_settings()
+    rows = await pool.fetch("SELECT id, timezone FROM users")
     inserted = []
     for row in rows:
-        record = dict(row)
-        resolved = await resolve_user_address(pool, record["id"])
-        if resolved is not None:
-            record["phone"] = resolved
-        inserted.append(await schedule_next_weekly_summary(pool, record, now=now))
+        result = await seed_weekly_reflection_for_user(
+            pool, row["id"], timezone=row["timezone"], now=now, bot_id=settings.default_seed_bot_id
+        )
+        if result is not None:
+            inserted.append(result)
     return inserted
 
 
@@ -392,7 +304,7 @@ async def schedule_checkin_job(
     *,
     scheduled_for: datetime,
     context: dict[str, Any],
-    bot_id: str = 'mediator',
+    bot_id: str,
     topic_id: UUID | None = None,
 ) -> Any:
     _old, row = await schedule_checkin_record(

@@ -13,6 +13,7 @@ from resident_chat_runtime.diagnostics import build_startup_diagnostics
 from resident_chat_runtime.env import EnvSetting, read_env_settings
 
 from app.config import Settings, get_settings
+from app.bots.ids import MEDIATOR_BOT_ID
 from app.db import db_lifespan
 from app.models.user import User
 from app.routers import admin, health, whatsapp as whatsapp_router
@@ -23,6 +24,7 @@ from app.services.pacer import DiscordPacer, PacedSendKind, PacingDecision
 from app.services.recovery import recover_on_startup, run_recovery_forever
 from app.services.scheduled_job_handlers import ScheduledJobHandlers, seed_weekly_reflections
 from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
+from app.services.scope import InboundScope
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +117,8 @@ async def _run_paced_agentic_turn(
     user: User,
     decision: PacingDecision,
     *,
+    scope: InboundScope,
     pacer: DiscordPacer | None = None,
-    bot_id: str = "mediator",
 ) -> None:
     before_paced_send = None
     thinking_typing_stop: asyncio.Event | None = None
@@ -134,7 +136,7 @@ async def _run_paced_agentic_turn(
 
     if pacer is not None and decision.signal_snapshot.get("source") == "live":
         try:
-            channel_id = await discord.get_dm_channel_id(user.phone, bot_id=bot_id)
+            channel_id = await discord.get_dm_channel_id(user.phone, bot_id=scope.bot_id)
             thinking_typing_stop = asyncio.Event()
             thinking_typing_task = asyncio.create_task(
                 pacer.perform_thinking_typing_until_stopped(user, channel_id, thinking_typing_stop)
@@ -152,7 +154,7 @@ async def _run_paced_agentic_turn(
             nonlocal channel_id
             await stop_thinking_typing()
             if channel_id is None:
-                channel_id = await discord.get_dm_channel_id(user.phone, bot_id=bot_id)
+                channel_id = await discord.get_dm_channel_id(user.phone, bot_id=scope.bot_id)
             await pacer.perform_send_typing(user, channel_id, answer_text, send_kind=send_kind, part_index=part_index)
 
     try:
@@ -161,12 +163,13 @@ async def _run_paced_agentic_turn(
             user,
             pacing_context=decision,
             before_paced_send=before_paced_send,
+            scope=scope,
         )
     finally:
         await stop_thinking_typing()
 
 
-async def _send_paced_reaction(pool: Any, message_ids: list[UUID], user: User, decision: PacingDecision, *, bot_id: str) -> None:
+async def _send_paced_reaction(pool: Any, message_ids: list[UUID], user: User, decision: PacingDecision, *, scope: InboundScope) -> None:
     if not message_ids or not decision.reaction:
         return
     row = await pool.fetchrow(
@@ -180,7 +183,7 @@ async def _send_paced_reaction(pool: Any, message_ids: list[UUID], user: User, d
     )
     if row is None or not row.get("whatsapp_message_id"):
         return
-    await discord.add_reaction(user.phone, row["whatsapp_message_id"], decision.reaction, bot_id=bot_id)
+    await discord.add_reaction(user.phone, row["whatsapp_message_id"], decision.reaction, bot_id=scope.bot_id)
 
 
 def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> tuple[BurstCoalescer, DiscordPacer | None]:
@@ -194,32 +197,41 @@ def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> t
     if _discord_provider_enabled(settings) and settings.discord_pacing_enabled:
         pacer = DiscordPacer(pool, settings=settings, send_typing=_make_send_typing(bot_id))
 
-        async def on_live_typing(user: User, stop_event: asyncio.Event) -> None:
-            channel_id = await discord.get_dm_channel_id(user.phone, bot_id=bot_id)
+        async def on_live_typing(user: User, stop_event: asyncio.Event, *, scope: InboundScope) -> None:
+            channel_id = await discord.get_dm_channel_id(user.phone, bot_id=scope.bot_id)
             await pacer.perform_initial_typing_until_stopped(user, channel_id, stop_event)
 
-        async def on_paced_reaction(message_ids: list[UUID], user: User, decision: PacingDecision) -> None:
-            await _send_paced_reaction(pool, message_ids, user, decision, bot_id=bot_id)
+        async def on_paced_reaction(message_ids: list[UUID], user: User, decision: PacingDecision, *, scope: InboundScope) -> None:
+            await _send_paced_reaction(pool, message_ids, user, decision, scope=scope)
+
+        async def on_burst_complete(message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
+            await run_agentic_turn(message_ids, user, scope=scope)
+
+        async def on_paced_answer(message_ids: list[UUID], user: User, decision: PacingDecision, *, scope: InboundScope) -> None:
+            await _run_paced_agentic_turn(
+                message_ids,
+                user,
+                decision,
+                pacer=pacer,
+                scope=scope,
+            )
 
         return (
             BurstCoalescer(
-                on_burst_complete=run_agentic_turn,
+                on_burst_complete=on_burst_complete,
                 debounce_seconds=settings.discord_pacing_burst_window_s,
                 max_seconds=max(settings.discord_pacing_burst_window_s, settings.discord_pacing_max_wait_s),
                 pacer=pacer,
-                on_paced_answer=lambda message_ids, user, decision: _run_paced_agentic_turn(
-                    message_ids,
-                    user,
-                    decision,
-                    pacer=pacer,
-                    bot_id=bot_id,
-                ),
+                on_paced_answer=on_paced_answer,
                 on_paced_reaction=on_paced_reaction,
                 on_live_typing=on_live_typing,
             ),
             pacer,
         )
-    return BurstCoalescer(on_burst_complete=run_agentic_turn), None
+    async def on_burst_complete(message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
+        await run_agentic_turn(message_ids, user, scope=scope)
+
+    return BurstCoalescer(on_burst_complete=on_burst_complete), None
 
 
 def _install_bot_coalescer(
@@ -273,7 +285,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.coalescers: dict[str, BurstCoalescer] = {}
         app.state.discord_pacers: dict[str, DiscordPacer] = {}
         if not _discord_provider_enabled(settings):
-            _install_bot_coalescer(app, pool, settings, bot_id="mediator")
+            _install_bot_coalescer(app, pool, settings, bot_id=MEDIATOR_BOT_ID)
         app.state.background_tasks: set[asyncio.Task] = set()
         if settings.messaging_provider.strip().lower() == "discord":
             # ── Per-bot gateway registration ──────────────────────────

@@ -63,6 +63,8 @@ def _make_ctx(fake_pool, *, partner=None, bot_id="tante_rosi", user_phone="15555
         before_paced_send=None,
         sent_message_parts=[],
         bot_id=bot_id,
+        user_id=user_id,
+        primary_topic_id=uuid4(),
     )
 
 

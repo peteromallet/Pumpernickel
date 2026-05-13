@@ -15,13 +15,6 @@ class TemplateCall:
 
 
 TEMPLATES = {
-    "weekly_summary": {
-        "param_count": 3,
-        "copy": (
-            "Hi {{1}}, this week we had {{2}} conversations and touched on "
-            "{{3}} ongoing things. Want to talk through anything? Just ask."
-        ),
-    },
     "escalation": {
         "param_count": 3,
         "copy": (
@@ -30,10 +23,6 @@ TEMPLATES = {
             "share specifics -- when you're ready, please reach out to them "
             "directly. {{3}}"
         ),
-    },
-    "checkin_nudge": {
-        "param_count": 1,
-        "copy": "Hi {{1}}, been a bit -- anything on your mind? Just message me back when you're ready.",
     },
     "pause_confirmation": {
         "param_count": 2,

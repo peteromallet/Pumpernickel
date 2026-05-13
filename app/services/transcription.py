@@ -5,6 +5,7 @@ by whatsapp_message_id, so two attempts happen inside this background task.
 """
 
 import asyncio
+import inspect
 from typing import Any
 
 import httpx
@@ -14,9 +15,9 @@ from app.models.user import User
 from app.services import storage, system_state, whatsapp
 from app.services.crypto import encrypt_value
 from app.services.messaging import send_outbound
+from app.services.scope import InboundScope
 from app.services.spend import is_under_cap, record_llm_cost
 from app.services.templates import TemplateCall
-from app.bots.registry import get_relationship_topic_id
 
 
 async def _groq_transcribe(audio_bytes: bytes, content_type: str) -> str:
@@ -39,6 +40,8 @@ async def handle_voice(
     user: User,
     coalescer: Any | None = None,
     duration: int | None = None,
+    *,
+    scope: InboundScope,
 ) -> None:
     paused = await system_state.is_paused(pool)
     should_enqueue = coalescer is not None and not paused
@@ -74,8 +77,7 @@ async def handle_voice(
                 user,
                 "I can't transcribe right now -- can you send it as text?",
                 template_fallback=TemplateCall("media_failure", [user.name, "voice"]),
-                bot_id='mediator',
-                topic_id=get_relationship_topic_id(),
+                scope=scope,
             )
         return
 
@@ -91,7 +93,7 @@ async def handle_voice(
             )
             await record_llm_cost(pool, "transcription", 0.001)
             if should_enqueue:
-                await coalescer.add(user.id, message_id, user, source="media", bot_id='mediator')
+                await _coalescer_add(coalescer, user, message_id, scope=scope)
             return
         except Exception as exc:
             last_error = exc
@@ -115,6 +117,16 @@ async def handle_voice(
             user,
             "I couldn't process your last voice note -- could you try resending or describe it in text?",
             template_fallback=TemplateCall("media_failure", [user.name, "voice"]),
-            bot_id='mediator',
-            topic_id=get_relationship_topic_id(),
+            scope=scope,
         )
+
+
+async def _coalescer_add(coalescer: Any, user: User, message_id: Any, *, scope: InboundScope) -> None:
+    kwargs: dict[str, Any] = {"source": "media"}
+    try:
+        parameters = inspect.signature(coalescer.add).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "scope" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        kwargs["scope"] = scope
+    await coalescer.add(user.id, message_id, user, **kwargs)

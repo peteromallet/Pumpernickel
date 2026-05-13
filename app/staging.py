@@ -31,6 +31,9 @@ class _State:
 
 
 async def _replay(pool: Any, prompt_version: str, since: str, user_id: str) -> None:
+    # TODO(InboundScope): staging replay is still mediator/dyad-specific: it
+    # hardcodes the relationship topic and calls partner_of. Thread a real
+    # bot/topic scope before using this to verify solo bots like Tante Rosi.
     user = await fetch_user_by_id(pool, UUID(user_id))
     partner = await partner_of(pool, user)
     rows = await pool.fetch(

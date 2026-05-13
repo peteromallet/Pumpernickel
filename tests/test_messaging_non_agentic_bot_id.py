@@ -1,7 +1,8 @@
-"""Verify bot_id threading through send_outbound.
+"""Verify scope threading through non-agentic outbound paths.
 
-Non-agentic callers (transcription, vision, scheduled_job_handlers) pass
-bot_id='mediator' as a string literal.  Agentic callers source from ctx.bot_id.
+Non-agentic callers that still run outside an agentic turn must not lose bot
+identity. Media handlers and direct outbound calls must route through
+InboundScope instead of loose bot_id/topic_id kwargs.
 """
 
 from __future__ import annotations
@@ -12,14 +13,14 @@ from app.services.messaging import send_outbound
 
 
 # ---------------------------------------------------------------------------
-# send_outbound bot_id threading
+# send_outbound scope threading
 # ---------------------------------------------------------------------------
 
-class TestSendOutboundBotIDThreading:
-    """Verify send_outbound accepts and forwards bot_id."""
+class TestSendOutboundScopeThreading:
+    """Verify send_outbound requires scope and forwards scope.bot_id."""
 
-    async def test_send_outbound_with_bot_id_mediator(self, fake_pool, monkeypatch):
-        """send_outbound with bot_id='mediator' calls discord.send_text with bot_id='mediator'."""
+    async def test_send_outbound_with_mediator_scope(self, fake_pool, monkeypatch, make_inbound_scope):
+        """send_outbound with mediator scope calls discord.send_text with bot_id='mediator'."""
         monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
         from app.config import get_settings
         get_settings.cache_clear()
@@ -34,35 +35,31 @@ class TestSendOutboundBotIDThreading:
         monkeypatch.setattr("app.services.discord.send_text", fake_send_text)
 
         try:
-            await send_outbound(fake_pool, user, "hello", bot_id="mediator")
+            await send_outbound(fake_pool, user, "hello", scope=make_inbound_scope(user, bot_id="mediator"))
             assert discord_called == [(user.phone, "hello", "mediator")]
         finally:
             get_settings.cache_clear()
 
-    async def test_send_outbound_without_bot_id_defaults_none(self, fake_pool, monkeypatch):
-        """send_outbound without bot_id passes None (legacy compat)."""
+    async def test_send_outbound_without_scope_rejected(self, fake_pool, monkeypatch):
+        """send_outbound without scope is no longer a valid public API."""
         monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
         from app.config import get_settings
         get_settings.cache_clear()
 
         user = _make_user(fake_pool)
-        discord_called = []
-
-        async def fake_send_text(to, body, *, send_typing_indicator=True, bot_id):
-            discord_called.append((to, body, bot_id))
-            return {"messages": [{"id": "discord-out"}]}
-
-        monkeypatch.setattr("app.services.discord.send_text", fake_send_text)
 
         try:
-            await send_outbound(fake_pool, user, "hello")
-            # bot_id defaults to None; note that in production callers always pass bot_id='mediator'
-            assert discord_called == [(user.phone, "hello", None)]
+            try:
+                await send_outbound(fake_pool, user, "hello")
+            except TypeError as exc:
+                assert "scope" in str(exc)
+            else:
+                raise AssertionError("send_outbound accepted missing scope")
         finally:
             get_settings.cache_clear()
 
-    async def test_send_outbound_bot_id_tante_rosi(self, fake_pool, monkeypatch):
-        """send_outbound with bot_id='tante_rosi' forwards correctly."""
+    async def test_send_outbound_with_tante_rosi_scope(self, fake_pool, monkeypatch, make_inbound_scope):
+        """send_outbound with tante_rosi scope forwards correctly."""
         monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
         from app.config import get_settings
         get_settings.cache_clear()
@@ -77,7 +74,7 @@ class TestSendOutboundBotIDThreading:
         monkeypatch.setattr("app.services.discord.send_text", fake_send_text)
 
         try:
-            await send_outbound(fake_pool, user, "hello", bot_id="tante_rosi")
+            await send_outbound(fake_pool, user, "hello", scope=make_inbound_scope(user, bot_id="tante_rosi"))
             assert discord_called == [(user.phone, "hello", "tante_rosi")]
         finally:
             get_settings.cache_clear()
@@ -88,27 +85,24 @@ class TestSendOutboundBotIDThreading:
 # ---------------------------------------------------------------------------
 
 class TestNonAgenticCallers:
-    """Confirm non-agentic callers pass bot_id='mediator' as a string literal."""
+    """Confirm non-agentic callers preserve bot identity."""
 
     def test_transcription_passes_mediator(self):
-        """transcription.py passes bot_id='mediator' to send_outbound."""
+        """transcription.py routes media failures by scope when scope exists."""
         import ast
         content = open("app/services/transcription.py").read()
         tree = ast.parse(content)
-        # Find send_outbound calls with bot_id='mediator'
         found = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 for kw in getattr(node, 'keywords', []):
-                    if (getattr(kw, 'arg', None) == 'bot_id'
-                            and isinstance(kw.value, ast.Constant)
-                            and kw.value.value == 'mediator'):
+                    if getattr(kw, 'arg', None) == 'scope' and isinstance(kw.value, ast.Name) and kw.value.id == "scope":
                         found = True
                         break
-        assert found, "transcription.py should have at least one send_outbound(..., bot_id='mediator')"
+        assert found, "transcription.py should route send_outbound through scope"
 
     def test_vision_passes_mediator(self):
-        """vision.py passes bot_id='mediator' to send_outbound."""
+        """vision.py routes media failures by scope when scope exists."""
         import ast
         content = open("app/services/vision.py").read()
         tree = ast.parse(content)
@@ -116,36 +110,38 @@ class TestNonAgenticCallers:
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 for kw in getattr(node, 'keywords', []):
-                    if (getattr(kw, 'arg', None) == 'bot_id'
-                            and isinstance(kw.value, ast.Constant)
-                            and kw.value.value == 'mediator'):
+                    if getattr(kw, 'arg', None) == 'scope' and isinstance(kw.value, ast.Name) and kw.value.id == "scope":
                         found = True
                         break
-        assert found, "vision.py should have at least one send_outbound(..., bot_id='mediator')"
+        assert found, "vision.py should route send_outbound through scope"
 
-    def test_scheduled_job_handlers_passes_mediator(self):
-        """scheduled_job_handlers.py defaults bot_id to 'mediator'."""
+    def test_scheduled_job_handlers_has_no_mediator_bot_id_default(self):
+        """scheduled_job_handlers.py must not fabricate mediator bot ids."""
         import ast
         content = open("app/services/scheduled_job_handlers.py").read()
         tree = ast.parse(content)
-        found = False
         for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.arg)
+                and node.arg == "bot_id"
+                and getattr(node, "annotation", None) is not None
+            ):
+                continue
             if isinstance(node, ast.Call):
                 for kw in getattr(node, 'keywords', []):
                     if getattr(kw, 'arg', None) == 'bot_id':
-                        # Accept either literal 'mediator' or job.get('bot_id','mediator')
-                        if (isinstance(kw.value, ast.Constant) and kw.value.value == 'mediator'):
-                            found = True
-                            break
-                        # Also accept Call expressions that default to 'mediator'
-                        elif isinstance(kw.value, ast.Call):
-                            # Look for 'mediator' anywhere in the call as a default
-                            for subnode in ast.walk(kw.value):
-                                if (isinstance(subnode, ast.Constant)
-                                        and subnode.value == 'mediator'):
-                                    found = True
-                                    break
-        assert found, "scheduled_job_handlers.py should have at least one bot_id defaulting to 'mediator'"
+                        assert not (
+                            isinstance(kw.value, ast.Constant)
+                            and kw.value.value == "mediator"
+                        )
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "get" and len(node.args) >= 2:
+                    assert not (
+                        isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == "bot_id"
+                        and isinstance(node.args[1], ast.Constant)
+                        and node.args[1].value == "mediator"
+                    )
 
 
 # ---------------------------------------------------------------------------

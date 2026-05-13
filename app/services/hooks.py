@@ -5,7 +5,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
 
-from app.bots.registry import get_relationship_topic_id
 from app.services.oob_check import check_oob_with_policy
 from app.services import system_state
 
@@ -19,13 +18,17 @@ async def _default_check_oob(
     content: str,
     recipient_id: UUID,
     protected_owner_ids: list[UUID] | None = None,
+    *,
+    bot_id: str | None = None,
+    topic_id: UUID,
 ) -> dict[str, Any]:
+    del bot_id
     result = await check_oob_with_policy(
         pool,
         content=content,
         recipient_id=recipient_id,
         protected_owner_ids=protected_owner_ids,
-        topic_id=get_relationship_topic_id(),
+        topic_id=topic_id,
     )
     return result.model_dump(mode="json")
 

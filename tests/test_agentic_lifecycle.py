@@ -1,17 +1,47 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
+from app.bots.registry import BOT_SPECS, get_relationship_topic_id
+from app.bots.tante_rosi import build_tante_rosi_spec
 from app.models.user import User
 from app.config import get_settings
 from app.services import agentic
+from app.services.scope import InboundScope
 from app.services.tools.registry import call_tool
 from app.services.pacer import PacingDecision
 
 pytestmark = pytest.mark.anyio
+
+
+def _scope_for(user: User) -> InboundScope:
+    topic_id = get_relationship_topic_id()
+    assert topic_id is not None
+    return InboundScope(
+        bot_id="mediator",
+        transport="whatsapp",
+        user_id=user.id,
+        topic_id=topic_id,
+        channel_id=None,
+        binding_id=uuid4(),
+        dyad_id=uuid4(),
+    )
+
+
+def _rosi_scope_for(user: User) -> InboundScope:
+    return InboundScope(
+        bot_id="tante_rosi",
+        transport="discord",
+        user_id=user.id,
+        topic_id=uuid4(),
+        channel_id="rosi-dm-channel",
+        binding_id=uuid4(),
+        dyad_id=None,
+    )
 
 
 def test_clean_user_facing_text_removes_internal_process_leaks():
@@ -123,6 +153,7 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
         return "", [{"role": "assistant", "content": "schedule note"}], 0
 
     async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        assert "scope" in kwargs
         out_id = uuid4()
         pool.messages[out_id] = {
             "id": out_id,
@@ -141,7 +172,7 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(fake_pool.bot_turns.values()))
     assert "## You" in turn["prompt_snapshot"]
@@ -176,6 +207,105 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
     ]
     assert [seq for seq, _, _, _ in audit_events] == list(range(1, len(audit_events) + 1))
     assert not any("I hear you" in str(metadata) for _, _, _, metadata in audit_events)
+
+
+async def test_run_agentic_uses_scope_for_rosi_identity(fake_pool, app_env, monkeypatch):
+    rosi_spec = build_tante_rosi_spec()
+    monkeypatch.setitem(BOT_SPECS, rosi_spec.bot_id, rosi_spec)
+    user = User(uuid4(), "Alice", "456", "UTC")
+    fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "Ich bin schwanger.",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "discord-rosi-in",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+    }
+    scope = _rosi_scope_for(user)
+    seen_contexts = []
+    sent = []
+
+    async def forbidden_partner_of(*args, **kwargs):
+        raise AssertionError("solo Rosi turn must not resolve a dyadic partner")
+
+    async def fake_build_hot_context_solo(pool, ctx_user, message_ids, trigger_metadata, **kwargs):
+        assert kwargs["bot_id"] == "tante_rosi"
+        assert kwargs["primary_topic_id"] == scope.topic_id
+        return SimpleNamespace(
+            trigger_metadata=trigger_metadata or {"kind": "inbound"},
+            recent_messages=[],
+            open_watch_items=[],
+            active_oob=[],
+        )
+
+    async def fake_run_step(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages, **kwargs):
+        seen_contexts.append(ctx)
+        assert ctx.bot_id == "tante_rosi"
+        assert ctx.bot_spec.bot_id == "tante_rosi"
+        assert ctx.participants_shape == "solo"
+        assert ctx.primary_topic_id == scope.topic_id
+        assert ctx.channel_id == scope.channel_id
+        assert ctx.binding_id == scope.binding_id
+        assert ctx.dyad_id is None
+        assert ctx.user_id == user.id
+        assert ctx.transport == "discord"
+        if ctx.current_step == "respond":
+            return "Hallo, ich bin Tante Rosi.", [], 0
+        return "", [], 0
+
+    async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        assert kwargs["scope"].bot_id == "tante_rosi"
+        assert kwargs["scope"].topic_id == scope.topic_id
+        sent.append((recipient, content, kwargs))
+        out_id = uuid4()
+        pool.messages[out_id] = {
+            "id": out_id,
+            "direction": "outbound",
+            "sender_id": None,
+            "recipient_id": recipient.id,
+            "content": content,
+            "processing_state": "processed",
+            "sent_at": datetime.now(UTC),
+            "charge": None,
+            "deleted_at": None,
+            "bot_id": kwargs["scope"].bot_id,
+            "topic_id": kwargs["scope"].topic_id,
+        }
+        return out_id
+
+    monkeypatch.setattr(agentic, "partner_of", forbidden_partner_of)
+    monkeypatch.setattr(agentic, "build_hot_context_solo", fake_build_hot_context_solo)
+    monkeypatch.setattr(agentic, "render_hot_context_solo", lambda hot_context: "Rosi hot context")
+    monkeypatch.setattr(agentic, "run_step", fake_run_step)
+    monkeypatch.setattr(agentic, "send_outbound", fake_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user, scope=scope)
+
+    assert seen_contexts
+    turn = next(iter(fake_pool.bot_turns.values()))
+    assert turn["bot_id"] == "tante_rosi"
+    assert turn["topic_id"] == scope.topic_id
+    opened = next(event for event in fake_pool.turn_audit_events if event["event_type"] == "turn.opened")
+    assert opened["metadata"]["bot_id"] == "tante_rosi"
+    assert opened["metadata"]["topic_id"] == str(scope.topic_id)
+    assert opened["metadata"]["channel_id"] == scope.channel_id
+    assert opened["metadata"]["binding_id"] == str(scope.binding_id)
+    assert opened["metadata"]["dyad_id"] is None
+    assert sent[0][2]["scope"].bot_id == "tante_rosi"
+    assert sent[0][2]["scope"].topic_id == scope.topic_id
 
 
 async def test_run_agentic_turn_with_metadata_seeds_compact_pacing_context(fake_pool, app_env, monkeypatch):
@@ -231,6 +361,7 @@ async def test_run_agentic_turn_with_metadata_seeds_compact_pacing_context(fake_
         return "", [], 0
 
     async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        assert "scope" in kwargs
         assert kwargs["protected_owner_ids"] == [user.id, partner.id]
         assert kwargs["send_typing_indicator"] is False
         out_id = uuid4()
@@ -251,7 +382,7 @@ async def test_run_agentic_turn_with_metadata_seeds_compact_pacing_context(fake_
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn_with_metadata([message_id], user, pacing_context=decision)
+    await agentic.run_agentic_turn_with_metadata([message_id], user, scope=_scope_for(user), pacing_context=decision)
 
     assert seed_contents
     assert '"pacing"' in seed_contents[0]
@@ -298,6 +429,7 @@ async def test_run_agentic_job_propagates_scheduled_task_trigger_metadata(fake_p
         fake_pool,
         user,
         trigger_metadata,
+        scope=_scope_for(user),
         prompt_version="v1",
     )
 
@@ -341,6 +473,7 @@ async def test_run_agentic_records_outbound_before_record_step(fake_pool, app_en
         return "", [], 0
 
     async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        assert "scope" in kwargs
         out_id = uuid4()
         pool.messages[out_id] = {
             "id": out_id,
@@ -359,7 +492,7 @@ async def test_run_agentic_records_outbound_before_record_step(fake_pool, app_en
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
 
 async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives(fake_pool, app_env, monkeypatch):
@@ -413,6 +546,7 @@ async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives(fake_poo
         return "", [], 0
 
     async def fake_send(*args, **kwargs):
+        assert "scope" in kwargs
         sent.append(args)
         return uuid4()
 
@@ -420,7 +554,7 @@ async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives(fake_poo
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(fake_pool.bot_turns.values()))
     assert sent == []
@@ -484,6 +618,7 @@ async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives_before_t
         return "", [], 0
 
     async def fake_send(*args, **kwargs):
+        assert "scope" in kwargs
         sent.append(args)
         return uuid4()
 
@@ -491,7 +626,7 @@ async def test_run_agentic_skips_final_reply_when_newer_inbound_arrives_before_t
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(fake_pool.bot_turns.values()))
     assert sent == []
@@ -578,7 +713,7 @@ async def test_run_agentic_send_message_part_is_visible_to_record_step(fake_pool
     monkeypatch.setattr("app.services.discord.send_text", fake_discord_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(fake_pool.bot_turns.values()))
     assert sent == [
@@ -663,7 +798,7 @@ async def test_run_agentic_suppresses_residual_text_after_send_message_part(fake
     monkeypatch.setattr("app.services.discord.send_text", fake_discord_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(fake_pool.bot_turns.values()))
     assert sent == [
@@ -731,7 +866,7 @@ async def test_run_agentic_can_react_instead_of_replying(fake_pool, app_env, mon
     monkeypatch.setattr(agentic.discord, "add_reaction", fake_add_reaction)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(fake_pool.bot_turns.values()))
     assert reactions == [("456", "discord-in-1", "👋")]
@@ -783,6 +918,7 @@ async def test_run_agentic_can_react_alongside_reply(fake_pool, app_env, monkeyp
         reactions.append((phone, discord_message_id, emoji))
 
     async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        assert "scope" in kwargs
         out_id = uuid4()
         sent.append(content)
         pool.messages[out_id] = {
@@ -803,7 +939,7 @@ async def test_run_agentic_can_react_alongside_reply(fake_pool, app_env, monkeyp
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     turn = next(iter(fake_pool.bot_turns.values()))
     assert reactions == [("456", "discord-in-2", "❤️")]
@@ -843,6 +979,7 @@ async def test_text_cap_defers_original_messages_and_sends_notice_once(fake_pool
         raise agentic.SpendCapExceeded("cap")
 
     async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        assert "scope" in kwargs
         out_id = uuid4()
         sent.append(content)
         pool.messages[out_id] = {
@@ -862,8 +999,8 @@ async def test_text_cap_defers_original_messages_and_sends_notice_once(fake_pool
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
     agentic.set_pool(fake_pool)
 
-    await agentic.run_agentic_turn([message_id], user)
-    await agentic.run_agentic_turn([message_id], user)
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
+    await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     assert fake_pool.messages[message_id]["processing_state"] == "deferred"
     assert sent == ["I'm running into limits today, will catch up tomorrow."]

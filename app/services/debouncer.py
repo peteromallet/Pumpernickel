@@ -1,4 +1,4 @@
-"""Per-user inbound burst coalescing with dual-key (user_id, bot_id) transition."""
+"""Per-user inbound burst coalescing with explicit inbound scope."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -10,6 +10,7 @@ from resident_chat_runtime.coalescing import AsyncBurstCoalescer, BurstBatch
 
 from app.models.user import User
 from app.services.pacer import PacingDecision
+from app.services.scope import InboundScope
 
 # Composite key type: (user_id, bot_id).  bot_id is always required.
 CompositeKey = tuple[UUID, str]
@@ -20,21 +21,21 @@ class _Burst:
     message_ids: list[UUID]
     user: User
     first_seen_at: float
-    bot_id: str
+    scope: InboundScope
     source: str = "live"
 
 
 class BurstCoalescer:
     def __init__(
         self,
-        on_burst_complete: Callable[[list[UUID], User], Awaitable[None]],
+        on_burst_complete: Callable[..., Awaitable[None]],
         *,
         debounce_seconds: float = 10.0,
         max_seconds: float = 30.0,
         pacer: Any | None = None,
-        on_paced_answer: Callable[[list[UUID], User, PacingDecision], Awaitable[None]] | None = None,
-        on_paced_reaction: Callable[[list[UUID], User, PacingDecision], Awaitable[None]] | None = None,
-        on_live_typing: Callable[[User, asyncio.Event], Awaitable[None]] | None = None,
+        on_paced_answer: Callable[..., Awaitable[None]] | None = None,
+        on_paced_reaction: Callable[..., Awaitable[None]] | None = None,
+        on_live_typing: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self.on_burst_complete = on_burst_complete
         self.on_paced_answer = on_paced_answer
@@ -54,8 +55,8 @@ class BurstCoalescer:
             max_delay=max_seconds,
         )
 
-    async def add(self, user_id: UUID, message_id: UUID, user: User, *, source: str = "live", bot_id: str) -> None:
-        key: CompositeKey = (user_id, bot_id)
+    async def add(self, user_id: UUID, message_id: UUID, user: User, *, scope: InboundScope, source: str = "live") -> None:
+        key: CompositeKey = (user_id, scope.bot_id)
         loop = asyncio.get_running_loop()
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -64,19 +65,20 @@ class BurstCoalescer:
                 wait_task.cancel()
             burst = self._bursts.get(key)
             if burst is None:
-                burst = _Burst(message_ids=[], user=user, first_seen_at=loop.time(), source=source, bot_id=bot_id)
+                burst = _Burst(message_ids=[], user=user, first_seen_at=loop.time(), source=source, scope=scope)
                 self._bursts[key] = burst
             burst.message_ids.append(message_id)
             burst.user = user
+            burst.scope = scope
             burst.source = self._merge_source(burst.source, source)
             if source == "live" and self.on_live_typing is not None and user_id not in self._live_typing_tasks:
                 stop_event = asyncio.Event()
                 self._live_typing_stops[user_id] = stop_event
-                self._live_typing_tasks[user_id] = asyncio.create_task(self.on_live_typing(user, stop_event))
+                self._live_typing_tasks[user_id] = asyncio.create_task(self.on_live_typing(user, stop_event, scope=scope))
             await self._coalescer.submit(user_id, message_id)
 
-    async def add_burst(self, user_id: UUID, message_ids: list[UUID], user: User) -> None:
-        await self.on_burst_complete(message_ids, user)
+    async def add_burst(self, user_id: UUID, message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
+        await self.on_burst_complete(message_ids, user, scope=scope)
 
     async def _fire(self, user_id: UUID) -> None:
         await self._coalescer.flush(user_id)
@@ -117,30 +119,29 @@ class BurstCoalescer:
         message_ids = list(burst.message_ids)
         await self._stop_live_typing(user_id)
         if self.pacer is None:
-            # Runtime contract: on_burst_complete(triggering_message_ids: list[UUID], user).
-            await self.on_burst_complete(message_ids, burst.user)
+            await self.on_burst_complete(message_ids, burst.user, scope=burst.scope)
             return
 
         decision = await self.pacer.decide_and_record(burst.user, message_ids, source=burst.source)
         if decision.action == "wait":
             # Re-store under the burst's original composite key so the wait-task
             # can find it later.
-            rekey: CompositeKey = (user_id, burst.bot_id)
+            rekey: CompositeKey = (user_id, burst.scope.bot_id)
             self._bursts[rekey] = burst
             self._wait_tasks[rekey] = asyncio.create_task(self._fire_after_wait(rekey, max(0.0, decision.wait_s)))
             return
         if decision.action == "answer":
-            await self._call_paced_answer(message_ids, burst.user, decision)
+            await self._call_paced_answer(message_ids, burst.user, decision, scope=burst.scope)
             return
         if decision.action == "react":
             if self.on_paced_reaction is not None:
-                await self.on_paced_reaction(message_ids, burst.user, decision)
+                await self.on_paced_reaction(message_ids, burst.user, decision, scope=burst.scope)
             await self._mark_processed(message_ids)
             return
         if decision.action == "silence":
             await self._mark_processed(message_ids)
             return
-        await self._call_paced_answer(message_ids, burst.user, decision)
+        await self._call_paced_answer(message_ids, burst.user, decision, scope=burst.scope)
 
     async def _stop_live_typing(self, user_id: UUID) -> None:
         stop_event = self._live_typing_stops.pop(user_id, None)
@@ -166,11 +167,11 @@ class BurstCoalescer:
         except asyncio.CancelledError:
             raise
 
-    async def _call_paced_answer(self, message_ids: list[UUID], user: User, decision: PacingDecision) -> None:
+    async def _call_paced_answer(self, message_ids: list[UUID], user: User, decision: PacingDecision, *, scope: InboundScope | None = None) -> None:
         if self.on_paced_answer is not None:
-            await self.on_paced_answer(message_ids, user, decision)
+            await self.on_paced_answer(message_ids, user, decision, scope=scope)
             return
-        await self.on_burst_complete(message_ids, user)
+        await self.on_burst_complete(message_ids, user, scope=scope)
 
     async def _mark_processed(self, message_ids: list[UUID]) -> None:
         pool = getattr(self.pacer, "pool", None)

@@ -7,6 +7,7 @@ from uuid import UUID
 from datetime import datetime
 
 from app.models.user import User
+from app.services.scope import InboundScope
 from app.services.turn_plan import TurnPlan, TurnStep, make_turn_plan
 
 PacedSendKind = Literal["final", "incremental_first", "incremental_next"]
@@ -22,6 +23,8 @@ class TurnContext:
     triggering_message_ids: list[UUID]
     # Sprint 1 new optional fields (all default to None, no call-site changes required)
     bot_id: str | None = None
+    transport: str | None = None
+    user_id: UUID | None = None
     bot_spec: Any | None = None
     binding_id: UUID | None = None
     participants_shape: str | None = None
@@ -47,19 +50,85 @@ class TurnContext:
     hot_context_rendered: str | None = None
     trigger_metadata: dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_scope(
+        cls,
+        *,
+        scope: InboundScope,
+        turn_id: UUID,
+        pool: Any,
+        user: User,
+        partner: User | None,
+        triggering_message_ids: list[UUID],
+        bot_spec: Any | None = None,
+        participants_shape: str | None = None,
+        primary_topic_slug: str | None = None,
+        read_scopes: Any | None = None,
+        write_scopes: Any | None = None,
+        cross_topic_policy: str | None = None,
+        **overrides: Any,
+    ) -> "TurnContext":
+        """Build a TurnContext from the canonical inbound identity scope."""
+        return cls(
+            turn_id=turn_id,
+            pool=pool,
+            user=user,
+            partner=partner,
+            triggering_message_ids=triggering_message_ids,
+            bot_id=scope.bot_id,
+            transport=scope.transport,
+            user_id=scope.user_id,
+            bot_spec=bot_spec,
+            binding_id=scope.binding_id,
+            dyad_id=scope.dyad_id,
+            participants_shape=participants_shape,
+            primary_topic_id=scope.topic_id,
+            primary_topic_slug=primary_topic_slug,
+            channel_id=scope.channel_id,
+            read_scopes=read_scopes,
+            write_scopes=write_scopes,
+            cross_topic_policy=cross_topic_policy,
+            **overrides,
+        )
+
 
 def obs_fields(ctx_or_scope) -> dict[str, Any]:
     """Return structured logging extra dict with scope fields (None values filtered).
 
-    Accepts TurnContext, ResolvedScope, or any object with bot_id/topic_id/
-    channel_id/binding_id attributes.
+    Accepts TurnContext, InboundScope, or any object with matching identity
+    attributes.
     """
     result: dict[str, Any] = {}
-    for field in ("bot_id", "topic_id", "channel_id", "binding_id"):
+    for field in (
+        "bot_id",
+        "transport",
+        "user_id",
+        "topic_id",
+        "primary_topic_id",
+        "channel_id",
+        "binding_id",
+        "dyad_id",
+    ):
         val = getattr(ctx_or_scope, field, None)
         if val is not None:
-            result[field] = str(val) if not isinstance(val, (str, type(None))) else val
+            key = "topic_id" if field == "primary_topic_id" and "topic_id" not in result else field
+            result[key] = str(val) if not isinstance(val, (str, type(None))) else val
     return result
+
+
+def scope_from_turn_context(ctx: TurnContext) -> InboundScope:
+    """Rebuild the inbound identity scope carried by a TurnContext."""
+    if ctx.bot_id is None or ctx.user_id is None or ctx.primary_topic_id is None:
+        raise ValueError("TurnContext is missing bot_id, user_id, or primary_topic_id")
+    return InboundScope(
+        bot_id=ctx.bot_id,
+        transport=ctx.transport,  # type: ignore[arg-type]
+        user_id=ctx.user_id,
+        topic_id=ctx.primary_topic_id,
+        channel_id=ctx.channel_id,
+        binding_id=ctx.binding_id,
+        dyad_id=ctx.dyad_id,
+    )
 
 
 async def partner_of(pool: Any, user: User) -> User:

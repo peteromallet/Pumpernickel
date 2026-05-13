@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.config import get_settings
 from app.models.user import User
 from app.services.cross_thread_privacy import (
     bridge_candidate_visible_to_target,
@@ -33,6 +34,7 @@ from tool_schemas import (
     CreateBridgeCandidateInput,
     CreateThemeInput,
     CrossThreadSharingDefault,
+    EditOutboundMessageInput,
     EscalateToPartnerInput,
     ExplainMediaItemInput,
     FeedbackSentiment,
@@ -146,7 +148,18 @@ def tool_ctx(fake_pool):
     fake_pool.users[partner.id] = {"id": partner.id, "name": partner.name, "phone": partner.phone, "timezone": partner.timezone}
     turn_id = uuid4()
     fake_pool.bot_turns[turn_id] = {"id": turn_id, "reasoning": "", "completed_at": None, "failure_reason": None}
-    return TurnContext(turn_id, fake_pool, user, partner, [uuid4()], current_step="record")
+    return TurnContext(
+        turn_id,
+        fake_pool,
+        user,
+        partner,
+        [uuid4()],
+        current_step="record",
+        bot_id="mediator",
+        user_id=user.id,
+        primary_topic_id=uuid4(),
+        dyad_id=uuid4(),
+    )
 
 
 def _seed_memory(pool, about_user_id):
@@ -647,7 +660,9 @@ def _distillation_revise_call(ctx):
 async def test_every_write_tool_inserts_tool_call(tool_ctx, monkeypatch, tool_name, call_factory):
     sent = []
 
-    async def fake_send(pool, recipient, content, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, bot_id=None, topic_id=None):
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, scope):
+        assert scope.bot_id == tool_ctx.bot_id
+        assert scope.topic_id == tool_ctx.primary_topic_id
         sent.append((recipient, content, template_fallback, bot_turn_id, protected_owner_ids))
         return uuid4()
 
@@ -963,12 +978,14 @@ async def test_bridge_candidate_create_list_update_and_send(tool_ctx, monkeypatc
 
     sent = []
     sent_message_id = uuid4()
+    oob_contexts = []
 
-    async def fake_oob(pool, content, recipient_id, protected_owner_ids=None):
+    async def fake_oob(pool, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id):
+        oob_contexts.append((bot_id, topic_id))
         return {"verdict": "ok", "reason": "ok", "suggested_rewrite": None, "checker_failed": False}
 
-    async def fake_send(pool, recipient, content, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, bot_id=None, topic_id=None):
-        sent.append((recipient.id, content, protected_owner_ids))
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, scope):
+        sent.append((recipient.id, content, protected_owner_ids, scope.bot_id, scope.topic_id))
         return sent_message_id
 
     monkeypatch.setattr(write_tools, "_call_oob_hook", fake_oob)
@@ -981,7 +998,35 @@ async def test_bridge_candidate_create_list_update_and_send(tool_ctx, monkeypatc
 
     assert result.candidate.status == "sent"
     assert result.candidate.sent_message_id == sent_message_id
-    assert sent == [(tool_ctx.partner.id, "Maya can talk after dinner.", [tool_ctx.user.id, tool_ctx.partner.id])]
+    assert sent == [
+        (
+            tool_ctx.partner.id,
+            "Maya can talk after dinner.",
+            [tool_ctx.user.id, tool_ctx.partner.id],
+            tool_ctx.bot_id,
+            tool_ctx.primary_topic_id,
+        )
+    ]
+    assert oob_contexts == [(tool_ctx.bot_id, tool_ctx.primary_topic_id)]
+
+
+async def test_edit_outbound_message_requires_ctx_identity_before_oob(tool_ctx, app_env, monkeypatch):
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    get_settings.cache_clear()
+    message_id = _seed_message(tool_ctx.pool, tool_ctx.user.id, tool_ctx.partner.id, direction="outbound", content="old")
+    tool_ctx.pool.messages[message_id]["whatsapp_message_id"] = "discord-outbound-1"
+    ctx_without_bot = replace(tool_ctx, bot_id=None)
+
+    async def fail_oob(*args, **kwargs):
+        raise AssertionError("_call_oob_hook should not run without ctx.bot_id")
+
+    monkeypatch.setattr(write_tools, "_call_oob_hook", fail_oob)
+
+    with pytest.raises(ValueError, match="missing bot_id"):
+        await write_tools.edit_outbound_message(
+            ctx_without_bot,
+            EditOutboundMessageInput(message_id=message_id, content="new", reason="identity regression"),
+        )
 
 
 async def test_bridge_candidate_send_rejects_non_ready_and_blocks_on_oob(tool_ctx, monkeypatch):
@@ -1020,7 +1065,7 @@ async def test_bridge_candidate_send_rejects_non_ready_and_blocks_on_oob(tool_ct
     )
     sent = []
 
-    async def fake_oob(pool, content, recipient_id, protected_owner_ids=None):
+    async def fake_oob(pool, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id):
         return {"verdict": "block", "reason": "too revealing", "suggested_rewrite": None, "checker_failed": False}
 
     async def fake_send(*args, **kwargs):
@@ -1284,6 +1329,8 @@ async def test_schedule_checkin_rejects_naive_datetime(tool_ctx):
             tool_ctx.user.id,
             scheduled_for=datetime.now(),
             context={"about_what": "naive"},
+            bot_id=tool_ctx.bot_id,
+            topic_id=tool_ctx.primary_topic_id,
         )
 
 
@@ -1296,6 +1343,8 @@ async def test_schedule_checkin_job_shares_utc_supersede_path(tool_ctx):
         tool_ctx.user.id,
         scheduled_for=datetime(2026, 5, 1, 9, 30, tzinfo=plus_two),
         context={"about_what": "handler path", "reason": "shared helper"},
+        bot_id=tool_ctx.bot_id,
+        topic_id=tool_ctx.primary_topic_id,
     )
 
     assert tool_ctx.pool.scheduled_jobs[old_id]["status"] == "superseded"
@@ -1340,7 +1389,7 @@ async def test_oob_review_at_schedules_review_job(tool_ctx):
 async def test_check_oob_read_tool_passes_protected_owner_ids(tool_ctx, monkeypatch):
     calls = []
 
-    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None):
+    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None, topic_id=None):
         calls.append((pool, content, recipient_id, protected_owner_ids, sender_intent))
         return {
             "verdict": "ok",
@@ -1370,7 +1419,7 @@ async def test_check_oob_read_tool_passes_protected_owner_ids(tool_ctx, monkeypa
 async def test_consult_phase_check_oob_inherits_protected_owner_ids(tool_ctx, monkeypatch):
     calls = []
 
-    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None):
+    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None, topic_id=None):
         calls.append(protected_owner_ids)
         return {
             "verdict": "ok",
@@ -1398,7 +1447,7 @@ async def test_consult_phase_check_oob_unions_partial_protected_owner_ids(tool_c
     calls = []
     extra_owner_id = uuid4()
 
-    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None):
+    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None, topic_id=None):
         calls.append(protected_owner_ids)
         return {
             "verdict": "ok",
@@ -1429,7 +1478,7 @@ async def test_consult_phase_check_oob_unions_partial_protected_owner_ids(tool_c
 async def test_read_phase_check_oob_does_not_inject_protected_owner_ids(tool_ctx, monkeypatch):
     calls = []
 
-    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None):
+    async def fake_check_oob_with_policy(pool, *, content, recipient_id, protected_owner_ids=None, sender_intent=None, topic_id=None):
         calls.append(protected_owner_ids)
         return {
             "verdict": "ok",
@@ -1471,7 +1520,9 @@ async def test_escalate_to_partner_passes_dyad_protected_owner_ids(tool_ctx, mon
     sent = []
     tool_ctx.trigger_charge = "crisis"
 
-    async def fake_send(pool, recipient, content, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, bot_id=None, topic_id=None):
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, scope):
+        assert scope.bot_id == tool_ctx.bot_id
+        assert scope.topic_id == tool_ctx.primary_topic_id
         sent.append((recipient, content, template_fallback, bot_turn_id, protected_owner_ids))
         return uuid4()
 
@@ -1598,7 +1649,9 @@ async def test_call_tool_validation_error_is_typed(tool_ctx):
 async def test_escalation_gate_rejects_before_outbound_and_allows_crisis(tool_ctx, monkeypatch):
     sent = []
 
-    async def fake_send(pool, recipient, content, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, bot_id=None, topic_id=None):
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, scope):
+        assert scope.bot_id == tool_ctx.bot_id
+        assert scope.topic_id == tool_ctx.primary_topic_id
         sent.append((recipient, content, template_fallback, bot_turn_id, protected_owner_ids))
         return uuid4()
 
@@ -1659,7 +1712,9 @@ async def test_escalation_gate_rejects_before_outbound_and_allows_crisis(tool_ct
 async def test_escalation_allows_trusted_explicit_partner_alert(tool_ctx, monkeypatch):
     sent = []
 
-    async def fake_send(pool, recipient, content, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, bot_id=None, topic_id=None):
+    async def fake_send(pool, recipient, content, *, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, scope):
+        assert scope.bot_id == tool_ctx.bot_id
+        assert scope.topic_id == tool_ctx.primary_topic_id
         sent.append((recipient, content, template_fallback, bot_turn_id, protected_owner_ids))
         return uuid4()
 

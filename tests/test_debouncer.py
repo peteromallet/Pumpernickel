@@ -7,6 +7,7 @@ import pytest
 from app.models.user import User
 from app.services.debouncer import BurstCoalescer
 from app.services.pacer import PacingDecision
+from tests._scope_helpers import make_resolved_scope
 
 
 pytestmark = pytest.mark.anyio
@@ -15,14 +16,15 @@ pytestmark = pytest.mark.anyio
 async def test_rapid_messages_coalesce_to_one_burst() -> None:
     calls = []
 
-    async def callback(message_ids, user):
+    async def callback(message_ids, user, *, scope):
         calls.append((message_ids, user))
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     coalescer = BurstCoalescer(callback, debounce_seconds=0.01, max_seconds=0.1)
     ids = [uuid4() for _ in range(5)]
     for message_id in ids:
-        await coalescer.add(user.id, message_id, user, bot_id="mediator")
+        await coalescer.add(user.id, message_id, user, scope=scope)
 
     await asyncio.sleep(0.03)
     assert calls == [(ids, user)]
@@ -31,18 +33,19 @@ async def test_rapid_messages_coalesce_to_one_burst() -> None:
 async def test_max_window_forces_second_burst() -> None:
     calls = []
 
-    async def callback(message_ids, user):
+    async def callback(message_ids, user, *, scope):
         calls.append(message_ids)
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     coalescer = BurstCoalescer(callback, debounce_seconds=0.04, max_seconds=0.06)
     first = [uuid4(), uuid4()]
-    await coalescer.add(user.id, first[0], user, bot_id="mediator")
+    await coalescer.add(user.id, first[0], user, scope=scope)
     await asyncio.sleep(0.03)
-    await coalescer.add(user.id, first[1], user, bot_id="mediator")
+    await coalescer.add(user.id, first[1], user, scope=scope)
     await asyncio.sleep(0.05)
     second = uuid4()
-    await coalescer.add(user.id, second, user, bot_id="mediator")
+    await coalescer.add(user.id, second, user, scope=scope)
     await asyncio.sleep(0.06)
 
     assert calls == [first, [second]]
@@ -51,14 +54,15 @@ async def test_max_window_forces_second_burst() -> None:
 async def test_add_burst_fires_callback_with_supplied_user() -> None:
     calls = []
 
-    async def callback(message_ids, user):
+    async def callback(message_ids, user, *, scope):
         calls.append((message_ids, user))
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     coalescer = BurstCoalescer(callback)
     ids = [uuid4(), uuid4()]
 
-    await coalescer.add_burst(user.id, ids, user)
+    await coalescer.add_burst(user.id, ids, user, scope=scope)
 
     assert calls == [(ids, user)]
 
@@ -101,13 +105,14 @@ async def test_paced_answer_callback_receives_decision_and_source() -> None:
     legacy_calls = []
     paced_calls = []
 
-    async def legacy_callback(message_ids, user):
+    async def legacy_callback(message_ids, user, *, scope):
         legacy_calls.append((message_ids, user))
 
-    async def paced_answer(message_ids, user, decision):
+    async def paced_answer(message_ids, user, decision, *, scope):
         paced_calls.append((message_ids, user, decision))
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     decision = PacingDecision(action="answer", reason="ready")
     pacer = _FakePacer([decision])
     coalescer = BurstCoalescer(
@@ -119,7 +124,7 @@ async def test_paced_answer_callback_receives_decision_and_source() -> None:
     )
     message_id = uuid4()
 
-    await coalescer.add(user.id, message_id, user, source="catch_up", bot_id="mediator")
+    await coalescer.add(user.id, message_id, user, source="catch_up", scope=scope)
     await asyncio.sleep(0.03)
 
     assert legacy_calls == []
@@ -131,18 +136,19 @@ async def test_live_typing_starts_during_coalescing_and_stops_before_answer() ->
     paced_calls = []
     typing_calls = []
 
-    async def legacy_callback(message_ids, user):
+    async def legacy_callback(message_ids, user, *, scope):
         raise AssertionError("paced answer callback should be used")
 
-    async def paced_answer(message_ids, user, decision):
+    async def paced_answer(message_ids, user, decision, *, scope):
         paced_calls.append((message_ids, user, decision))
 
-    async def live_typing(user, stop_event):
+    async def live_typing(user, stop_event, *, scope):
         typing_calls.append((user, stop_event.is_set()))
         await stop_event.wait()
         typing_calls.append((user, stop_event.is_set()))
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     decision = PacingDecision(action="answer", reason="ready")
     pacer = _FakePacer([decision])
     coalescer = BurstCoalescer(
@@ -155,7 +161,7 @@ async def test_live_typing_starts_during_coalescing_and_stops_before_answer() ->
     )
     message_id = uuid4()
 
-    await coalescer.add(user.id, message_id, user, source="live", bot_id="mediator")
+    await coalescer.add(user.id, message_id, user, source="live", scope=scope)
     await asyncio.sleep(0.03)
 
     assert typing_calls == [(user, False), (user, True)]
@@ -172,13 +178,14 @@ async def test_live_typing_starts_during_coalescing_and_stops_before_answer() ->
     ],
 )
 async def test_paced_burst_preserves_high_safety_source_semantics(sources: list[str], expected_source: str) -> None:
-    async def legacy_callback(message_ids, user):
+    async def legacy_callback(message_ids, user, *, scope):
         raise AssertionError("paced answer callback should be used")
 
-    async def paced_answer(message_ids, user, decision):
+    async def paced_answer(message_ids, user, decision, *, scope):
         return None
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     ids = [uuid4() for _ in sources]
     decision = PacingDecision(action="answer", reason="ready")
     pacer = _FakePacer([decision])
@@ -191,7 +198,7 @@ async def test_paced_burst_preserves_high_safety_source_semantics(sources: list[
     )
 
     for message_id, source in zip(ids, sources, strict=True):
-        await coalescer.add(user.id, message_id, user, source=source, bot_id="mediator")
+        await coalescer.add(user.id, message_id, user, source=source, scope=scope)
     await asyncio.sleep(0.03)
 
     assert pacer.calls == [(user, ids, expected_source)]
@@ -200,13 +207,14 @@ async def test_paced_burst_preserves_high_safety_source_semantics(sources: list[
 async def test_paced_wait_reschedules_without_losing_message_ids() -> None:
     paced_calls = []
 
-    async def callback(message_ids, user):
+    async def callback(message_ids, user, *, scope):
         paced_calls.append((message_ids, user))
 
-    async def paced_answer(message_ids, user, decision):
+    async def paced_answer(message_ids, user, decision, *, scope):
         paced_calls.append((message_ids, user, decision))
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     first_decision = PacingDecision(action="wait", reason="still composing", wait_s=0.01)
     second_decision = PacingDecision(action="answer", reason="ready")
     pacer = _FakePacer([first_decision, second_decision])
@@ -219,8 +227,8 @@ async def test_paced_wait_reschedules_without_losing_message_ids() -> None:
     )
     ids = [uuid4(), uuid4()]
 
-    await coalescer.add(user.id, ids[0], user, bot_id="mediator")
-    await coalescer.add(user.id, ids[1], user, bot_id="mediator")
+    await coalescer.add(user.id, ids[0], user, scope=scope)
+    await coalescer.add(user.id, ids[1], user, scope=scope)
     await asyncio.sleep(0.06)
 
     assert paced_calls == [(ids, user, second_decision)]
@@ -232,13 +240,14 @@ async def test_paced_react_or_silence_marks_processed_without_agentic_turn(fake_
     answer_calls = []
     reaction_calls = []
 
-    async def callback(message_ids, user):
+    async def callback(message_ids, user, *, scope):
         answer_calls.append((message_ids, user))
 
-    async def paced_reaction(message_ids, user, decision):
+    async def paced_reaction(message_ids, user, decision, *, scope):
         reaction_calls.append((message_ids, user, decision))
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
     fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
     message_id = _seed_raw_message(fake_pool, user)
     decision = PacingDecision(action=action, reason=action, reaction="👍" if action == "react" else None)
@@ -251,7 +260,7 @@ async def test_paced_react_or_silence_marks_processed_without_agentic_turn(fake_
         on_paced_reaction=paced_reaction,
     )
 
-    await coalescer.add(user.id, message_id, user, bot_id="mediator")
+    await coalescer.add(user.id, message_id, user, scope=scope)
     await asyncio.sleep(0.03)
 
     assert answer_calls == []
