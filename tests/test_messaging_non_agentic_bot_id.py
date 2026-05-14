@@ -16,13 +16,17 @@ from app.services.messaging import send_outbound
 # send_outbound scope threading
 # ---------------------------------------------------------------------------
 
+
 class TestSendOutboundScopeThreading:
     """Verify send_outbound requires scope and forwards scope.bot_id."""
 
-    async def test_send_outbound_with_mediator_scope(self, fake_pool, monkeypatch, make_inbound_scope):
+    async def test_send_outbound_with_mediator_scope(
+        self, fake_pool, monkeypatch, make_inbound_scope
+    ):
         """send_outbound with mediator scope calls discord.send_text with bot_id='mediator'."""
         monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
         from app.config import get_settings
+
         get_settings.cache_clear()
 
         user = _make_user(fake_pool)
@@ -35,7 +39,12 @@ class TestSendOutboundScopeThreading:
         monkeypatch.setattr("app.services.discord.send_text", fake_send_text)
 
         try:
-            await send_outbound(fake_pool, user, "hello", scope=make_inbound_scope(user, bot_id="mediator"))
+            await send_outbound(
+                fake_pool,
+                user,
+                "hello",
+                scope=make_inbound_scope(user, bot_id="mediator"),
+            )
             assert discord_called == [(user.phone, "hello", "mediator")]
         finally:
             get_settings.cache_clear()
@@ -44,6 +53,7 @@ class TestSendOutboundScopeThreading:
         """send_outbound without scope is no longer a valid public API."""
         monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
         from app.config import get_settings
+
         get_settings.cache_clear()
 
         user = _make_user(fake_pool)
@@ -58,10 +68,13 @@ class TestSendOutboundScopeThreading:
         finally:
             get_settings.cache_clear()
 
-    async def test_send_outbound_with_tante_rosi_scope(self, fake_pool, monkeypatch, make_inbound_scope):
+    async def test_send_outbound_with_tante_rosi_scope(
+        self, fake_pool, monkeypatch, make_inbound_scope
+    ):
         """send_outbound with tante_rosi scope forwards correctly."""
         monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
         from app.config import get_settings
+
         get_settings.cache_clear()
 
         user = _make_user(fake_pool)
@@ -74,7 +87,12 @@ class TestSendOutboundScopeThreading:
         monkeypatch.setattr("app.services.discord.send_text", fake_send_text)
 
         try:
-            await send_outbound(fake_pool, user, "hello", scope=make_inbound_scope(user, bot_id="tante_rosi"))
+            await send_outbound(
+                fake_pool,
+                user,
+                "hello",
+                scope=make_inbound_scope(user, bot_id="tante_rosi"),
+            )
             assert discord_called == [(user.phone, "hello", "tante_rosi")]
         finally:
             get_settings.cache_clear()
@@ -84,19 +102,25 @@ class TestSendOutboundScopeThreading:
 # Non-agentic caller verification
 # ---------------------------------------------------------------------------
 
+
 class TestNonAgenticCallers:
     """Confirm non-agentic callers preserve bot identity."""
 
     def test_transcription_passes_mediator(self):
         """transcription.py routes media failures by scope when scope exists."""
         import ast
+
         content = open("app/services/transcription.py").read()
         tree = ast.parse(content)
         found = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
-                for kw in getattr(node, 'keywords', []):
-                    if getattr(kw, 'arg', None) == 'scope' and isinstance(kw.value, ast.Name) and kw.value.id == "scope":
+                for kw in getattr(node, "keywords", []):
+                    if (
+                        getattr(kw, "arg", None) == "scope"
+                        and isinstance(kw.value, ast.Name)
+                        and kw.value.id == "scope"
+                    ):
                         found = True
                         break
         assert found, "transcription.py should route send_outbound through scope"
@@ -104,13 +128,18 @@ class TestNonAgenticCallers:
     def test_vision_passes_mediator(self):
         """vision.py routes media failures by scope when scope exists."""
         import ast
+
         content = open("app/services/vision.py").read()
         tree = ast.parse(content)
         found = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
-                for kw in getattr(node, 'keywords', []):
-                    if getattr(kw, 'arg', None) == 'scope' and isinstance(kw.value, ast.Name) and kw.value.id == "scope":
+                for kw in getattr(node, "keywords", []):
+                    if (
+                        getattr(kw, "arg", None) == "scope"
+                        and isinstance(kw.value, ast.Name)
+                        and kw.value.id == "scope"
+                    ):
                         found = True
                         break
         assert found, "vision.py should route send_outbound through scope"
@@ -118,6 +147,7 @@ class TestNonAgenticCallers:
     def test_scheduled_job_handlers_has_no_mediator_bot_id_default(self):
         """scheduled_job_handlers.py must not fabricate mediator bot ids."""
         import ast
+
         content = open("app/services/scheduled_job_handlers.py").read()
         tree = ast.parse(content)
         for node in ast.walk(tree):
@@ -128,8 +158,8 @@ class TestNonAgenticCallers:
             ):
                 continue
             if isinstance(node, ast.Call):
-                for kw in getattr(node, 'keywords', []):
-                    if getattr(kw, 'arg', None) == 'bot_id':
+                for kw in getattr(node, "keywords", []):
+                    if getattr(kw, "arg", None) == "bot_id":
                         assert not (
                             isinstance(kw.value, ast.Constant)
                             and kw.value.value == "mediator"
@@ -148,6 +178,7 @@ class TestNonAgenticCallers:
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _make_user(pool):
     """Insert a test user into the FakePool and return a User object."""
     from app.models.user import User
@@ -160,7 +191,6 @@ def _make_user(pool):
         "timezone": "UTC",
         "onboarding_state": "pending",
         "pacing_preferences": {},
-        "cross_thread_sharing_default": None,
         "pregnancy_edd": None,
         "pregnancy_dating_basis": None,
         "pregnancy_lmp_date": None,

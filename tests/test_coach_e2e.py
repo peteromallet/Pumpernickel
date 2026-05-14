@@ -182,7 +182,6 @@ def _seed_user(pool, name="Alice", phone="15555550100", timezone="UTC"):
         "timezone": timezone,
         "onboarding_state": "welcomed",
         "pacing_preferences": {},
-        "cross_thread_sharing_default": None,
     }
     return user
 
@@ -214,6 +213,7 @@ def _seed_message(pool, user, content, charge="routine"):
 # Test 1 — string-absence assertions on solo prompt
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def test_solo_prompt_has_no_dyad_strings():
     """Solo system prompt must not contain bridge, in-person,
     partner perspective, cross-thread sharing, or escalate_to_partner."""
@@ -244,6 +244,7 @@ def test_solo_prompt_has_no_dyad_strings():
 # Test 2 — coach allowlist assertion
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def test_create_bridge_candidate_not_in_coach_allowed():
     """create_bridge_candidate must NOT be in
     to_anthropic_tools(_step_allowed(coach_ctx))."""
@@ -261,6 +262,7 @@ def test_create_bridge_candidate_not_in_coach_allowed():
 # ═══════════════════════════════════════════════════════════════════════
 # Test 3 — idempotent onboarding
 # ═══════════════════════════════════════════════════════════════════════
+
 
 async def test_concurrent_onboarding_produces_exactly_one_row(app_env):
     """Call ensure_onboarding_state twice via asyncio.gather;
@@ -281,14 +283,15 @@ async def test_concurrent_onboarding_produces_exactly_one_row(app_env):
         for r in pool.user_bot_states
         if r["user_id"] == user_id and r["bot_id"] == bot_id
     ]
-    assert len(matching) == 1, (
-        f"Expected exactly 1 user_bot_state row, got {len(matching)}: {matching}"
-    )
+    assert (
+        len(matching) == 1
+    ), f"Expected exactly 1 user_bot_state row, got {len(matching)}: {matching}"
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Test 4 — end-to-end coach turn
 # ═══════════════════════════════════════════════════════════════════════
+
 
 async def test_coach_e2e_turn(app_env, monkeypatch):
     """Full coach turn:
@@ -389,7 +392,9 @@ async def test_coach_e2e_turn(app_env, monkeypatch):
     whatsapp_sent: list = []
     _patch_whatsapp(monkeypatch, whatsapp_sent)
 
-    async def ok_oob(pool_arg, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id):
+    async def ok_oob(
+        pool_arg, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id
+    ):
         assert bot_id == "coach"
         assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "rewrite": None}
@@ -417,17 +422,13 @@ async def test_coach_e2e_turn(app_env, monkeypatch):
     # (b) user-facing message was sent
     user_texts = [item[2] for item in whatsapp_sent if item[0] == "text"]
     assert len(user_texts) >= 1, f"No user-facing text sent: {whatsapp_sent}"
-    assert user_texts[0] == outbound_text, (
-        f"Wrong outbound text: {user_texts[0]}"
-    )
+    assert user_texts[0] == outbound_text, f"Wrong outbound text: {user_texts[0]}"
 
     # (c) ≥1 add_memory write scoped to about_user_id=user.id
     memories_for_user = [
         m for m in pool.memories.values() if m.get("about_user_id") == user.id
     ]
-    assert len(memories_for_user) >= 1, (
-        f"No memories found for user {user.id}"
-    )
+    assert len(memories_for_user) >= 1, f"No memories found for user {user.id}"
     memory_texts = [m["content"].lower() for m in memories_for_user]
     assert any(
         "career" in t or "considering" in t or "change" in t for t in memory_texts
@@ -446,6 +447,7 @@ async def test_coach_e2e_turn(app_env, monkeypatch):
         f"{[(e.get('metadata',{}).get('tool_name'), e.get('metadata',{}).get('reason')) for e in pool.turn_audit_events if e.get('event_type')=='tool.rejected']}"
     )
     reason = rejected[0]["metadata"].get("reason")
-    assert reason in ("step_not_allowed", "unknown_tool"), (
-        f"Expected step_not_allowed or unknown_tool, got: {reason}"
-    )
+    assert reason in (
+        "step_not_allowed",
+        "unknown_tool",
+    ), f"Expected step_not_allowed or unknown_tool, got: {reason}"

@@ -8,12 +8,17 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app.services.cross_thread_privacy import bridge_candidate_visible_to_target, normalize_sharing_default, raw_message_visibility
+from app.services.cross_thread_privacy import raw_message_visibility
+from app.services.cross_thread_privacy import bridge_candidate_visible_to_target
+from app.services.partner_sharing import get_partner_share
 from app.services.turn_context import TurnContext, scope_from_turn_context
 from app.config import get_settings
 from app.services.messaging import send_outbound_part
 from app.services.oob_check import check_oob_with_policy, summarize_partner_oob
-from app.services.text_safety import clean_user_facing_text, looks_like_internal_process_text
+from app.services.text_safety import (
+    clean_user_facing_text,
+    looks_like_internal_process_text,
+)
 from app.services.time_context import local_day_bounds_utc, temporal_reference
 from app.services.tools.scope_guard import check_read_scope
 from app.services.tools.common import (
@@ -88,6 +93,49 @@ _EMOJI_FALLBACK = {
 }
 
 
+async def _partner_share_by_user_for_current_bot(ctx: TurnContext) -> dict[Any, str]:
+    users_by_id = {ctx.user.id: ctx.user}
+    if ctx.partner is not None:
+        users_by_id[ctx.partner.id] = ctx.partner
+    if ctx.bot_id is None:
+        return {user_id: "unset" for user_id in users_by_id}
+    states: dict[Any, str] = {}
+    for user_id, user in users_by_id.items():
+        partner_share = await get_partner_share(
+            ctx.pool, user_id=user_id, bot_id=ctx.bot_id
+        )
+        if partner_share is None:
+            legacy_key = "cross_thread_" + "sharing" + "_default"
+            partner_share = getattr(user, legacy_key, None)
+        states[user_id] = partner_share or "unset"
+    return states
+
+
+def _message_in_current_scope(row: Any, ctx: TurnContext) -> bool:
+    return (
+        ctx.bot_id is not None
+        and ctx.primary_topic_id is not None
+        and value(row, "bot_id") == ctx.bot_id
+        and value(row, "topic_id") == ctx.primary_topic_id
+    )
+
+
+async def _partner_share_for_owner_bot(
+    ctx: TurnContext, cache: dict[tuple[Any, str], str], owner_id: Any, bot_id: Any
+) -> str:
+    if owner_id == ctx.user.id:
+        return "opt_in"
+    if bot_id is None:
+        return "unset"
+    cache_key = (owner_id, str(bot_id))
+    if cache_key not in cache:
+        cache[cache_key] = (
+            await get_partner_share(ctx.pool, user_id=owner_id, bot_id=str(bot_id))
+            or "unset"
+        )
+    return cache[cache_key]
+
+
 def _ctx_timezone(ctx: TurnContext, override: str | None = None) -> str:
     return override or ctx.user.timezone or "UTC"
 
@@ -96,7 +144,9 @@ def _ctx_now(ctx: TurnContext) -> datetime:
     return ctx.turn_started_at or datetime.now(UTC)
 
 
-def _time(value_: datetime | None, ctx: TurnContext, *, timezone: str | None = None) -> dict[str, str] | None:
+def _time(
+    value_: datetime | None, ctx: TurnContext, *, timezone: str | None = None
+) -> dict[str, str] | None:
     return temporal_reference(value_, _ctx_timezone(ctx, timezone), now=_ctx_now(ctx))
 
 
@@ -108,6 +158,7 @@ def _with_audit_event_times(events: list[dict], ctx: TurnContext) -> list[dict]:
             item["occurred_at_time"] = _time(item["occurred_at"], ctx)
         out.append(item)
     return out
+
 
 _EMOJI_QUERY_EXPANSIONS = {
     "support": {"help", "hand", "hands", "holding", "hug", "care", "heart", "buoy"},
@@ -132,7 +183,9 @@ def _emoji_terms(value: str) -> set[str]:
     return expanded
 
 
-def _emoji_score(query_terms: set[str], name: str, aliases: list[str], keywords: list[str]) -> int:
+def _emoji_score(
+    query_terms: set[str], name: str, aliases: list[str], keywords: list[str]
+) -> int:
     haystacks = [name, *aliases, *keywords]
     score = 0
     for term in query_terms:
@@ -183,7 +236,9 @@ async def _newer_inbound_exists(ctx: TurnContext) -> bool:
     )
 
 
-async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> SendMessagePartOutput:
+async def send_message_part(
+    ctx: TurnContext, args: SendMessagePartInput
+) -> SendMessagePartOutput:
     logger.info("read tool send_message_part turn_id=%s", ctx.turn_id)
     settings = get_settings()
     sent_parts = ctx.sent_message_parts
@@ -220,7 +275,10 @@ async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> Sen
         )
 
     content = args.content.strip()
-    if looks_like_internal_process_text(content) or clean_user_facing_text(content).strip() == "":
+    if (
+        looks_like_internal_process_text(content)
+        or clean_user_facing_text(content).strip() == ""
+    ):
         return SendMessagePartOutput(
             status="withheld",
             client_part_key=args.client_part_key,
@@ -230,8 +288,14 @@ async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> Sen
         )
     part_index = len(sent_parts) + 1
     part_key = f"{ctx.turn_id}:{part_index}"
-    paced_send_available = ctx.before_paced_send is not None and not ctx.send_typing_indicator
-    if sent_parts and settings.discord_multi_message_delay_s > 0 and not paced_send_available:
+    paced_send_available = (
+        ctx.before_paced_send is not None and not ctx.send_typing_indicator
+    )
+    if (
+        sent_parts
+        and settings.discord_multi_message_delay_s > 0
+        and not paced_send_available
+    ):
         await asyncio.sleep(settings.discord_multi_message_delay_s)
         if await _newer_inbound_exists(ctx):
             return SendMessagePartOutput(
@@ -245,7 +309,9 @@ async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> Sen
     if paced_send_available:
         send_kind = "incremental_first" if part_index == 1 else "incremental_next"
 
-        async def before_provider_send(text: str = content, kind: str = send_kind, index: int = part_index) -> None:
+        async def before_provider_send(
+            text: str = content, kind: str = send_kind, index: int = part_index
+        ) -> None:
             await ctx.before_paced_send(text, send_kind=kind, part_index=index)
             if await _newer_inbound_exists(ctx):
                 raise NewerInboundDuringPacedSend()
@@ -273,7 +339,11 @@ async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> Sen
             reason="a newer inbound message arrived before the next message part",
         )
     output = SendMessagePartOutput.model_validate(result)
-    if output.visible_to_user and output.message_id is not None and output.delivered_content:
+    if (
+        output.visible_to_user
+        and output.message_id is not None
+        and output.delivered_content
+    ):
         sent_parts.append(
             {
                 "message_id": output.message_id,
@@ -290,8 +360,12 @@ async def send_message_part(ctx: TurnContext, args: SendMessagePartInput) -> Sen
     return output
 
 
-async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> SearchMessagesOutput:
+async def search_messages(
+    ctx: TurnContext, args: SearchMessagesInput
+) -> SearchMessagesOutput:
     logger.info("read tool search_messages turn_id=%s", ctx.turn_id)
+    if ctx.bot_id is None or ctx.primary_topic_id is None:
+        return SearchMessagesOutput(hits=[], truncated=False)
     dyad_ids = {ctx.user.id, ctx.partner.id}
     if args.partner_user_id is not None and args.partner_user_id not in dyad_ids:
         return SearchMessagesOutput(hits=[], truncated=False)
@@ -302,7 +376,13 @@ async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> Search
         clauses.append(f"(sender_id = ${len(params)} OR recipient_id = ${len(params)})")
     else:
         params.append([ctx.user.id, ctx.partner.id])
-        clauses.append(f"(sender_id = ANY(${len(params)}::uuid[]) OR recipient_id = ANY(${len(params)}::uuid[]))")
+        clauses.append(
+            f"(sender_id = ANY(${len(params)}::uuid[]) OR recipient_id = ANY(${len(params)}::uuid[]))"
+        )
+    params.append(ctx.bot_id)
+    clauses.append(f"bot_id = ${len(params)}")
+    params.append(ctx.primary_topic_id)
+    clauses.append(f"topic_id = ${len(params)}")
     if args.text_contains:
         params.append(f"%{args.text_contains}%")
         clauses.append(
@@ -314,7 +394,9 @@ async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> Search
             )"""
         )
     if args.local_day is not None:
-        start, end = local_day_bounds_utc(args.local_day, _ctx_timezone(ctx, args.timezone), now=_ctx_now(ctx))
+        start, end = local_day_bounds_utc(
+            args.local_day, _ctx_timezone(ctx, args.timezone), now=_ctx_now(ctx)
+        )
         params.extend([start, end])
         clauses.append(f"sent_at >= ${len(params) - 1}")
         clauses.append(f"sent_at < ${len(params)}")
@@ -323,7 +405,7 @@ async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> Search
     params.append(args.limit)
     rows = await ctx.pool.fetch(
         f"""
-        SELECT id, sender_id, recipient_id, sent_at, content, media_type, media_analysis,
+        SELECT id, sender_id, recipient_id, sent_at, content, media_type, media_analysis, bot_id, topic_id,
                COALESCE(charge, 'routine') AS charge, direction
         FROM messages
         WHERE {' AND '.join(clauses)}
@@ -332,30 +414,33 @@ async def search_messages(ctx: TurnContext, args: SearchMessagesInput) -> Search
         """,
         *params,
     )
-    sharing_defaults = {
-        ctx.user.id: normalize_sharing_default(ctx.user.cross_thread_sharing_default),
-        ctx.partner.id: normalize_sharing_default(ctx.partner.cross_thread_sharing_default),
-    }
+    partner_share_by_user = await _partner_share_by_user_for_current_bot(ctx)
     hits = []
     for row in rows:
+        if not _message_in_current_scope(row, ctx):
+            continue
         owner_id = _message_thread_owner_id(row)
         if owner_id not in dyad_ids:
             continue
         if not raw_message_visibility(
             viewer_user_id=ctx.user.id,
             thread_owner_user_id=owner_id,
-            thread_owner_sharing_default=sharing_defaults.get(owner_id),
+            thread_owner_partner_share=partner_share_by_user.get(owner_id),
         ).visible:
             continue
         hits.append(message_hit(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)))
     return SearchMessagesOutput(hits=hits, truncated=len(rows) == args.limit)
 
 
-async def list_bridge_candidates(ctx: TurnContext, args: ListBridgeCandidatesInput) -> ListBridgeCandidatesOutput:
+async def list_bridge_candidates(
+    ctx: TurnContext, args: ListBridgeCandidatesInput
+) -> ListBridgeCandidatesOutput:
     logger.info("read tool list_bridge_candidates turn_id=%s", ctx.turn_id)
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
-        return ListBridgeCandidatesOutput(is_error=True, error=_err, candidates=[], truncated=False)
+        return ListBridgeCandidatesOutput(
+            is_error=True, error=_err, candidates=[], truncated=False
+        )
     rows = await ctx.pool.fetch(
         """
         SELECT id, source_user_id, target_user_id, kind, status, sensitivity, partner_path,
@@ -386,12 +471,17 @@ async def list_bridge_candidates(ctx: TurnContext, args: ListBridgeCandidatesInp
     )
     candidates: list[BridgeCandidate] = []
     for row in rows:
-        if row["target_user_id"] == ctx.user.id and row["source_user_id"] != ctx.user.id:
+        if (
+            row["target_user_id"] == ctx.user.id
+            and row["source_user_id"] != ctx.user.id
+        ):
             if not bridge_candidate_visible_to_target(row, target_user_id=ctx.user.id):
                 continue
             row = {**dict(row), "internal_note": None}
         candidates.append(_bridge_candidate(row))
-    return ListBridgeCandidatesOutput(candidates=candidates, truncated=len(rows) == args.limit)
+    return ListBridgeCandidatesOutput(
+        candidates=candidates, truncated=len(rows) == args.limit
+    )
 
 
 def _bridge_candidate(row: Any) -> BridgeCandidate:
@@ -403,7 +493,9 @@ def _bridge_candidate(row: Any) -> BridgeCandidate:
     return BridgeCandidate.model_validate(data)
 
 
-async def search_emojis(ctx: TurnContext, args: SearchEmojisInput) -> SearchEmojisOutput:
+async def search_emojis(
+    ctx: TurnContext, args: SearchEmojisInput
+) -> SearchEmojisOutput:
     logger.info("read tool search_emojis turn_id=%s", ctx.turn_id)
     query_terms = _emoji_terms(args.query)
     candidates: list[EmojiSearchHit] = []
@@ -415,8 +507,13 @@ async def search_emojis(ctx: TurnContext, args: SearchEmojisInput) -> SearchEmoj
         used_full_dataset = True
         for symbol, data in emoji_pkg.EMOJI_DATA.items():
             raw_name = str(data.get("en") or "").strip(":").replace("_", " ")
-            aliases = [str(item).strip(":").replace("_", " ") for item in data.get("alias", []) or []]
-            keywords = [str(item).replace("_", " ") for item in data.get("variant", []) or []]
+            aliases = [
+                str(item).strip(":").replace("_", " ")
+                for item in data.get("alias", []) or []
+            ]
+            keywords = [
+                str(item).replace("_", " ") for item in data.get("variant", []) or []
+            ]
             if symbol in _EMOJI_FALLBACK:
                 fallback_name, fallback_keywords = _EMOJI_FALLBACK[symbol]
                 aliases.append(fallback_name)
@@ -446,16 +543,22 @@ async def search_emojis(ctx: TurnContext, args: SearchEmojisInput) -> SearchEmoj
                 )
 
     candidates.sort(key=lambda hit: (-hit.score, len(hit.name), hit.name, hit.emoji))
-    return SearchEmojisOutput(query=args.query, hits=candidates[: args.limit], used_full_dataset=used_full_dataset)
+    return SearchEmojisOutput(
+        query=args.query,
+        hits=candidates[: args.limit],
+        used_full_dataset=used_full_dataset,
+    )
 
 
-async def recent_activity(ctx: TurnContext, args: RecentActivityInput) -> RecentActivityOutput:
+async def recent_activity(
+    ctx: TurnContext, args: RecentActivityInput
+) -> RecentActivityOutput:
     logger.info("read tool recent_activity turn_id=%s", ctx.turn_id)
     end = _ctx_now(ctx)
     start = end - timedelta(days=args.days)
     rows = await ctx.pool.fetch(
         """
-        SELECT u.id AS user_id, u.name AS user_name, u.cross_thread_sharing_default, COUNT(m.id) AS message_count,
+        SELECT u.id AS user_id, u.name AS user_name, COUNT(m.id) AS message_count,
                MAX(m.sent_at) AS last_message_at,
                (ARRAY_AGG(m.content ORDER BY m.sent_at DESC))[1] AS latest_content
         FROM users u
@@ -464,33 +567,38 @@ async def recent_activity(ctx: TurnContext, args: RecentActivityInput) -> Recent
          AND m.sent_at >= $1
          AND m.sent_at <= $2
          AND m.deleted_at IS NULL
-        WHERE u.id = ANY($3::uuid[])
-        GROUP BY u.id, u.name, u.cross_thread_sharing_default
+         AND m.bot_id = $3
+         AND m.topic_id = $4
+        WHERE u.id = ANY($5::uuid[])
+        GROUP BY u.id, u.name
         ORDER BY last_message_at DESC NULLS LAST, u.name ASC
         """,
         start,
         end,
+        ctx.bot_id,
+        ctx.primary_topic_id,
         [ctx.user.id, ctx.partner.id],
     )
     threads: list[ThreadDigest] = []
+    partner_share_by_user = await _partner_share_by_user_for_current_bot(ctx)
     for row in rows:
         count = int(value(row, "message_count", 0))
-        sharing_default = value(row, "cross_thread_sharing_default", None)
-        if row["user_id"] == ctx.user.id:
-            sharing_default = ctx.user.cross_thread_sharing_default
-        elif row["user_id"] == ctx.partner.id:
-            sharing_default = ctx.partner.cross_thread_sharing_default
+        partner_share = partner_share_by_user.get(row["user_id"])
         can_show_latest = raw_message_visibility(
             viewer_user_id=ctx.user.id,
             thread_owner_user_id=row["user_id"],
-            thread_owner_sharing_default=sharing_default,
+            thread_owner_partner_share=partner_share,
         ).visible
-        snippet = (value(row, "latest_content", "") or "")[:160] if can_show_latest else ""
+        snippet = (
+            (value(row, "latest_content", "") or "")[:160] if can_show_latest else ""
+        )
         # Plan 3 stub. tool_schemas.ThreadDigest.summary describes an LLM-generated digest; deferring the Haiku digest to Plan 4 alongside the significance scorer.
         if can_show_latest:
             summary = f'{count} messages this period; latest: "{snippet}"'
         else:
-            summary = f"{count} messages this period; latest content hidden by sharing_default"
+            summary = (
+                f"{count} messages this period; latest content hidden by partner_share"
+            )
         threads.append(
             ThreadDigest(
                 user_id=row["user_id"],
@@ -536,9 +644,15 @@ async def list_themes(ctx: TurnContext, args: ListThemesInput) -> ListThemesOutp
         ORDER BY {order_by}, t.title ASC
         LIMIT $1
         """,
-        args.limit, ctx.primary_topic_id,
+        args.limit,
+        ctx.primary_topic_id,
     )
-    return ListThemesOutput(themes=[theme_summary(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
+    return ListThemesOutput(
+        themes=[
+            theme_summary(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx))
+            for row in rows
+        ]
+    )
 
 
 async def get_theme(ctx: TurnContext, args: GetThemeInput) -> GetThemeOutput:
@@ -554,21 +668,26 @@ async def get_theme(ctx: TurnContext, args: GetThemeInput) -> GetThemeOutput:
         {join_artifact_topics('t', '$2')}
         WHERE t.id = $1
         """,
-        args.theme_id, ctx.primary_topic_id,
+        args.theme_id,
+        ctx.primary_topic_id,
     )
     if row is None:
         return GetThemeOutput(theme=None)
     memory_rows = await ctx.pool.fetch(
         f"SELECT m.id FROM memories m {join_artifact_topics('m', '$2')} WHERE $1 = ANY(COALESCE(m.related_theme_ids, '{{}}'::uuid[]))",
-        args.theme_id, ctx.primary_topic_id,
+        args.theme_id,
+        ctx.primary_topic_id,
     )
     observation_rows = await ctx.pool.fetch(
         f"SELECT o.id FROM observations o {join_artifact_topics('o', '$2')} WHERE $1 = ANY(COALESCE(o.related_theme_ids, '{{}}'::uuid[]))",
-        args.theme_id, ctx.primary_topic_id,
+        args.theme_id,
+        ctx.primary_topic_id,
     )
     return GetThemeOutput(
         theme=ThemeDetail(
-            **theme_summary(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)).model_dump(),
+            **theme_summary(
+                row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)
+            ).model_dump(),
             description=row["description"],
             first_seen_at=row["first_seen_at"],
             first_seen_at_time=_time(row["first_seen_at"], ctx),
@@ -592,11 +711,15 @@ async def get_memories(ctx: TurnContext, args: GetMemoriesInput) -> GetMemoriesO
         clauses.append(f"m.about_user_id = ${len(params)}")
     if args.theme_id is not None:
         params.append(args.theme_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(m.related_theme_ids, '{{}}'::uuid[]))")
+        clauses.append(
+            f"${len(params)} = ANY(COALESCE(m.related_theme_ids, '{{}}'::uuid[]))"
+        )
     params.append(args.limit)
     rows = await ctx.pool.fetch(
         f"""
-        SELECT m.id, m.about_user_id, m.content, m.status, COALESCE(m.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+        SELECT m.id, m.about_user_id, m.content, m.status, m.visibility, m.shareable_summary,
+               m.recorded_by_bot_id,
+               COALESCE(m.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
                m.created_at, m.last_referenced_at
         FROM memories m
         {join_artifact_topics('m', f'${len(params) + 1}')}
@@ -604,12 +727,43 @@ async def get_memories(ctx: TurnContext, args: GetMemoriesInput) -> GetMemoriesO
         ORDER BY COALESCE(m.last_referenced_at, m.created_at) DESC
         LIMIT ${len(params)}
         """,
-        *params, ctx.primary_topic_id,
+        *params,
+        ctx.primary_topic_id,
     )
-    return GetMemoriesOutput(memories=[memory_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
+    partner_share_by_owner_bot: dict[tuple[Any, str], str] = {}
+    visible_rows = []
+    for row in rows:
+        about_user_id = row["about_user_id"]
+        if about_user_id is None or about_user_id == ctx.user.id:
+            visible_rows.append(row)
+            continue
+        owner_partner_share = await _partner_share_for_owner_bot(
+            ctx,
+            partner_share_by_owner_bot,
+            about_user_id,
+            row["recorded_by_bot_id"] if "recorded_by_bot_id" in row else None,
+        )
+        if not raw_message_visibility(
+            viewer_user_id=ctx.user.id,
+            thread_owner_user_id=about_user_id,
+            thread_owner_partner_share=owner_partner_share,
+        ).visible:
+            continue
+        if row["visibility"] == "dyad_shareable" and row["shareable_summary"]:
+            safe_row = dict(row)
+            safe_row["content"] = row["shareable_summary"]
+            visible_rows.append(safe_row)
+    return GetMemoriesOutput(
+        memories=[
+            memory_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx))
+            for row in visible_rows
+        ]
+    )
 
 
-async def list_watch_items(ctx: TurnContext, args: ListWatchItemsInput) -> ListWatchItemsOutput:
+async def list_watch_items(
+    ctx: TurnContext, args: ListWatchItemsInput
+) -> ListWatchItemsOutput:
     logger.info("read tool list_watch_items turn_id=%s", ctx.turn_id)
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
@@ -635,12 +789,20 @@ async def list_watch_items(ctx: TurnContext, args: ListWatchItemsInput) -> ListW
         {where}
         ORDER BY COALESCE(w.due_at, w.created_at) ASC
         """,
-        *params, ctx.primary_topic_id,
+        *params,
+        ctx.primary_topic_id,
     )
-    return ListWatchItemsOutput(items=[watch_item_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
+    return ListWatchItemsOutput(
+        items=[
+            watch_item_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx))
+            for row in rows
+        ]
+    )
 
 
-async def get_observations(ctx: TurnContext, args: GetObservationsInput) -> GetObservationsOutput:
+async def get_observations(
+    ctx: TurnContext, args: GetObservationsInput
+) -> GetObservationsOutput:
     logger.info("read tool get_observations turn_id=%s", ctx.turn_id)
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
@@ -649,7 +811,9 @@ async def get_observations(ctx: TurnContext, args: GetObservationsInput) -> GetO
     params: list[Any] = [args.status.value]
     if args.theme_id is not None:
         params.append(args.theme_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(o.related_theme_ids, '{{}}'::uuid[]))")
+        clauses.append(
+            f"${len(params)} = ANY(COALESCE(o.related_theme_ids, '{{}}'::uuid[]))"
+        )
     if args.about_user_id is not None:
         params.append(args.about_user_id)
         clauses.append(f"o.about_user_id = ${len(params)}")
@@ -670,12 +834,20 @@ async def get_observations(ctx: TurnContext, args: GetObservationsInput) -> GetO
                  COALESCE(o.last_reinforced_at, o.created_at) DESC
         LIMIT ${len(params)}
         """,
-        *params, ctx.primary_topic_id,
+        *params,
+        ctx.primary_topic_id,
     )
-    return GetObservationsOutput(observations=[observation_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
+    return GetObservationsOutput(
+        observations=[
+            observation_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx))
+            for row in rows
+        ]
+    )
 
 
-async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> GetDistillationsOutput:
+async def get_distillations(
+    ctx: TurnContext, args: GetDistillationsInput
+) -> GetDistillationsOutput:
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
         return GetDistillationsOutput(is_error=True, error=_err, distillations=[])
@@ -684,19 +856,29 @@ async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> Ge
     params: list[Any] = [args.status.value]
     if args.source_user_id is not None:
         params.append(args.source_user_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(d.source_user_ids, '{{}}'::uuid[]))")
+        clauses.append(
+            f"${len(params)} = ANY(COALESCE(d.source_user_ids, '{{}}'::uuid[]))"
+        )
     if args.related_theme_id is not None:
         params.append(args.related_theme_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(d.related_theme_ids, '{{}}'::uuid[]))")
+        clauses.append(
+            f"${len(params)} = ANY(COALESCE(d.related_theme_ids, '{{}}'::uuid[]))"
+        )
     if args.related_memory_id is not None:
         params.append(args.related_memory_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(d.related_memory_ids, '{{}}'::uuid[]))")
+        clauses.append(
+            f"${len(params)} = ANY(COALESCE(d.related_memory_ids, '{{}}'::uuid[]))"
+        )
     if args.related_observation_id is not None:
         params.append(args.related_observation_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(d.related_observation_ids, '{{}}'::uuid[]))")
+        clauses.append(
+            f"${len(params)} = ANY(COALESCE(d.related_observation_ids, '{{}}'::uuid[]))"
+        )
     if args.supporting_message_id is not None:
         params.append(args.supporting_message_id)
-        clauses.append(f"${len(params)} = ANY(COALESCE(d.supporting_message_ids, '{{}}'::uuid[]))")
+        clauses.append(
+            f"${len(params)} = ANY(COALESCE(d.supporting_message_ids, '{{}}'::uuid[]))"
+        )
     if args.text_contains:
         params.append(f"%{args.text_contains}%")
         clauses.append(
@@ -718,41 +900,56 @@ async def get_distillations(ctx: TurnContext, args: GetDistillationsInput) -> Ge
                d.created_from_tool_call_id, d.triggering_message_id,
                d.supersedes_distillation_id, d.superseded_by_distillation_id,
                d.revision_note, d.revision_count,
-               d.created_at, d.updated_at, d.revised_at, d.retired_at
+               d.created_at, d.updated_at, d.revised_at, d.retired_at,
+               d.recorded_by_bot_id, COALESCE(d.recorded_by_bot_id, tm.bot_id) AS visibility_bot_id
         FROM distillations d
+        LEFT JOIN messages tm ON tm.id = d.triggering_message_id
         {join_artifact_topics('d', f'${len(params) + 1}')}
         WHERE {' AND '.join(clauses)}
         ORDER BY d.updated_at DESC, d.created_at DESC
         LIMIT ${len(params)}
         """,
-        *params, ctx.primary_topic_id,
+        *params,
+        ctx.primary_topic_id,
     )
-    sharing_defaults = {
-        ctx.user.id: normalize_sharing_default(ctx.user.cross_thread_sharing_default),
-    }
-    if ctx.partner is not None:
-        sharing_defaults[ctx.partner.id] = normalize_sharing_default(ctx.partner.cross_thread_sharing_default)
+    partner_share_by_owner_bot: dict[tuple[Any, str], str] = {}
     visible_rows = []
     for row in rows:
         source_user_ids = list(row["source_user_ids"] or [])
-        full_visible = bool(source_user_ids) and all(
-            raw_message_visibility(
-                viewer_user_id=ctx.user.id,
-                thread_owner_user_id=source_user_id,
-                thread_owner_sharing_default=sharing_defaults.get(source_user_id),
-            ).visible
-            for source_user_id in source_user_ids
+        visibility_bot_id = (
+            row["visibility_bot_id"] if "visibility_bot_id" in row else None
         )
-        if full_visible:
+        if source_user_ids and all(
+            source_user_id == ctx.user.id for source_user_id in source_user_ids
+        ):
             visible_rows.append(row)
             continue
-        if row["visibility"] == "dyad_shareable" and row["shareable_summary"]:
+        partner_visible = bool(source_user_ids)
+        for source_user_id in source_user_ids:
+            owner_partner_share = await _partner_share_for_owner_bot(
+                ctx, partner_share_by_owner_bot, source_user_id, visibility_bot_id
+            )
+            if not raw_message_visibility(
+                viewer_user_id=ctx.user.id,
+                thread_owner_user_id=source_user_id,
+                thread_owner_partner_share=owner_partner_share,
+            ).visible:
+                partner_visible = False
+                break
+        if (
+            partner_visible
+            and row["visibility"] == "dyad_shareable"
+            and row["shareable_summary"]
+        ):
             safe_row = dict(row)
             safe_row["content"] = row["shareable_summary"]
             safe_row["revision_note"] = None
             visible_rows.append(safe_row)
     return GetDistillationsOutput(
-        distillations=[distillation_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in visible_rows]
+        distillations=[
+            distillation_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx))
+            for row in visible_rows
+        ]
     )
 
 
@@ -777,9 +974,14 @@ async def get_oob(ctx: TurnContext, args: GetOOBInput) -> GetOOBOutput:
         {where}
         ORDER BY x.created_at DESC
         """,
-        *params, ctx.primary_topic_id,
+        *params,
+        ctx.primary_topic_id,
     )
-    return GetOOBOutput(entries=[oob_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows])
+    return GetOOBOutput(
+        entries=[
+            oob_row(row, timezone=_ctx_timezone(ctx), now=_ctx_now(ctx)) for row in rows
+        ]
+    )
 
 
 async def check_oob(ctx: TurnContext, args: CheckOOBInput) -> CheckOOBOutput:
@@ -794,15 +996,23 @@ async def check_oob(ctx: TurnContext, args: CheckOOBInput) -> CheckOOBOutput:
     )
 
 
-async def summarize_oob_topics(ctx: TurnContext, args: SummarizeOOBTopicsInput) -> SummarizeOOBTopicsOutput:
+async def summarize_oob_topics(
+    ctx: TurnContext, args: SummarizeOOBTopicsInput
+) -> SummarizeOOBTopicsOutput:
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
-        return SummarizeOOBTopicsOutput(is_error=True, error=_err, total_count=0, clusters=[], narrative="")
+        return SummarizeOOBTopicsOutput(
+            is_error=True, error=_err, total_count=0, clusters=[], narrative=""
+        )
     logger.info("read tool summarize_oob_topics turn_id=%s", ctx.turn_id)
-    return await summarize_partner_oob(ctx.pool, owner_id=args.owner_id, topic_id=ctx.primary_topic_id)
+    return await summarize_partner_oob(
+        ctx.pool, owner_id=args.owner_id, topic_id=ctx.primary_topic_id
+    )
 
 
-async def get_self_model(ctx: TurnContext, args: GetSelfModelInput) -> GetSelfModelOutput:
+async def get_self_model(
+    ctx: TurnContext, args: GetSelfModelInput
+) -> GetSelfModelOutput:
     _err = check_read_scope(ctx, args.scope)
     if _err is not None:
         return GetSelfModelOutput(is_error=True, error=_err, model=None)
@@ -819,7 +1029,9 @@ async def get_self_model(ctx: TurnContext, args: GetSelfModelInput) -> GetSelfMo
         ctx,
         GetObservationsInput(about_user_id=args.user_id, min_significance=3),
     )
-    watch_items = await list_watch_items(ctx, ListWatchItemsInput(owner_user_id=args.user_id))
+    watch_items = await list_watch_items(
+        ctx, ListWatchItemsInput(owner_user_id=args.user_id)
+    )
     return GetSelfModelOutput(
         model=SelfModel(
             user_id=user_row["id"],
@@ -839,7 +1051,12 @@ def _target_tool_names(target_type: Any) -> set[str]:
         "message": {"escalate_to_partner"},
         "memory": {"add_memory", "update_memory", "supersede_memory"},
         "observation": {"log_observation", "update_observation"},
-        "distillation": {"get_distillations", "add_distillation", "update_distillation", "revise_distillation"},
+        "distillation": {
+            "get_distillations",
+            "add_distillation",
+            "update_distillation",
+            "revise_distillation",
+        },
         "theme": {"create_theme", "update_theme"},
         "watch_item": {"add_watch_item", "update_watch_item", "address_watch_item"},
         "oob": {"add_oob", "update_oob", "lift_oob"},
@@ -848,7 +1065,9 @@ def _target_tool_names(target_type: Any) -> set[str]:
     }.get(value, set())
 
 
-async def get_bot_actions(ctx: TurnContext, args: GetBotActionsInput) -> GetBotActionsOutput:
+async def get_bot_actions(
+    ctx: TurnContext, args: GetBotActionsInput
+) -> GetBotActionsOutput:
     logger.info("read tool get_bot_actions turn_id=%s", ctx.turn_id)
     clauses: list[str] = []
     params: list[Any] = []
@@ -921,7 +1140,9 @@ async def get_bot_actions(ctx: TurnContext, args: GetBotActionsInput) -> GetBotA
                 final_outbound_content=row["final_outbound_content"],
                 reasoning=row["reasoning"],
                 tool_calls=list(row["tool_calls"] or []),
-                audit_events=_with_audit_event_times(list(row.get("audit_events") or []), ctx),
+                audit_events=_with_audit_event_times(
+                    list(row.get("audit_events") or []), ctx
+                ),
             )
             for row in rows
         ]

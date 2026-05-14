@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from app.config import get_settings
+from app.bots.registry import get_relationship_topic_id
 from app.models.user import User
 from app.services.hot_context import HotContext, build_hot_context, render_hot_context
 
@@ -18,6 +19,8 @@ class HotContextPool:
         self.partner = partner
         self.now = datetime.now(UTC)
         self.trigger_id = uuid4()
+        self.bot_id = "mediator"
+        self.topic_id = get_relationship_topic_id()
         self.oob = [
             {
                 "id": uuid4(),
@@ -101,8 +104,10 @@ class HotContextPool:
                 "sender_id": user.id if i % 2 == 0 else partner.id,
                 "recipient_id": partner.id if i % 2 == 0 else user.id,
                 "content": f"message {i}",
-                "sent_at": self.now - timedelta(minutes=25 - i),
+                "sent_at": self.now - timedelta(seconds=25 - i),
                 "charge": "routine",
+                "bot_id": self.bot_id,
+                "topic_id": self.topic_id,
             }
             for i in range(25)
         ]
@@ -111,25 +116,40 @@ class HotContextPool:
         self.bridge_candidates = []
         self.bot_turns = []
         self.feedback = []
+        self.user_bot_state = {}
 
     async def fetchrow(self, sql, *args):
         compact = " ".join(sql.split())
+        if compact.startswith("SELECT display_name FROM bots WHERE id"):
+            names = {"tante_rosi": "Tante Rosi", "mediator": "Véas"}
+            return {"display_name": names.get(args[0], args[0])}
         if compact.startswith("WITH bounds AS"):
             user_id = args[0]
+            bot_filter = args[2] if len(args) > 2 else None
+            topic_filter = args[3] if len(args) > 3 else None
             period_start = self.now.replace(hour=0, minute=0, second=0, microsecond=0)
             period_end = period_start + timedelta(days=1)
             messages = [
                 row
                 for row in self.messages
                 if row.get("deleted_at") is None
-                and (row.get("sender_id") == user_id or row.get("recipient_id") == user_id)
+                and (
+                    row.get("sender_id") == user_id
+                    or row.get("recipient_id") == user_id
+                )
                 and period_start <= row["sent_at"] < period_end
+                and (bot_filter is None or row.get("bot_id") == bot_filter)
+                and (topic_filter is None or row.get("topic_id") == topic_filter)
             ]
             return {
                 "period_start": period_start,
                 "period_end": period_end,
-                "inbound_count": sum(1 for row in messages if row["direction"] == "inbound"),
-                "outbound_count": sum(1 for row in messages if row["direction"] == "outbound"),
+                "inbound_count": sum(
+                    1 for row in messages if row["direction"] == "inbound"
+                ),
+                "outbound_count": sum(
+                    1 for row in messages if row["direction"] == "outbound"
+                ),
                 "total_count": len(messages),
             }
         user_id = args[0]
@@ -141,23 +161,107 @@ class HotContextPool:
             "timezone": user.timezone,
             "style_notes": f"{user.name} style",
             "onboarding_state": "welcomed" if user_id == self.user.id else "pending",
-            "cross_thread_sharing_default": user.cross_thread_sharing_default,
         }
+
+    async def fetchval(self, sql, *args):
+        compact = " ".join(sql.split())
+        if compact.startswith("SELECT partner_share FROM user_bot_state"):
+            return self.user_bot_state.get((args[0], args[1]), {}).get("partner_share")
+        raise AssertionError(compact)
 
     async def fetch(self, sql, *args):
         compact = " ".join(sql.split())
         if "FROM out_of_bounds" in compact:
             return self.oob
+        if "WITH partner_rows AS" in compact:
+            owner_user_id = args[0]
+            limit = args[1]
+            current_bot_id = args[2]
+            rows = []
+            for row in self.memories:
+                if (
+                    row.get("status", "active") == "active"
+                    and row.get("visibility") == "dyad_shareable"
+                    and row.get("shareable_summary")
+                    and row.get("about_user_id") == owner_user_id
+                    and row.get("recorded_by_bot_id") is not None
+                    and row.get("recorded_by_bot_id") != current_bot_id
+                    and self.user_bot_state.get(
+                        (owner_user_id, row.get("recorded_by_bot_id")), {}
+                    ).get("partner_share")
+                    == "opt_in"
+                ):
+                    rows.append(
+                        {
+                            "kind": "memory",
+                            "id": row["id"],
+                            "bot_id": row.get("recorded_by_bot_id"),
+                            "shareable_summary": row.get("shareable_summary"),
+                            "occurred_at": row.get("last_referenced_at")
+                            or row.get("created_at"),
+                        }
+                    )
+            messages_by_id = {row["id"]: row for row in self.messages}
+            for row in self.distillations:
+                bot_id = row.get("recorded_by_bot_id") or messages_by_id.get(
+                    row.get("triggering_message_id"), {}
+                ).get("bot_id")
+                if (
+                    row.get("status", "active") == "active"
+                    and row.get("visibility") == "dyad_shareable"
+                    and row.get("shareable_summary")
+                    and owner_user_id in row.get("source_user_ids", [])
+                    and bot_id is not None
+                    and bot_id != current_bot_id
+                    and self.user_bot_state.get((owner_user_id, bot_id), {}).get(
+                        "partner_share"
+                    )
+                    == "opt_in"
+                ):
+                    rows.append(
+                        {
+                            "kind": "distillation",
+                            "id": row["id"],
+                            "bot_id": bot_id,
+                            "shareable_summary": row.get("shareable_summary"),
+                            "occurred_at": row.get("updated_at")
+                            or row.get("created_at"),
+                        }
+                    )
+            rows.sort(key=lambda row: row["occurred_at"], reverse=True)
+            return rows[:limit]
         if "FROM memories" in compact:
-            return self.memories
+            about_user_id = args[0] if args else None
+            return [
+                row
+                for row in self.memories
+                if about_user_id is None
+                or row.get("about_user_id") == about_user_id
+                or row.get("about_user_id") is None
+            ]
         if "FROM themes" in compact:
             return self.themes[:10]
         if "FROM watch_items" in compact:
             return self.watch_items
         if "FROM observations" in compact:
-            return [row for row in self.observations if row["significance"] is not None and row["significance"] >= 3]
+            return [
+                row
+                for row in self.observations
+                if row["significance"] is not None and row["significance"] >= 3
+            ]
         if "FROM distillations" in compact:
-            return self.distillations
+            messages_by_id = {row["id"]: row for row in self.messages}
+            return [
+                {
+                    **row,
+                    "recorded_by_bot_id": row.get("recorded_by_bot_id"),
+                    "visibility_bot_id": row.get("recorded_by_bot_id")
+                    or messages_by_id.get(row.get("triggering_message_id"), {}).get(
+                        "bot_id"
+                    ),
+                }
+                for row in self.distillations
+            ]
         if "FROM bridge_candidates" in compact:
             target_user_id, source_user_id = args
             return [
@@ -169,12 +273,15 @@ class HotContextPool:
                 and row.get("partner_path", "message_partner") == "message_partner"
             ][:5]
         if "FROM feedback" in compact:
-            user_id, now_utc = args
+            user_id, now_utc = args[:2]
+            bot_filter = args[2] if len(args) > 2 else None
+            topic_filter = args[3] if len(args) > 3 else None
             previous_completed_at = max(
                 (
                     row["completed_at"]
                     for row in self.bot_turns
-                    if row.get("user_in_context") == user_id and row.get("completed_at") is not None
+                    if row.get("user_in_context") == user_id
+                    and row.get("completed_at") is not None
                 ),
                 default=None,
             )
@@ -188,9 +295,19 @@ class HotContextPool:
                     continue
                 if item.get("from_user_id") != user_id:
                     continue
-                if item.get("target_type") != "message" or item.get("source") != "reaction":
+                if (
+                    item.get("target_type") != "message"
+                    or item.get("source") != "reaction"
+                ):
                     continue
-                if message.get("direction") != "outbound" or message.get("recipient_id") != user_id:
+                if (
+                    message.get("direction") != "outbound"
+                    or message.get("recipient_id") != user_id
+                ):
+                    continue
+                if bot_filter is not None and message.get("bot_id") != bot_filter:
+                    continue
+                if topic_filter is not None and message.get("topic_id") != topic_filter:
                     continue
                 if not previous_completed_at < item["created_at"] <= now_utc:
                     continue
@@ -209,6 +326,8 @@ class HotContextPool:
             return rows[:5]
         if "FROM messages" in compact and "WHERE id = ANY" in compact:
             ids = set(args[0])
+            bot_filter = args[1] if len(args) > 1 else None
+            topic_filter = args[2] if len(args) > 2 else None
             return [
                 {
                     "id": row["id"],
@@ -218,26 +337,42 @@ class HotContextPool:
                     "charge": row["charge"],
                     "sent_at": row["sent_at"],
                     "content": row["content"],
+                    "bot_id": row.get("bot_id"),
+                    "topic_id": row.get("topic_id"),
                 }
                 for row in self.messages
                 if row["id"] in ids
+                and (bot_filter is None or row.get("bot_id") == bot_filter)
+                and (topic_filter is None or row.get("topic_id") == topic_filter)
             ]
         if "FROM messages" in compact:
             if args and isinstance(args[0], list):
                 allowed = set(args[0])
+                bot_filter = args[1] if len(args) > 1 else None
+                topic_filter = args[2] if len(args) > 2 else None
                 rows = [
                     row
                     for row in self.messages
-                    if row.get("sender_id") in allowed or row.get("recipient_id") in allowed
+                    if row.get("sender_id") in allowed
+                    or row.get("recipient_id") in allowed
                 ]
             else:
                 user_id = args[0]
+                bot_filter = None
+                topic_filter = None
                 rows = [
                     row
                     for row in self.messages
-                    if row.get("sender_id") == user_id or row.get("recipient_id") == user_id
+                    if row.get("sender_id") == user_id
+                    or row.get("recipient_id") == user_id
                 ]
-            return list(reversed(rows[-20:]))
+            scoped_rows = [
+                row
+                for row in rows
+                if (bot_filter is None or row.get("bot_id") == bot_filter)
+                and (topic_filter is None or row.get("topic_id") == topic_filter)
+            ]
+            return list(reversed(scoped_rows[-20:]))
         raise AssertionError(compact)
 
 
@@ -266,6 +401,8 @@ async def test_build_hot_context_returns_expected_fields(hot_context_seed):
     assert [item["significance"] for item in hc.observations] == [3]
     assert all(item["significance"] is not None for item in hc.observations)
     assert len(hc.recent_messages) == 20
+    assert hc.current_user["partner_sharing_state"] == "pending"
+    assert hc.partner_user["partner_sharing_state"] == "pending"
     assert hc.recent_messages[-1]["sent_at_time"]["local_day_label"] == "today"
     assert "relative_to_now" in hc.recent_messages[-1]["sent_at_time"]
     assert any(item["direction"] == "outbound" for item in hc.recent_messages)
@@ -274,11 +411,17 @@ async def test_build_hot_context_returns_expected_fields(hot_context_seed):
     assert hc.conversation_load["outbound_count"] == 1
     assert hc.recent_reactions == []
     assert hc.trigger_metadata["messages"][0]["charge"] == "charged"
-    partner_rows = [item for item in hc.recent_messages if item["sender_id"] == partner.id or item["recipient_id"] == partner.id]
+    partner_rows = [
+        item
+        for item in hc.recent_messages
+        if item["sender_id"] == partner.id or item["recipient_id"] == partner.id
+    ]
     assert any(item.get("raw_content_hidden") for item in partner_rows)
 
 
-async def test_build_hot_context_surfaces_reactions_since_previous_turn(hot_context_seed):
+async def test_build_hot_context_surfaces_reactions_since_previous_turn(
+    hot_context_seed,
+):
     pool, user, partner = hot_context_seed
     outbound = next(row for row in pool.messages if row["direction"] == "outbound")
     outbound["sender_id"] = None
@@ -325,17 +468,13 @@ async def test_build_hot_context_surfaces_reactions_since_previous_turn(hot_cont
     assert "passive feedback only" in text
 
 
-async def test_build_hot_context_shows_partner_raw_when_partner_opted_in(hot_context_seed):
+async def test_build_hot_context_shows_partner_raw_when_partner_opted_in(
+    hot_context_seed,
+):
     pool, user, partner = hot_context_seed
-    opted_in_partner = User(
-        partner.id,
-        partner.name,
-        partner.phone,
-        partner.timezone,
-        cross_thread_sharing_default="opt_in",
-    )
+    pool.user_bot_state[(partner.id, pool.bot_id)] = {"partner_share": "opt_in"}
 
-    hc = await build_hot_context(pool, user, opted_in_partner, [pool.trigger_id])
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
 
     partner_items = [
         item
@@ -347,7 +486,48 @@ async def test_build_hot_context_shows_partner_raw_when_partner_opted_in(hot_con
     assert not all(item.get("raw_content_hidden") for item in partner_items)
 
 
-async def test_build_hot_context_distillation_privacy_gates_partner_sources(hot_context_seed):
+async def test_build_hot_context_filters_cross_bot_and_legacy_raw_messages(
+    hot_context_seed,
+):
+    pool, user, partner = hot_context_seed
+    pool.user_bot_state[(partner.id, pool.bot_id)] = {"partner_share": "opt_in"}
+    pool.messages.extend(
+        [
+            {
+                "id": uuid4(),
+                "direction": "inbound",
+                "sender_id": partner.id,
+                "recipient_id": user.id,
+                "content": "rosi raw should stay out",
+                "sent_at": pool.now + timedelta(minutes=1),
+                "charge": "routine",
+                "bot_id": "tante_rosi",
+                "topic_id": pool.topic_id,
+            },
+            {
+                "id": uuid4(),
+                "direction": "inbound",
+                "sender_id": partner.id,
+                "recipient_id": user.id,
+                "content": "legacy raw should stay out",
+                "sent_at": pool.now + timedelta(minutes=2),
+                "charge": "routine",
+                "bot_id": None,
+                "topic_id": pool.topic_id,
+            },
+        ]
+    )
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+    text = render_hot_context(hc)
+
+    assert "rosi raw should stay out" not in text
+    assert "legacy raw should stay out" not in text
+
+
+async def test_build_hot_context_distillation_privacy_gates_partner_sources(
+    hot_context_seed,
+):
     pool, user, partner = hot_context_seed
     pool.distillations = [
         {
@@ -366,6 +546,7 @@ async def test_build_hot_context_distillation_privacy_gates_partner_sources(hot_
             "revision_count": 0,
             "updated_at": pool.now,
             "created_at": pool.now,
+            "recorded_by_bot_id": pool.bot_id,
         },
         {
             "id": uuid4(),
@@ -383,28 +564,24 @@ async def test_build_hot_context_distillation_privacy_gates_partner_sources(hot_
             "revision_count": 0,
             "updated_at": pool.now,
             "created_at": pool.now,
+            "recorded_by_bot_id": pool.bot_id,
         },
     ]
 
     hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
     text = render_hot_context(hc)
 
-    assert [item["display"] for item in hc.distillations] == ["shareable_summary"]
-    assert "Safe reviewed summary" in text
+    assert hc.distillations == []
+    assert "Safe reviewed summary" not in text
     assert "Partner-only private synthesis" not in text
     assert "Partner source full synthesis" not in text
 
 
-async def test_build_hot_context_distillation_full_content_when_sources_visible(hot_context_seed):
+async def test_build_hot_context_distillation_full_content_when_sources_visible(
+    hot_context_seed,
+):
     pool, user, partner = hot_context_seed
-    opted_in_partner = User(
-        partner.id,
-        partner.name,
-        partner.phone,
-        partner.timezone,
-        cross_thread_sharing_default="opt_in",
-    )
-    pool.partner = opted_in_partner
+    pool.user_bot_state[(partner.id, pool.bot_id)] = {"partner_share": "opt_in"}
     pool.distillations = [
         {
             "id": uuid4(),
@@ -422,17 +599,161 @@ async def test_build_hot_context_distillation_full_content_when_sources_visible(
             "revision_count": 0,
             "updated_at": pool.now,
             "created_at": pool.now,
+            "recorded_by_bot_id": pool.bot_id,
         }
     ]
 
-    hc = await build_hot_context(pool, user, opted_in_partner, [pool.trigger_id])
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
     text = render_hot_context(hc)
 
-    assert hc.distillations[0]["display"] == "full_content"
-    assert "Partner source full synthesis" in text
+    assert hc.distillations[0]["display"] == "shareable_summary"
+    assert "Summary should not replace full content" in text
+    assert "Partner source full synthesis" not in text
 
 
-def _bridge_candidate_row(pool, user, partner, *, status="ready", partner_path="message_partner", summary="Bridge summary"):
+async def test_build_hot_context_pulls_opted_in_cross_bot_summaries_with_cap(
+    hot_context_seed,
+):
+    pool, user, partner = hot_context_seed
+    pool.user_bot_state[(partner.id, "tante_rosi")] = {
+        "partner_share": "opt_in",
+    }
+    pool.user_bot_state[(partner.id, "coach")] = {
+        "partner_share": "opt_out",
+    }
+    pool.memories.extend(
+        [
+            {
+                "id": uuid4(),
+                "about_user_id": partner.id,
+                "content": "private pregnancy detail should stay hidden",
+                "shareable_summary": f"Rosi memory summary {index}",
+                "visibility": "dyad_shareable",
+                "status": "active",
+                "recorded_by_bot_id": "tante_rosi",
+                "related_theme_ids": [],
+                "last_referenced_at": None,
+                "created_at": pool.now + timedelta(minutes=index),
+            }
+            for index in range(14)
+        ]
+    )
+    pool.memories.append(
+        {
+            "id": uuid4(),
+            "about_user_id": partner.id,
+            "content": "coach private detail should stay hidden",
+            "shareable_summary": "Coach summary should be gated out",
+            "visibility": "dyad_shareable",
+            "status": "active",
+            "recorded_by_bot_id": "coach",
+            "related_theme_ids": [],
+            "last_referenced_at": None,
+            "created_at": pool.now + timedelta(hours=1),
+        }
+    )
+    pool.distillations.append(
+        {
+            "id": uuid4(),
+            "content": "Rosi distillation private content should stay hidden",
+            "shareable_summary": "Rosi distillation summary",
+            "confidence": "medium",
+            "status": "active",
+            "sensitivity": "low",
+            "visibility": "dyad_shareable",
+            "source_user_ids": [partner.id],
+            "related_memory_ids": [],
+            "related_observation_ids": [],
+            "related_theme_ids": [],
+            "supporting_message_ids": [],
+            "revision_count": 0,
+            "updated_at": pool.now + timedelta(hours=2),
+            "created_at": pool.now + timedelta(hours=2),
+            "recorded_by_bot_id": "tante_rosi",
+        }
+    )
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+    text = render_hot_context(hc)
+
+    assert len(hc.partner_shareable_summaries) == 12
+    assert hc.partner_shareable_summaries[0]["shareable_summary"] == (
+        "Rosi distillation summary"
+    )
+    assert all(
+        item["provenance"] == "from Tante Rosi:"
+        for item in hc.partner_shareable_summaries
+    )
+    assert "## Partner shareable summaries" in text
+    assert "from Tante Rosi:" in text
+    assert "Rosi distillation summary" in text
+    assert "Rosi distillation private content should stay hidden" not in text
+    assert "private pregnancy detail should stay hidden" not in text
+    assert "Coach summary should be gated out" not in text
+
+
+async def test_cross_bot_summaries_filter_opt_in_before_global_cap(
+    hot_context_seed,
+):
+    pool, user, partner = hot_context_seed
+    pool.user_bot_state[(partner.id, "tante_rosi")] = {
+        "partner_share": "opt_in",
+    }
+    pool.user_bot_state[(partner.id, "coach")] = {
+        "partner_share": "opt_out",
+    }
+    pool.memories.extend(
+        [
+            {
+                "id": uuid4(),
+                "about_user_id": partner.id,
+                "content": "newer coach content should stay hidden",
+                "shareable_summary": f"Newer coach summary {index}",
+                "visibility": "dyad_shareable",
+                "status": "active",
+                "recorded_by_bot_id": "coach",
+                "related_theme_ids": [],
+                "last_referenced_at": None,
+                "created_at": pool.now + timedelta(hours=2, minutes=index),
+            }
+            for index in range(60)
+        ]
+    )
+    pool.memories.append(
+        {
+            "id": uuid4(),
+            "about_user_id": partner.id,
+            "content": "older Rosi full content should stay hidden",
+            "shareable_summary": "Older opted-in Rosi summary",
+            "visibility": "dyad_shareable",
+            "status": "active",
+            "recorded_by_bot_id": "tante_rosi",
+            "related_theme_ids": [],
+            "last_referenced_at": None,
+            "created_at": pool.now,
+        }
+    )
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+    text = render_hot_context(hc)
+
+    assert [item["shareable_summary"] for item in hc.partner_shareable_summaries] == [
+        "Older opted-in Rosi summary"
+    ]
+    assert "Older opted-in Rosi summary" in text
+    assert "older Rosi full content should stay hidden" not in text
+    assert "Newer coach summary" not in text
+
+
+def _bridge_candidate_row(
+    pool,
+    user,
+    partner,
+    *,
+    status="ready",
+    partner_path="message_partner",
+    summary="Bridge summary",
+):
     return {
         "id": uuid4(),
         "source_user_id": partner.id,
@@ -446,7 +767,9 @@ def _bridge_candidate_row(pool, user, partner, *, status="ready", partner_path="
     }
 
 
-async def test_build_hot_context_surfaces_multiple_ready_message_partner_bridges(hot_context_seed):
+async def test_build_hot_context_surfaces_multiple_ready_message_partner_bridges(
+    hot_context_seed,
+):
     pool, user, partner = hot_context_seed
     pool.bridge_candidates = [
         _bridge_candidate_row(
@@ -463,15 +786,23 @@ async def test_build_hot_context_surfaces_multiple_ready_message_partner_bridges
 
     assert len(hc.bridge_candidates) == 5
     assert all(item["status"] == "ready" for item in hc.bridge_candidates)
-    assert all(item["partner_path"] == "message_partner" for item in hc.bridge_candidates)
+    assert all(
+        item["partner_path"] == "message_partner" for item in hc.bridge_candidates
+    )
     assert "Ready partner bridge 0" in text
     assert "partner_path=message_partner" in text
 
 
-async def test_build_hot_context_excludes_sent_addressed_and_non_message_partner_bridges(hot_context_seed):
+async def test_build_hot_context_excludes_sent_addressed_and_non_message_partner_bridges(
+    hot_context_seed,
+):
     pool, user, partner = hot_context_seed
-    visible = _bridge_candidate_row(pool, user, partner, summary="Visible ready message partner")
-    sent = _bridge_candidate_row(pool, user, partner, status="sent", summary="Sent bridge should be absent")
+    visible = _bridge_candidate_row(
+        pool, user, partner, summary="Visible ready message partner"
+    )
+    sent = _bridge_candidate_row(
+        pool, user, partner, status="sent", summary="Sent bridge should be absent"
+    )
     addressed = _bridge_candidate_row(
         pool,
         user,
@@ -508,9 +839,10 @@ async def test_render_hot_context_respects_default_token_budget(hot_context_seed
     assert "## You" in text
     assert "onboarding_state: welcomed" in text
     assert "## Conversation load" in text
-    assert "## Sharing defaults" in text
-    assert "## URGENT ACTION NEEDED" in text
-    assert "Ask them to pick opt_in or opt_out" in text
+    assert "## Partner sharing" in text
+    assert "partner_sharing_state: pending" in text
+    assert "## URGENT ACTION NEEDED" not in text
+    assert "Ask them to pick opt_in or opt_out" not in text
     assert "total_messages: 25" in text
     assert "share carefully" in text
     assert "must stay private" not in text
@@ -518,18 +850,42 @@ async def test_render_hot_context_respects_default_token_budget(hot_context_seed
     assert "## Trigger" in text
     assert "; utc=" in text
     assert "one_month_from_now:" in text
-    assert "[raw partner content hidden by sharing_default]" in text
+    assert "[raw partner content hidden by partner_share]" in text
 
 
 def test_render_hot_context_truncates_without_dropping_oob(monkeypatch):
-    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "230")
+    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "260")
     get_settings.cache_clear()
     user_id = uuid4()
     partner_id = uuid4()
     hc = HotContext(
-        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "UTC", "style_notes": "short", "onboarding_state": "welcomed", "cross_thread_sharing_default": "opt_in"},
-        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "UTC", "style_notes": "short", "onboarding_state": "pending", "cross_thread_sharing_default": "opt_in"},
-        conversation_load={"period": "today", "timezone": "UTC", "total_count": 24, "inbound_count": 13, "outbound_count": 11},
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "short",
+            "onboarding_state": "welcomed",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "short",
+            "onboarding_state": "pending",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 24,
+            "inbound_count": 13,
+            "outbound_count": 11,
+        },
         active_oob=[
             {
                 "id": uuid4(),
@@ -539,11 +895,20 @@ def test_render_hot_context_truncates_without_dropping_oob(monkeypatch):
                 "protected_summary": "shareable",
             }
         ],
-        memories=[{"id": uuid4(), "about_user_id": user_id, "content": "memory " + "m" * 300} for _ in range(6)],
+        memories=[
+            {"id": uuid4(), "about_user_id": user_id, "content": "memory " + "m" * 300}
+            for _ in range(6)
+        ],
         active_themes=[],
         open_watch_items=[],
         observations=[
-            {"id": uuid4(), "about_user_id": user_id, "content": "observation " + "o" * 300, "confidence": "medium", "significance": 3}
+            {
+                "id": uuid4(),
+                "about_user_id": user_id,
+                "content": "observation " + "o" * 300,
+                "confidence": "medium",
+                "significance": 3,
+            }
             for _ in range(6)
         ],
         recent_messages=[
@@ -564,12 +929,14 @@ def test_render_hot_context_truncates_without_dropping_oob(monkeypatch):
 
     text = render_hot_context(hc)
 
-    assert len(text) // 4 <= 230
+    assert len(text) // 4 <= 260
     assert "shareable" in text
     assert "OOB MUST REMAIN" not in text
     assert "core=" not in text
     assert "[truncated, 6 more]" in text
-    assert text.index("## High-significance observations") < text.index("## Recent messages")
+    assert text.index("## High-significance observations") < text.index(
+        "## Recent messages"
+    )
     assert text.count("[truncated, 6 more]") == 3
     get_settings.cache_clear()
 
@@ -581,9 +948,29 @@ def test_render_hot_context_labels_voice_transcripts(monkeypatch):
     partner_id = uuid4()
     message_id = uuid4()
     hc = HotContext(
-        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "UTC", "style_notes": "", "onboarding_state": "welcomed"},
-        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "UTC", "style_notes": "", "onboarding_state": "pending"},
-        conversation_load={"period": "today", "timezone": "UTC", "total_count": 1, "inbound_count": 1, "outbound_count": 0},
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 1,
+            "inbound_count": 1,
+            "outbound_count": 0,
+        },
         active_oob=[],
         memories=[],
         active_themes=[],
@@ -623,9 +1010,13 @@ def test_render_hot_context_labels_voice_transcripts(monkeypatch):
     text = render_hot_context(hc)
 
     assert "inbound charge=routine" in text
-    assert "[voice transcript, 7s]: Can you hear this? Or can you understand it?" in text
+    assert (
+        "[voice transcript, 7s]: Can you hear this? Or can you understand it?" in text
+    )
     assert "trigger_message" in text
-    assert "[voice transcript, 7s]: Can you hear this? Or can you understand it?" in text
+    assert (
+        "[voice transcript, 7s]: Can you hear this? Or can you understand it?" in text
+    )
     get_settings.cache_clear()
 
 
@@ -635,8 +1026,22 @@ def test_render_hot_context_includes_current_time_for_relative_scheduling(monkey
     user_id = uuid4()
     partner_id = uuid4()
     hc = HotContext(
-        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "Europe/Berlin", "style_notes": "", "onboarding_state": "welcomed"},
-        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "UTC", "style_notes": "", "onboarding_state": "pending"},
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "Europe/Berlin",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+        },
         temporal_context={
             "now_utc": "2026-05-06T10:00:00+00:00",
             "now_local": "2026-05-06T12:00:00+02:00",
@@ -649,7 +1054,13 @@ def test_render_hot_context_includes_current_time_for_relative_scheduling(monkey
             "local_day_start_utc": "2026-05-05T22:00:00+00:00",
             "local_day_end_utc": "2026-05-06T22:00:00+00:00",
         },
-        conversation_load={"period": "today", "timezone": "Europe/Berlin", "total_count": 1, "inbound_count": 1, "outbound_count": 0},
+        conversation_load={
+            "period": "today",
+            "timezone": "Europe/Berlin",
+            "total_count": 1,
+            "inbound_count": 1,
+            "outbound_count": 0,
+        },
         active_oob=[],
         memories=[],
         active_themes=[],
@@ -665,7 +1076,10 @@ def test_render_hot_context_includes_current_time_for_relative_scheduling(monkey
     assert "## Current time" in text
     assert "now_utc: 2026-05-06T10:00:00+00:00" in text
     assert "now_local: 2026-05-06T12:00:00+02:00" in text
-    assert "local_day_bounds: 2026-05-06T00:00:00+02:00 to 2026-05-07T00:00:00+02:00" in text
+    assert (
+        "local_day_bounds: 2026-05-06T00:00:00+02:00 to 2026-05-07T00:00:00+02:00"
+        in text
+    )
     assert "Default to scheduling tool delay fields" in text
     assert "Use local_when for concrete local clock phrases" in text
     get_settings.cache_clear()
@@ -678,10 +1092,35 @@ def test_render_hot_context_uses_relative_local_message_time(monkeypatch):
     partner_id = uuid4()
     message_id = uuid4()
     hc = HotContext(
-        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "Europe/Berlin", "style_notes": "", "onboarding_state": "welcomed"},
-        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "Europe/Berlin", "style_notes": "", "onboarding_state": "pending"},
-        conversation_load={"period": "today", "timezone": "Europe/Berlin", "period_start": "2026-05-06T00:00:00+02:00", "period_end": "2026-05-07T00:00:00+02:00", "total_count": 1, "inbound_count": 1, "outbound_count": 0},
-        temporal_context={"local_day_start": "2026-05-06T00:00:00+02:00", "local_day_end": "2026-05-07T00:00:00+02:00"},
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "Europe/Berlin",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "Europe/Berlin",
+            "style_notes": "",
+            "onboarding_state": "pending",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "Europe/Berlin",
+            "period_start": "2026-05-06T00:00:00+02:00",
+            "period_end": "2026-05-07T00:00:00+02:00",
+            "total_count": 1,
+            "inbound_count": 1,
+            "outbound_count": 0,
+        },
+        temporal_context={
+            "local_day_start": "2026-05-06T00:00:00+02:00",
+            "local_day_end": "2026-05-07T00:00:00+02:00",
+        },
         active_oob=[],
         memories=[],
         active_themes=[],
@@ -715,9 +1154,18 @@ def test_render_hot_context_uses_relative_local_message_time(monkeypatch):
 
     text = render_hot_context(hc)
 
-    assert "today 23:03 Berlin (about 4 minutes ago; utc=2026-05-06T21:03:00+00:00) inbound" in text
-    assert "local_period_bounds: 2026-05-06T00:00:00+02:00 to 2026-05-07T00:00:00+02:00" in text
-    assert "utc_period_bounds: 2026-05-06T00:00:00+02:00 to 2026-05-07T00:00:00+02:00" in text
+    assert (
+        "today 23:03 Berlin (about 4 minutes ago; utc=2026-05-06T21:03:00+00:00) inbound"
+        in text
+    )
+    assert (
+        "local_period_bounds: 2026-05-06T00:00:00+02:00 to 2026-05-07T00:00:00+02:00"
+        in text
+    )
+    assert (
+        "utc_period_bounds: 2026-05-06T00:00:00+02:00 to 2026-05-07T00:00:00+02:00"
+        in text
+    )
     get_settings.cache_clear()
 
 
@@ -733,9 +1181,29 @@ def test_render_hot_context_does_not_clip_trigger_voice_transcript(monkeypatch):
         + "The weekly thing helps us bring that into the real world, and the monthly therapist handles the harder stuff."
     )
     hc = HotContext(
-        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "UTC", "style_notes": "", "onboarding_state": "welcomed"},
-        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "UTC", "style_notes": "", "onboarding_state": "pending"},
-        conversation_load={"period": "today", "timezone": "UTC", "total_count": 1, "inbound_count": 1, "outbound_count": 0},
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 1,
+            "inbound_count": 1,
+            "outbound_count": 0,
+        },
         active_oob=[],
         memories=[],
         active_themes=[],
@@ -789,9 +1257,29 @@ def test_render_hot_context_scrubs_internal_leaks_from_outbound_history(monkeypa
     user_id = uuid4()
     partner_id = uuid4()
     hc = HotContext(
-        current_user={"id": user_id, "name": "Maya", "phone": "1", "timezone": "UTC", "style_notes": "", "onboarding_state": "welcomed"},
-        partner_user={"id": partner_id, "name": "Ben", "phone": "2", "timezone": "UTC", "style_notes": "", "onboarding_state": "pending"},
-        conversation_load={"period": "today", "timezone": "UTC", "total_count": 1, "inbound_count": 0, "outbound_count": 1},
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 1,
+            "inbound_count": 0,
+            "outbound_count": 1,
+        },
         active_oob=[],
         memories=[],
         active_themes=[],

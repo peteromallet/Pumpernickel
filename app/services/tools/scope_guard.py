@@ -14,45 +14,49 @@ from __future__ import annotations
 from typing import Any
 
 # Artifact-reading tools that take a `scope` parameter (10 tools).
-ARTIFACT_READ_TOOLS: frozenset[str] = frozenset({
-    "get_memories",
-    "get_observations",
-    "get_distillations",
-    "get_oob",
-    "summarize_oob_topics",
-    "list_themes",
-    "get_theme",
-    "list_watch_items",
-    "list_bridge_candidates",
-    "get_self_model",
-})
+ARTIFACT_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_memories",
+        "get_observations",
+        "get_distillations",
+        "get_oob",
+        "summarize_oob_topics",
+        "list_themes",
+        "get_theme",
+        "list_watch_items",
+        "list_bridge_candidates",
+        "get_self_model",
+    }
+)
 
-# Artifact-writing tools that consult ctx.write_scopes (21 tools).
+# Artifact-writing/user-state tools that consult ctx.write_scopes.
 # NB: transport (send/edit/delete/react), scheduling, log_feedback, escalate,
 # and read-shaped tools are intentionally NOT in this set.
-ARTIFACT_WRITE_TOOLS: frozenset[str] = frozenset({
-    "update_user_style_notes",
-    "update_cross_thread_sharing_default",
-    "create_bridge_candidate",
-    "update_bridge_candidate",
-    "send_bridge_candidate",
-    "add_memory",
-    "update_memory",
-    "supersede_memory",
-    "create_theme",
-    "update_theme",
-    "add_watch_item",
-    "update_watch_item",
-    "address_watch_item",
-    "log_observation",
-    "update_observation",
-    "add_distillation",
-    "update_distillation",
-    "revise_distillation",
-    "add_oob",
-    "update_oob",
-    "lift_oob",
-})
+ARTIFACT_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "update_user_style_notes",
+        "set_partner_sharing",
+        "create_bridge_candidate",
+        "update_bridge_candidate",
+        "send_bridge_candidate",
+        "add_memory",
+        "update_memory",
+        "supersede_memory",
+        "create_theme",
+        "update_theme",
+        "add_watch_item",
+        "update_watch_item",
+        "address_watch_item",
+        "log_observation",
+        "update_observation",
+        "add_distillation",
+        "update_distillation",
+        "revise_distillation",
+        "add_oob",
+        "update_oob",
+        "lift_oob",
+    }
+)
 
 
 def _resolve_target(requested_scope: str, primary_topic_slug: str | None) -> str | None:
@@ -105,9 +109,7 @@ def check_write_scope(ctx: Any) -> str | None:
         return None
     if primary is not None and primary in topics:
         return None
-    return (
-        f"write_scope_denied: primary='{primary}' not in {sorted(topics)}"
-    )
+    return f"write_scope_denied: primary='{primary}' not in {sorted(topics)}"
 
 
 # ── Multi-topic write helpers (S6) ──────────────────────────────────────────
@@ -151,7 +153,9 @@ def resolve_write_topic_slugs(ctx: Any, requested: list[str] | None) -> list[str
         return unique
 
     if primary is None:
-        raise ToolCallRejected("resolve_write_topic_slugs: ctx has no primary_topic_slug")
+        raise ToolCallRejected(
+            "resolve_write_topic_slugs: ctx has no primary_topic_slug"
+        )
 
     if requested is None:
         return [primary]
@@ -230,7 +234,5 @@ async def resolve_topic_ids(
     found: dict[str, Any] = {row["slug"]: row["id"] for row in rows}
     missing = [s for s in slugs if s not in found]
     if missing:
-        raise ToolCallRejected(
-            f"resolve_topic_ids: unknown topic slugs: {missing}"
-        )
+        raise ToolCallRejected(f"resolve_topic_ids: unknown topic slugs: {missing}")
     return found

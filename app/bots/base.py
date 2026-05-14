@@ -67,17 +67,22 @@ class BotSpec:
         user: User,
         partner: User | None,
         prompt_version: str,
+        current_user_partner_share: str | None = None,
+        partner_partner_share: str | None = None,
+        current_user_partner_sharing_state: str | None = None,
+        partner_partner_sharing_state: str | None = None,
     ) -> str:
         partner_name = partner.name if partner is not None else None
-        partner_sharing_default = partner.cross_thread_sharing_default if partner is not None else None
         return self.prompt_renderer(
             assistant_name,
             user.name,
             partner_name,
             prompt_version=prompt_version,
             onboarding_state=user.onboarding_state,
-            current_user_sharing_default=user.cross_thread_sharing_default,
-            partner_sharing_default=partner_sharing_default,
+            current_user_partner_share=current_user_partner_share,
+            partner_partner_share=partner_partner_share,
+            current_user_partner_sharing_state=current_user_partner_sharing_state,
+            partner_partner_sharing_state=partner_partner_sharing_state,
             partner=partner,
         )
 
@@ -124,7 +129,9 @@ class BotSpec:
         ]
         if sent_summary is not None and plan.current in {"record", "schedule"}:
             parts.append(sent_summary)
-        parts.append(f"Current step instruction: {self.step_instructions[plan.current]}")
+        parts.append(
+            f"Current step instruction: {self.step_instructions[plan.current]}"
+        )
         return {
             "role": "user",
             "content": "\n\n".join(parts),

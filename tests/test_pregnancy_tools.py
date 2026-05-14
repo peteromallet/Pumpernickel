@@ -69,7 +69,6 @@ def _make_ctx(pool: FakePool, user: User | None = None) -> TurnContext:
         "timezone": user.timezone,
         "onboarding_state": "welcomed",
         "pacing_preferences": {},
-        "cross_thread_sharing_default": None,
         "pregnancy_edd": user.pregnancy_edd,
         "pregnancy_dating_basis": user.pregnancy_dating_basis,
         "pregnancy_lmp_date": user.pregnancy_lmp_date,
@@ -236,7 +235,9 @@ async def test_correct_pregnancy_edd_happy_path():
     )
     ctx = _make_ctx(pool, user)
 
-    args = CorrectPregnancyEddInput(edd="2026-10-22", dating_basis="scan", scan_date="2026-04-15")
+    args = CorrectPregnancyEddInput(
+        edd="2026-10-22", dating_basis="scan", scan_date="2026-04-15"
+    )
     result = await correct_pregnancy_edd(ctx, args)
 
     assert result.ok is True
@@ -262,7 +263,9 @@ async def test_correct_pregnancy_edd_no_scan_date():
     result = await correct_pregnancy_edd(ctx, args)
 
     assert result.ok is True
-    assert ctx.user.pregnancy_scan_corrected_at is None  # lmp → lmp: no correction timestamp
+    assert (
+        ctx.user.pregnancy_scan_corrected_at is None
+    )  # lmp → lmp: no correction timestamp
 
 
 # ---------------------------------------------------------------------------

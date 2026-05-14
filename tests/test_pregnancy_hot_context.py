@@ -16,6 +16,7 @@ import pytest
 from app.models.user import User
 from app.services.hot_context_solo import (
     HotContextSolo,
+    build_hot_context_solo,
     _render_solo_with_counts,
     render_hot_context_solo,
 )
@@ -54,12 +55,21 @@ def _make_user(
 def _make_hc(pregnancy_state: str | None) -> HotContextSolo:
     """Build a minimal HotContextSolo with only the pregnancy_state set."""
     return HotContextSolo(
-        current_user={"id": "u1", "name": "Anna", "timezone": "UTC",
-                       "onboarding_state": "pending", "style_notes": ""},
+        current_user={
+            "id": "u1",
+            "name": "Anna",
+            "timezone": "UTC",
+            "onboarding_state": "pending",
+            "style_notes": "",
+        },
         partner_user={},
-        conversation_load={"period": "today", "timezone": "UTC",
-                           "total_count": 0, "inbound_count": 0,
-                           "outbound_count": 0},
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 0,
+            "inbound_count": 0,
+            "outbound_count": 0,
+        },
         active_oob=[],
         memories=[],
         active_themes=[],
@@ -102,27 +112,21 @@ class TestPregnancyHotContextSolo:
 
     def test_overdue_renders(self):
         """Overdue pregnancy (>42w) renders correctly."""
-        hc = _make_hc(
-            pregnancy_state="42w (overdue, EDD was 2026-03-01)"
-        )
+        hc = _make_hc(pregnancy_state="42w (overdue, EDD was 2026-03-01)")
         rendered = render_hot_context_solo(hc)
         assert "## Pregnancy" in rendered
         assert "42w (overdue, EDD was 2026-03-01)" in rendered
 
     def test_recent_loss_renders(self):
         """Recent loss (<90 days) renders with sensitivity."""
-        hc = _make_hc(
-            pregnancy_state="Recent loss (12 days ago). Handle with care."
-        )
+        hc = _make_hc(pregnancy_state="Recent loss (12 days ago). Handle with care.")
         rendered = render_hot_context_solo(hc)
         assert "## Pregnancy" in rendered
         assert "Recent loss (12 days ago). Handle with care." in rendered
 
     def test_recent_birth_renders(self):
         """Recent birth (<90 days) renders correctly."""
-        hc = _make_hc(
-            pregnancy_state="Birth 5 days ago (EDD was 2026-10-22)."
-        )
+        hc = _make_hc(pregnancy_state="Birth 5 days ago (EDD was 2026-10-22).")
         rendered = render_hot_context_solo(hc)
         assert "## Pregnancy" in rendered
         assert "Birth 5 days ago (EDD was 2026-10-22)." in rendered
@@ -140,6 +144,7 @@ class TestPregnancyHotContextSolo:
             pregnancy_dating_basis=None,  # data corruption
         )
         from app.services.pregnancy import format_pregnancy_state
+
         result = format_pregnancy_state(user)
         assert result is None  # should omit section for safety
 
@@ -167,7 +172,10 @@ class TestPregnancyHotContextSolo:
             recent_messages=hc.recent_messages,
             time_since_last_message=hc.time_since_last_message,
             trigger_metadata=hc.trigger_metadata,
-            topic_status={"headline": "test", "last_updated_at": datetime.now(timezone.utc)},
+            topic_status={
+                "headline": "test",
+                "last_updated_at": datetime.now(timezone.utc),
+            },
             pregnancy_state=hc.pregnancy_state,
         )
         rendered = render_hot_context_solo(hc)
@@ -194,13 +202,106 @@ class TestPregnancyHotContextSolo:
             recent_messages=hc.recent_messages,
             time_since_last_message=hc.time_since_last_message,
             trigger_metadata=hc.trigger_metadata,
-            cross_topic_peek=[{"slug": "career", "display_name": "Career", "last_active_at": datetime.now(timezone.utc)}],
+            cross_topic_peek=[
+                {
+                    "slug": "career",
+                    "display_name": "Career",
+                    "last_active_at": datetime.now(timezone.utc),
+                }
+            ],
             pregnancy_state=hc.pregnancy_state,
         )
         rendered = render_hot_context_solo(hc)
         preg_idx = rendered.index("## Pregnancy")
         ct_idx = rendered.index("## Cross-topic activity")
-        assert preg_idx < ct_idx, "Pregnancy section should appear before cross-topic section"
+        assert (
+            preg_idx < ct_idx
+        ), "Pregnancy section should appear before cross-topic section"
+
+    @pytest.mark.asyncio
+    async def test_solo_partner_sharing_pending_only_with_dyad_partner(self, fake_pool):
+        user = _make_user(user_id=str(uuid4()))
+        partner = _make_user(user_id=str(uuid4()), name="Ben")
+        fake_pool.users[user.id] = user.__dict__.copy()
+        fake_pool.users[partner.id] = partner.__dict__.copy()
+        fake_pool.dyad_partners[user.id] = partner.id
+
+        hc = await build_hot_context_solo(
+            fake_pool,
+            user,
+            [],
+            {"kind": "test"},
+            primary_topic_id=_TOPIC_ID,
+            bot_id="tante_rosi",
+        )
+        assert hc.current_user["partner_share"] is None
+        assert hc.current_user["partner_sharing_state"] == "pending"
+        rendered = render_hot_context_solo(hc)
+        assert "- partner_sharing_state: pending" in rendered
+
+        fake_pool.dyad_partners.clear()
+        no_partner = await build_hot_context_solo(
+            fake_pool,
+            user,
+            [],
+            {"kind": "test"},
+            primary_topic_id=_TOPIC_ID,
+            bot_id="tante_rosi",
+        )
+        assert no_partner.current_user["partner_sharing_state"] == "unavailable"
+
+    @pytest.mark.asyncio
+    async def test_solo_hot_context_does_not_surface_partner_rows(self, fake_pool):
+        user = _make_user(user_id=str(uuid4()))
+        partner = _make_user(user_id=str(uuid4()), name="Ben")
+        fake_pool.users[user.id] = user.__dict__.copy()
+        fake_pool.users[partner.id] = partner.__dict__.copy()
+        fake_pool.dyad_partners[user.id] = partner.id
+        fake_pool.user_bot_state[(user.id, "tante_rosi")] = {
+            "user_id": user.id,
+            "bot_id": "tante_rosi",
+            "partner_share": "opt_in",
+        }
+        partner_memory_id = uuid4()
+        fake_pool.memories[partner_memory_id] = {
+            "id": partner_memory_id,
+            "about_user_id": partner.id,
+            "content": "partner private memory",
+            "visibility": "dyad_shareable",
+            "shareable_summary": "partner safe summary",
+            "related_theme_ids": [],
+            "status": "active",
+            "created_at": datetime.now(timezone.utc),
+            "last_referenced_at": None,
+            "recorded_by_bot_id": "tante_rosi",
+        }
+        fake_pool.messages[uuid4()] = {
+            "id": uuid4(),
+            "direction": "inbound",
+            "sender_id": partner.id,
+            "recipient_id": None,
+            "content": "partner raw message",
+            "processing_state": "processed",
+            "sent_at": datetime.now(timezone.utc),
+            "charge": "routine",
+            "deleted_at": None,
+            "bot_id": "tante_rosi",
+            "topic_id": _TOPIC_ID,
+        }
+
+        hc = await build_hot_context_solo(
+            fake_pool,
+            user,
+            [],
+            {"kind": "test"},
+            primary_topic_id=_TOPIC_ID,
+            bot_id="tante_rosi",
+        )
+        rendered = render_hot_context_solo(hc)
+
+        assert "partner private memory" not in rendered
+        assert "partner safe summary" not in rendered
+        assert "partner raw message" not in rendered
 
 
 class TestPregnancyHelperIntegration:
@@ -214,6 +315,7 @@ class TestPregnancyHelperIntegration:
             pregnancy_started_at=datetime(2026, 1, 15, tzinfo=timezone.utc),
         )
         from app.services.pregnancy import format_pregnancy_state
+
         # Use an explicit today to get deterministic output
         result = format_pregnancy_state(user, today=date(2026, 5, 12))
         assert result is not None
@@ -231,6 +333,7 @@ class TestPregnancyHelperIntegration:
             pregnancy_outcome="loss",
         )
         from app.services.pregnancy import format_pregnancy_state
+
         result = format_pregnancy_state(user, today=date(2026, 5, 12))
         assert result is not None
         assert "Recent loss" in result
@@ -246,6 +349,7 @@ class TestPregnancyHelperIntegration:
             pregnancy_outcome="birth",
         )
         from app.services.pregnancy import format_pregnancy_state
+
         result = format_pregnancy_state(user, today=date(2026, 5, 12))
         assert result is not None
         assert "Birth" in result
@@ -255,6 +359,7 @@ class TestPregnancyHelperIntegration:
         """format_pregnancy_state returns None when EDD is null."""
         user = _make_user()
         from app.services.pregnancy import format_pregnancy_state
+
         assert format_pregnancy_state(user) is None
 
     def test_format_pregnancy_state_old_ended(self):
@@ -267,6 +372,7 @@ class TestPregnancyHelperIntegration:
             pregnancy_outcome="birth",
         )
         from app.services.pregnancy import format_pregnancy_state
+
         result = format_pregnancy_state(user, today=date(2026, 5, 12))
         assert result is None  # >90 days ago
 
@@ -277,6 +383,7 @@ class TestPregnancyHelperIntegration:
             pregnancy_dating_basis=None,
         )
         from app.services.pregnancy import format_pregnancy_state
+
         with caplog.at_level(logging.WARNING):
             result = format_pregnancy_state(user)
         assert result is None
@@ -294,6 +401,7 @@ class TestPartnerPregnancyStateHelper:
     def test_no_pregnancy_returns_none(self):
         """When partner has no pregnancy_edd, return None."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         partner_user = {"name": "Eva", "pregnancy_edd": None}
         result = _render_partner_pregnancy_state(partner_user, "Eva")
         assert result is None
@@ -301,6 +409,7 @@ class TestPartnerPregnancyStateHelper:
     def test_active_pregnancy_one_liner(self):
         """Active pregnancy renders the one-line gestational summary."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         partner_user = {
             "name": "Eva",
             "pregnancy_edd": date(2026, 10, 22),
@@ -319,6 +428,7 @@ class TestPartnerPregnancyStateHelper:
     def test_recent_loss_one_liner(self):
         """Recent loss (<90d) renders the sensitivity one-liner."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         ended = datetime.now(timezone.utc) - timedelta(days=12)
         partner_user = {
             "name": "Eva",
@@ -336,6 +446,7 @@ class TestPartnerPregnancyStateHelper:
     def test_termination_renders_as_loss(self):
         """Termination renders as loss for sensitivity purposes."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         ended = datetime.now(timezone.utc) - timedelta(days=5)
         partner_user = {
             "name": "Eva",
@@ -353,6 +464,7 @@ class TestPartnerPregnancyStateHelper:
         """Birth outcome is NOT rendered in the dyad partner state (only
         loss/termination are surfaced)."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         ended = datetime.now(timezone.utc) - timedelta(days=5)
         partner_user = {
             "name": "Eva",
@@ -367,6 +479,7 @@ class TestPartnerPregnancyStateHelper:
     def test_loss_older_than_90_days_omitted(self):
         """Loss >90 days ago returns None (stale)."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         ended = datetime.now(timezone.utc) - timedelta(days=100)
         partner_user = {
             "name": "Eva",
@@ -381,6 +494,7 @@ class TestPartnerPregnancyStateHelper:
     def test_data_corruption_edd_without_dating_basis(self):
         """EDD set without dating_basis → return None (no crash)."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         partner_user = {
             "name": "Eva",
             "pregnancy_edd": date(2026, 10, 22),
@@ -393,6 +507,7 @@ class TestPartnerPregnancyStateHelper:
         """Smoke test: partner_user dict with pregnancy fields is handled
         correctly. Simulates what _user_profile returns."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         # Full partner_user as _user_profile would return for active pregnancy
         partner_user = {
             "id": "p1",
@@ -401,7 +516,6 @@ class TestPartnerPregnancyStateHelper:
             "timezone": "UTC",
             "style_notes": "",
             "onboarding_state": "pending",
-            "cross_thread_sharing_default": None,
             "pregnancy_edd": date(2026, 10, 22),
             "pregnancy_dating_basis": "lmp",
             "pregnancy_lmp_date": None,
@@ -424,6 +538,7 @@ class TestNoAutoBridgingGuarantee:
     def test_dyad_one_liner_contains_no_theme_data(self):
         """The one-liner should only contain name, weeks/days, and EDD."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         partner_user = {
             "name": "Eva",
             "pregnancy_edd": date(2026, 10, 22),
@@ -445,6 +560,7 @@ class TestNoAutoBridgingGuarantee:
     def test_loss_one_liner_contains_no_theme_data(self):
         """The loss one-liner should only contain name, 'loss', days ago."""
         from app.services.hot_context import _render_partner_pregnancy_state
+
         ended = datetime.now(timezone.utc) - timedelta(days=12)
         partner_user = {
             "name": "Eva",

@@ -9,12 +9,17 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from app.bots.ids import MEDIATOR_BOT_ID, TANTE_ROSI_BOT_ID
 from app.bots.registry import get_relationship_topic_id, get_pregnancy_topic_id
 from app.config import get_settings
 from app.db import db_lifespan
 from app.models.user import fetch_user_by_id
 from app.services.hot_context import build_hot_context, render_hot_context
-from app.services.hot_context_solo import build_hot_context_solo, render_hot_context_solo
+from app.services.hot_context_solo import (
+    build_hot_context_solo,
+    render_hot_context_solo,
+)
+from app.services.partner_sharing import get_partner_share
 from app.services.pregnancy import format_pregnancy_state
 from app.services.prompts import render_system_prompt
 from app.services.prompts_solo import render_solo_system_prompt
@@ -50,32 +55,62 @@ async def _replay(pool: Any, prompt_version: str, since: str, user_id: str) -> N
     )
     settings = get_settings()
     for row in rows:
-        hot_context = await build_hot_context(pool, user, partner, [row["id"]], {"kind": "staging_replay"}, primary_topic_id=get_relationship_topic_id(), allow_cross_topic_peek=True, allow_cross_topic_status_injection=True)
+        hot_context = await build_hot_context(
+            pool,
+            user,
+            partner,
+            [row["id"]],
+            {"kind": "staging_replay"},
+            primary_topic_id=get_relationship_topic_id(),
+            allow_cross_topic_peek=True,
+            allow_cross_topic_status_injection=True,
+        )
+        current_user_partner_share = await get_partner_share(
+            pool,
+            user_id=user.id,
+            bot_id=MEDIATOR_BOT_ID,
+        )
+        partner_partner_share = await get_partner_share(
+            pool,
+            user_id=partner.id,
+            bot_id=MEDIATOR_BOT_ID,
+        )
         system_prompt = render_system_prompt(
             settings.assistant_name,
             user.name,
             partner.name,
             onboarding_state=user.onboarding_state,
-            current_user_sharing_default=user.cross_thread_sharing_default,
-            partner_sharing_default=partner.cross_thread_sharing_default,
+            current_user_partner_share=current_user_partner_share,
+            partner_partner_share=partner_partner_share,
+            current_user_partner_sharing_state=hot_context.current_user.get(
+                "partner_sharing_state"
+            ),
+            partner_partner_sharing_state=hot_context.partner_user.get(
+                "partner_sharing_state"
+            ),
         )
         rendered = render_hot_context(hot_context)
         candidate = (
             f"[dry-run:{prompt_version}] Would answer {user.name} after message {row['id']}: "
             f"{str(row.get('content') or '').strip()[:160]}"
         )
-        print(json.dumps({
-            "message_id": str(row["id"]),
-            "sent_at": str(row["sent_at"]),
-            "prompt_version": prompt_version,
-            "prompt_preview": f"{system_prompt}\n\n{rendered}"[:1000],
-            "would_send": candidate,
-            "would_write": [
-                {"table": "bot_turns", "action": "insert"},
-                {"table": "messages", "action": "insert_outbound"},
-                {"table": "tool_calls", "action": "dry_run_record_only"},
-            ],
-        }, default=str))
+        print(
+            json.dumps(
+                {
+                    "message_id": str(row["id"]),
+                    "sent_at": str(row["sent_at"]),
+                    "prompt_version": prompt_version,
+                    "prompt_preview": f"{system_prompt}\n\n{rendered}"[:1000],
+                    "would_send": candidate,
+                    "would_write": [
+                        {"table": "bot_turns", "action": "insert"},
+                        {"table": "messages", "action": "insert_outbound"},
+                        {"table": "tool_calls", "action": "dry_run_record_only"},
+                    ],
+                },
+                default=str,
+            )
+        )
 
 
 async def _rosi_replay(pool: Any, user_id: str) -> None:
@@ -85,19 +120,29 @@ async def _rosi_replay(pool: Any, user_id: str) -> None:
     user = await fetch_user_by_id(pool, UUID(user_id))
     topic_id = get_pregnancy_topic_id()
     if topic_id is None:
-        print(json.dumps({"error": "pregnancy topic id not cached — run migration 0033?"}))
+        print(
+            json.dumps({"error": "pregnancy topic id not cached — run migration 0033?"})
+        )
         return
 
     # Exercise format_pregnancy_state directly as a smoke test.
     state = format_pregnancy_state(user)
-    print(json.dumps({
-        "user_id": str(user.id),
-        "user_name": user.name,
-        "pregnancy_edd": user.pregnancy_edd.isoformat() if user.pregnancy_edd else None,
-        "pregnancy_dating_basis": user.pregnancy_dating_basis,
-        "pregnancy_active": user.pregnancy_edd is not None and user.pregnancy_ended_at is None,
-        "formatted_state": state,
-    }, default=str))
+    print(
+        json.dumps(
+            {
+                "user_id": str(user.id),
+                "user_name": user.name,
+                "pregnancy_edd": (
+                    user.pregnancy_edd.isoformat() if user.pregnancy_edd else None
+                ),
+                "pregnancy_dating_basis": user.pregnancy_dating_basis,
+                "pregnancy_active": user.pregnancy_edd is not None
+                and user.pregnancy_ended_at is None,
+                "formatted_state": state,
+            },
+            default=str,
+        )
+    )
 
     # Build and render solo hot context.
     hc = await build_hot_context_solo(
@@ -106,13 +151,18 @@ async def _rosi_replay(pool: Any, user_id: str) -> None:
         [],  # no triggering message ids for dry run
         {"kind": "staging_rosi_replay", "triggering_message_ids": [], "messages": []},
         primary_topic_id=topic_id,
-        bot_id="tante_rosi",
+        bot_id=TANTE_ROSI_BOT_ID,
         allow_cross_topic_peek=True,
     )
     rendered = render_hot_context_solo(hc)
-    print(json.dumps({
-        "hot_context_solo_preview": rendered[:1200],
-    }, default=str))
+    print(
+        json.dumps(
+            {
+                "hot_context_solo_preview": rendered[:1200],
+            },
+            default=str,
+        )
+    )
 
 
 async def _main_async(args: argparse.Namespace) -> None:

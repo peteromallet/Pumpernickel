@@ -30,7 +30,9 @@ def list_value(row: Any, key: str) -> list[Any]:
     return list(value(row, key, []))
 
 
-def add_date_range(clauses: list[str], params: list[Any], column: str, date_range: DateRange | None) -> None:
+def add_date_range(
+    clauses: list[str], params: list[Any], column: str, date_range: DateRange | None
+) -> None:
     if date_range is None:
         return
     if date_range.start is not None:
@@ -45,7 +47,11 @@ def media_analysis_text(row_or_analysis: Any) -> str:
     analysis = value(row_or_analysis, "media_analysis", row_or_analysis)
     if not isinstance(analysis, dict):
         return ""
-    text = analysis.get("explanation") or analysis.get("description") or analysis.get("summary")
+    text = (
+        analysis.get("explanation")
+        or analysis.get("description")
+        or analysis.get("summary")
+    )
     if not text:
         return ""
     media_type = analysis.get("kind") or value(row_or_analysis, "media_type", "media")
@@ -75,7 +81,9 @@ def _time(value_: Any, timezone: str | None, now: Any = None) -> dict[str, str] 
     return temporal_reference(value_, timezone, now=now)
 
 
-def message_hit(row: Any, *, timezone: str | None = None, now: Any = None) -> MessageHit:
+def message_hit(
+    row: Any, *, timezone: str | None = None, now: Any = None
+) -> MessageHit:
     content = value(row, "content", "") or media_analysis_text(row)
     return MessageHit(
         id=row["id"],
@@ -88,7 +96,9 @@ def message_hit(row: Any, *, timezone: str | None = None, now: Any = None) -> Me
     )
 
 
-def theme_summary(row: Any, *, timezone: str | None = None, now: Any = None) -> ThemeSummary:
+def theme_summary(
+    row: Any, *, timezone: str | None = None, now: Any = None
+) -> ThemeSummary:
     return ThemeSummary(
         id=row["id"],
         title=row["title"],
@@ -108,6 +118,8 @@ def memory_row(row: Any, *, timezone: str | None = None, now: Any = None) -> Mem
         about_user_id=row["about_user_id"],
         content=row["content"],
         status=row["status"],
+        visibility=value(row, "visibility", "private"),
+        shareable_summary=value(row, "shareable_summary"),
         related_theme_ids=list_value(row, "related_theme_ids"),
         created_at=row["created_at"],
         last_referenced_at=row["last_referenced_at"],
@@ -116,7 +128,9 @@ def memory_row(row: Any, *, timezone: str | None = None, now: Any = None) -> Mem
     )
 
 
-def watch_item_row(row: Any, *, timezone: str | None = None, now: Any = None) -> WatchItemRow:
+def watch_item_row(
+    row: Any, *, timezone: str | None = None, now: Any = None
+) -> WatchItemRow:
     return WatchItemRow(
         id=row["id"],
         owner_user_id=row["owner_user_id"],
@@ -133,7 +147,9 @@ def watch_item_row(row: Any, *, timezone: str | None = None, now: Any = None) ->
     )
 
 
-def observation_row(row: Any, *, timezone: str | None = None, now: Any = None) -> ObservationRow:
+def observation_row(
+    row: Any, *, timezone: str | None = None, now: Any = None
+) -> ObservationRow:
     return ObservationRow(
         id=row["id"],
         content=row["content"],
@@ -151,7 +167,9 @@ def observation_row(row: Any, *, timezone: str | None = None, now: Any = None) -
     )
 
 
-def distillation_row(row: Any, *, timezone: str | None = None, now: Any = None) -> DistillationRow:
+def distillation_row(
+    row: Any, *, timezone: str | None = None, now: Any = None
+) -> DistillationRow:
     return DistillationRow(
         id=row["id"],
         content=row["content"],

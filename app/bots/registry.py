@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from app.bots.base import BotSpec, ReadScopes, WriteScopes
-from app.bots.ids import MEDIATOR_BOT_ID
+from app.bots.ids import MEDIATOR_BOT_ID, TANTE_ROSI_BOT_ID
 from app.bots.mediator import MEDIATOR_BOT
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,8 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
     """
     try:
         row = await pool.fetchrow(
-            "SELECT display_name FROM bots WHERE id = 'mediator'"
+            "SELECT display_name FROM bots WHERE id = $1",
+            MEDIATOR_BOT_ID,
         )
     except Exception:
         logger.warning(
@@ -113,14 +114,17 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
         hot_context_builder_version=MEDIATOR_BOT.hot_context_builder_version,
         tool_schema_version=MEDIATOR_BOT.tool_schema_version,
     )
-    BOT_SPECS["mediator"] = rebuilt
-    logger.info("populate_mediator_spec_from_db: mediator spec updated (display_name=%s)", display_name)
+    BOT_SPECS[MEDIATOR_BOT_ID] = rebuilt
+    logger.info(
+        "populate_mediator_spec_from_db: mediator spec updated (display_name=%s)",
+        display_name,
+    )
 
 
 async def populate_tante_rosi_spec_from_db(pool: Any) -> None:
     """Check for a Tante Rosi row in the bots table and register if present.
 
-    Mirrors populate_mediator_spec_from_db but for tante_rosi.  Row existence
+    Mirrors populate_mediator_spec_from_db but for Tante Rosi.  Row existence
     is the enablement gate — the bots table has no ``enabled`` column (only
     id, display_name, created_at per migration 0020).
 
@@ -129,9 +133,7 @@ async def populate_tante_rosi_spec_from_db(pool: Any) -> None:
     once at startup.
     """
     try:
-        row = await pool.fetchrow(
-            "SELECT 1 FROM bots WHERE id = 'tante_rosi'"
-        )
+        row = await pool.fetchrow("SELECT 1 FROM bots WHERE id = $1", TANTE_ROSI_BOT_ID)
     except Exception:
         logger.warning(
             "populate_tante_rosi_spec_from_db: could not query bots table — "

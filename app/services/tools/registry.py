@@ -18,11 +18,14 @@ from tool_schemas import (
     TOOL_REGISTRY,
     SetTopicStatusInput,
     SetTopicStatusOutput,
+    SetPartnerSharingInput,
+    SetPartnerSharingOutput,
     UpdateTurnPlanInput,
     UpdateTurnPlanOutput,
 )
 
 TOOL_REGISTRY["set_topic_status"] = (SetTopicStatusInput, SetTopicStatusOutput)
+TOOL_REGISTRY["set_partner_sharing"] = (SetPartnerSharingInput, SetPartnerSharingOutput)
 
 ToolFn = Callable[[TurnContext, BaseModel], Awaitable[BaseModel]]
 
@@ -33,7 +36,9 @@ async def _consult_perspective(ctx: TurnContext, args: BaseModel) -> BaseModel:
     return await consult_perspective(ctx, args)
 
 
-async def _update_turn_plan(ctx: TurnContext, args: UpdateTurnPlanInput) -> UpdateTurnPlanOutput:
+async def _update_turn_plan(
+    ctx: TurnContext, args: UpdateTurnPlanInput
+) -> UpdateTurnPlanOutput:
     plan = ctx.turn_plan
     if args.add_steps:
         plan.add_steps(list(args.add_steps))
@@ -74,7 +79,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "consult_perspective": "Use only in the consult step, and only when the user explicitly asks for a second opinion, critique, review, or another perspective. It cannot write, send, escalate, or call itself. Treat its output as advice, not authority.",
     "list_bridge_candidates": "List bridge candidates for this dyad to inspect pending/ready/sent bridge material. Target-facing views expose shareable summaries only, not raw private material. Partner paths are exactly `message_partner` (ready/actionable in the target prompt until addressed or declined), `coach_in_person`, `casual_share`, `hold_for_context`, `ask_permission`, and `do_not_bridge` (audit-only). Lifecycle statuses are exactly `pending` (drafted, not yet shareable), `ready` (cleared to send), `sent` (delivered to target), `declined` (source user refused sharing), `blocked` (OOB or sensitivity prevents sending), `addressed` (no longer needs bridging), and `expired` (stale).",
     "update_user_style_notes": "Replace a user's style notes when a durable communication or processing style is observed; avoid for transient mood. Example: update that someone processes by talking through a hard moment.",
-    "update_cross_thread_sharing_default": "Set one user's opt-in/opt-out default for cross-thread bridge sharing after they explicitly choose. opt_in means you may use their perspective with the partner when it helps, unless OOB blocks it. opt_out means their thread is private by default; only bridge specific material they explicitly ask or allow you to share. Do not infer the setting from vague comfort or discomfort; get an explicit choice. OOB always overrides opt-in.",
+    "set_partner_sharing": "Set the current user's opt-in/opt-out choice for this calling bot after they explicitly choose. opt_in allows this bot's safe dyad_shareable summaries to be shown to the partner; opt_out keeps this bot's rows private by default. Do not infer the setting from vague comfort or discomfort; get an explicit choice.",
     "create_bridge_candidate": "Create a bridge candidate when a partner says something that materially explains, contradicts, clarifies, softens, or adds important context to something the other partner has said and a shareable version may help. Link source message ids when possible. Write a neutral `shareable_summary`; keep private/raw reasoning in `internal_note`. Set `partner_path` to one of exactly `message_partner` (ready/actionable in the target prompt until addressed or declined; do not proactively send), `coach_in_person`, `casual_share`, `hold_for_context`, `ask_permission`, or `do_not_bridge` (audit-only). If the source user is unset or opt_out, create as `pending` unless they explicitly authorize this specific bridge. Lifecycle statuses are exactly `pending` (drafted, not yet shareable), `ready` (cleared to send), `sent` (delivered to target), `declined` (source user refused sharing), `blocked` (OOB or sensitivity prevents sending), `addressed` (no longer needs bridging), and `expired` (stale); high-sensitivity material should stay pending or blocked until it is safe.",
     "update_bridge_candidate": "Update bridge candidate lifecycle status, partner path, or improve summary/note without exposing raw private material. Partner paths are exactly `message_partner` (ready/actionable in the target prompt until addressed or declined; do not proactively send), `coach_in_person`, `casual_share`, `hold_for_context`, `ask_permission`, and `do_not_bridge` (audit-only). Lifecycle statuses are exactly `pending` (drafted, not yet shareable), `ready` (cleared to send), `sent` (delivered to target), `declined` (source user refused sharing), `blocked` (OOB or sensitivity prevents sending), `addressed` (no longer needs bridging), and `expired` (stale).",
     "send_bridge_candidate": "Explicitly send a `ready` bridge candidate now through the guarded outbound path using only its shareable summary. This is immediate-send behavior only; `message_partner` bridge rows should otherwise stay `ready` in the target prompt/hot context until addressed or declined. Only `ready` candidates are sendable; `pending`, `blocked`, and other lifecycle statuses cannot be sent.",
@@ -133,7 +138,7 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "list_bridge_candidates": read_tools.list_bridge_candidates,
     "list_scheduled_tasks": write_tools.list_scheduled_tasks,
     "update_user_style_notes": write_tools.update_user_style_notes,
-    "update_cross_thread_sharing_default": write_tools.update_cross_thread_sharing_default,
+    "set_partner_sharing": write_tools.set_partner_sharing,
     "create_bridge_candidate": write_tools.create_bridge_candidate,
     "update_bridge_candidate": write_tools.update_bridge_candidate,
     "send_bridge_candidate": write_tools.send_bridge_candidate,
@@ -193,7 +198,7 @@ READ_PHASE_TOOLS = {
 
 WRITE_PHASE_TOOLS = {
     "update_user_style_notes",
-    "update_cross_thread_sharing_default",
+    "set_partner_sharing",
     "create_bridge_candidate",
     "update_bridge_candidate",
     "send_bridge_candidate",
@@ -289,14 +294,22 @@ def to_anthropic_tools(allowed: set[str]) -> list[dict[str, Any]]:
 
 
 def _step_allowed(ctx: TurnContext) -> set[str]:
-    allowed = set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | ALWAYS_ALLOWED_TOOLS
+    allowed = (
+        set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | ALWAYS_ALLOWED_TOOLS
+    )
     if ctx.bot_spec is not None and ctx.bot_spec.tool_allowlist is not None:
         allowed &= ctx.bot_spec.tool_allowlist | ALWAYS_ALLOWED_TOOLS
     return allowed
 
 
-def _inject_consult_defaults(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> dict[str, Any]:
-    if ctx.current_step != "consult" or name not in _CONSULT_OWNER_INJECTING_TOOLS or not ctx.protected_owner_ids:
+def _inject_consult_defaults(
+    name: str, raw_args: dict[str, Any], ctx: TurnContext
+) -> dict[str, Any]:
+    if (
+        ctx.current_step != "consult"
+        or name not in _CONSULT_OWNER_INJECTING_TOOLS
+        or not ctx.protected_owner_ids
+    ):
         return raw_args
     merged = dict(raw_args or {})
     existing = merged.get("protected_owner_ids")
@@ -317,13 +330,28 @@ def _tool_error(message: str) -> dict[str, Any]:
     return {"error": message, "is_error": True}
 
 
-def _record_visible_tool_call(*, tool_name: str, args: Any, result: dict[str, Any], phase: str, started_at: datetime) -> None:
+def _record_visible_tool_call(
+    *,
+    tool_name: str,
+    args: Any,
+    result: dict[str, Any],
+    phase: str,
+    started_at: datetime,
+) -> None:
     if tool_name == "update_turn_plan":
         return
-    record_tool_call(tool_name=tool_name, args=args, result=result, phase=phase, started_at=started_at)
+    record_tool_call(
+        tool_name=tool_name,
+        args=args,
+        result=result,
+        phase=phase,
+        started_at=started_at,
+    )
 
 
-async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> dict[str, Any]:
+async def call_tool(
+    name: str, raw_args: dict[str, Any], ctx: TurnContext
+) -> dict[str, Any]:
     started = datetime.now(UTC)
     phase = ctx.current_step
     await record_turn_event(
@@ -346,10 +374,18 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             actor="tool",
             metadata={"tool_name": name, "reason": "unknown_tool"},
         )
-        _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=raw_args,
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     if name not in _step_allowed(ctx):
-        result = _tool_error(f"step: tool {name} is not allowed in {ctx.current_step} step")
+        result = _tool_error(
+            f"step: tool {name} is not allowed in {ctx.current_step} step"
+        )
         await record_turn_event(
             ctx.pool,
             ctx.turn_id,
@@ -359,7 +395,13 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             actor="tool",
             metadata={"tool_name": name, "reason": "step_not_allowed"},
         )
-        _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=raw_args,
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     if name == "consult_perspective" and ctx.trigger_metadata.get("_inside_consult"):
         result = _tool_error("step: consult_perspective cannot call itself")
@@ -372,7 +414,13 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             actor="tool",
             metadata={"tool_name": name, "reason": "recursive_consult"},
         )
-        _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=raw_args,
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     input_model, output_model = registry_entry
     try:
@@ -388,7 +436,13 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             actor="tool",
             metadata={"tool_name": name, "reason": "validation"},
         )
-        _record_visible_tool_call(tool_name=name, args=raw_args, result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=raw_args,
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     required_reads = READ_BEFORE_WRITE.get(name)
     if required_reads and not (required_reads & set(ctx.tool_call_log)):
@@ -401,9 +455,19 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             step=phase,
             severity="warning",
             actor="tool",
-            metadata={"tool_name": name, "reason": "read_before_write", "required_reads": sorted(required_reads)},
+            metadata={
+                "tool_name": name,
+                "reason": "read_before_write",
+                "required_reads": sorted(required_reads),
+            },
         )
-        _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=args.model_dump(mode="json"),
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     fn = TOOL_DISPATCH.get(name)
     if fn is None:
@@ -417,7 +481,13 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             actor="tool",
             metadata={"tool_name": name, "reason": "dispatch_missing"},
         )
-        _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=args.model_dump(mode="json"),
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     try:
         result = await fn(ctx, args)
@@ -430,10 +500,21 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             step=phase,
             severity="warning",
             actor="tool",
-            duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
-            metadata={"tool_name": name, "reason": result.get("error") or "tool_call_rejected"},
+            duration_ms=max(
+                0, int((datetime.now(UTC) - started).total_seconds() * 1000)
+            ),
+            metadata={
+                "tool_name": name,
+                "reason": result.get("error") or "tool_call_rejected",
+            },
         )
-        _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=args.model_dump(mode="json"),
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     except Exception as exc:
         result = _tool_error(f"exception: {exc}")
@@ -444,10 +525,18 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             step=phase,
             severity="error",
             actor="tool",
-            duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+            duration_ms=max(
+                0, int((datetime.now(UTC) - started).total_seconds() * 1000)
+            ),
             metadata={"tool_name": name, "exception_type": type(exc).__name__},
         )
-        _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=args.model_dump(mode="json"),
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         raise
     try:
         validated = output_model.model_validate(result)
@@ -460,10 +549,18 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
             step=phase,
             severity="warning",
             actor="tool",
-            duration_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+            duration_ms=max(
+                0, int((datetime.now(UTC) - started).total_seconds() * 1000)
+            ),
             metadata={"tool_name": name, "reason": "result_validation"},
         )
-        _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=args.model_dump(mode="json"),
+            result=result,
+            phase=phase,
+            started_at=started,
+        )
         return result
     result_dict = validated.model_dump(mode="json")
     await record_turn_event(
@@ -480,5 +577,11 @@ async def call_tool(name: str, raw_args: dict[str, Any], ctx: TurnContext) -> di
     )
     if name != "update_turn_plan":
         ctx.tool_call_log.append(name)
-        _record_visible_tool_call(tool_name=name, args=args.model_dump(mode="json"), result=result_dict, phase=phase, started_at=started)
+        _record_visible_tool_call(
+            tool_name=name,
+            args=args.model_dump(mode="json"),
+            result=result_dict,
+            phase=phase,
+            started_at=started,
+        )
     return result_dict

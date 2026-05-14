@@ -24,13 +24,15 @@ def _coach_prompt_renderer(
     *,
     prompt_version: str = "v1",
     onboarding_state: str | None = None,
-    current_user_sharing_default: str | None = None,
-    partner_sharing_default: str | None = None,
+    current_user_partner_share: str | None = None,
+    partner_partner_share: str | None = None,
+    current_user_partner_sharing_state: str | None = None,
+    partner_partner_sharing_state: str | None = None,
     **kwargs: Any,
 ) -> str:
     """Coach prompt renderer — delegates to the solo system prompt.
 
-    Accepts partner_name, partner_sharing_default, and partner (via
+    Accepts partner_name, partner_partner_share, and partner (via
     **kwargs) from BotSpec.render_system_prompt but ignores them.  The
     solo renderer has no dyadic concepts.
     """
@@ -39,7 +41,8 @@ def _coach_prompt_renderer(
         user_name,
         prompt_version=prompt_version,
         onboarding_state=onboarding_state,
-        sharing_default=current_user_sharing_default,
+        partner_share=current_user_partner_share,
+        partner_sharing_state=current_user_partner_sharing_state,
         topic_display_name="career",
     )
 

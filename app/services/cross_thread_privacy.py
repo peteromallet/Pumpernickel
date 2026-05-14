@@ -12,29 +12,29 @@ from enum import Enum
 from typing import Any, Literal, Mapping
 from uuid import UUID
 
-SharingDefault = Literal["unset", "opt_in", "opt_out"]
+PartnerShareState = Literal["unset", "opt_in", "opt_out"]
 RawMessageVisibilityReason = Literal[
     "current_user_thread",
-    "source_user_opted_in",
-    "source_user_not_opted_in",
+    "thread_owner_partner_share_opted_in",
+    "thread_owner_partner_share_not_opted_in",
 ]
 
 BRIDGE_TARGET_VISIBLE_STATUSES = frozenset({"ready", "sent", "addressed"})
-RAW_PARTNER_CONTENT_REDACTION = "[raw partner content withheld by sharing_default]"
-RAW_PARTNER_CONTENT_OMISSION_REASON = "raw_partner_content_hidden_by_sharing_default"
+RAW_PARTNER_CONTENT_REDACTION = "[raw partner content withheld by partner_share]"
+RAW_PARTNER_CONTENT_OMISSION_REASON = "raw_partner_content_hidden_by_partner_share"
 
 
 @dataclass(frozen=True)
 class RawMessageVisibility:
     visible: bool
-    sharing_default: SharingDefault
+    partner_share: PartnerShareState
     reason: RawMessageVisibilityReason
     redaction: str | None = None
     omission_reason: str | None = None
 
 
-def normalize_sharing_default(value: Any) -> SharingDefault:
-    """Normalize storage/API values for display and privacy checks."""
+def normalize_partner_share_for_privacy(value: Any) -> PartnerShareState:
+    """Normalize partner_share values for display and privacy checks."""
     if isinstance(value, Enum):
         value = value.value
     if value in (None, "", "unset"):
@@ -50,26 +50,30 @@ def raw_message_visibility(
     *,
     viewer_user_id: UUID,
     thread_owner_user_id: UUID,
-    thread_owner_sharing_default: Any,
+    thread_owner_partner_share: Any,
 ) -> RawMessageVisibility:
-    """Return whether a viewer can see raw message content from a thread owner."""
-    sharing_default = normalize_sharing_default(thread_owner_sharing_default)
+    """Return whether a viewer can see raw content from the message's thread owner.
+
+    Callers must pass the owner partner_share for the relevant message bot.
+    Own-thread reads are always visible; partner reads require opt_in.
+    """
+    partner_share = normalize_partner_share_for_privacy(thread_owner_partner_share)
     if viewer_user_id == thread_owner_user_id:
         return RawMessageVisibility(
             visible=True,
-            sharing_default=sharing_default,
+            partner_share=partner_share,
             reason="current_user_thread",
         )
-    if sharing_default == "opt_in":
+    if partner_share == "opt_in":
         return RawMessageVisibility(
             visible=True,
-            sharing_default=sharing_default,
-            reason="source_user_opted_in",
+            partner_share=partner_share,
+            reason="thread_owner_partner_share_opted_in",
         )
     return RawMessageVisibility(
         visible=False,
-        sharing_default=sharing_default,
-        reason="source_user_not_opted_in",
+        partner_share=partner_share,
+        reason="thread_owner_partner_share_not_opted_in",
         redaction=RAW_PARTNER_CONTENT_REDACTION,
         omission_reason=RAW_PARTNER_CONTENT_OMISSION_REASON,
     )
@@ -79,12 +83,12 @@ def can_view_raw_message(
     *,
     viewer_user_id: UUID,
     thread_owner_user_id: UUID,
-    thread_owner_sharing_default: Any,
+    thread_owner_partner_share: Any,
 ) -> bool:
     return raw_message_visibility(
         viewer_user_id=viewer_user_id,
         thread_owner_user_id=thread_owner_user_id,
-        thread_owner_sharing_default=thread_owner_sharing_default,
+        thread_owner_partner_share=thread_owner_partner_share,
     ).visible
 
 
@@ -93,12 +97,12 @@ def redact_raw_message_content(
     *,
     viewer_user_id: UUID,
     thread_owner_user_id: UUID,
-    thread_owner_sharing_default: Any,
+    thread_owner_partner_share: Any,
 ) -> str:
     visibility = raw_message_visibility(
         viewer_user_id=viewer_user_id,
         thread_owner_user_id=thread_owner_user_id,
-        thread_owner_sharing_default=thread_owner_sharing_default,
+        thread_owner_partner_share=thread_owner_partner_share,
     )
     if visibility.visible:
         return "" if content is None else str(content)
@@ -109,12 +113,12 @@ def should_omit_raw_message(
     *,
     viewer_user_id: UUID,
     thread_owner_user_id: UUID,
-    thread_owner_sharing_default: Any,
+    thread_owner_partner_share: Any,
 ) -> bool:
     return not can_view_raw_message(
         viewer_user_id=viewer_user_id,
         thread_owner_user_id=thread_owner_user_id,
-        thread_owner_sharing_default=thread_owner_sharing_default,
+        thread_owner_partner_share=thread_owner_partner_share,
     )
 
 

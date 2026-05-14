@@ -16,7 +16,12 @@ pytestmark = pytest.mark.anyio
 def _seed_pair(fake_pool) -> tuple[User, User, object]:
     user = User(uuid4(), "Maya", "15555550100", "UTC")
     partner = User(uuid4(), "Ben", "15555550101", "UTC")
-    fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
+    fake_pool.users[user.id] = {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "timezone": user.timezone,
+    }
     fake_pool.users[partner.id] = {
         "id": partner.id,
         "name": partner.name,
@@ -51,7 +56,9 @@ def test_known_prompt_version_renders_and_unknown_version_fails() -> None:
     assert "Mediator" in rendered
     assert "Maya" in rendered
     assert "Ben" in rendered
-    with pytest.raises(UnknownPromptVersion, match="unknown system prompt version: missing"):
+    with pytest.raises(
+        UnknownPromptVersion, match="unknown system prompt version: missing"
+    ):
         render_system_prompt("Mediator", "Maya", "Ben", prompt_version="missing")
 
 
@@ -68,7 +75,9 @@ def test_prompt_pushes_balanced_perspective_without_forced_optimism() -> None:
     rendered = render_system_prompt("Mediator", "Maya", "Ben", prompt_version="v1")
 
     assert "surface contrary evidence and positive moments" in rendered
-    assert "If relevant positive context is already known, mention it gently" in rendered
+    assert (
+        "If relevant positive context is already known, mention it gently" in rendered
+    )
     assert "if not, ask one balancing question" in rendered
     assert "Do not force optimism, minimize hurt" in rendered
     assert "use positives to dilute a legitimate grievance" in rendered
@@ -105,7 +114,9 @@ def test_prompt_omits_first_contact_when_onboarding_complete() -> None:
     assert "# First Contact" not in rendered
     assert "Write the first message yourself using judgment" not in rendered
 
-    default_rendered = render_system_prompt("Mediator", "Maya", "Ben", prompt_version="v1")
+    default_rendered = render_system_prompt(
+        "Mediator", "Maya", "Ben", prompt_version="v1"
+    )
     assert "# First Contact" not in default_rendered
 
 
@@ -167,6 +178,8 @@ def test_v3_prompt_uses_adaptive_step_language() -> None:
 
 
 def test_cross_thread_unset_branch_present_when_current_user_unset() -> None:
+    from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+
     rendered = render_system_prompt(
         "Mediator",
         "Maya",
@@ -174,12 +187,12 @@ def test_cross_thread_unset_branch_present_when_current_user_unset() -> None:
         prompt_version="v1",
         current_user_sharing_default="unset",
         partner_sharing_default="opt_in",
+        current_user_partner_sharing_state="pending",
     )
 
-    assert "Treat this as urgent" in rendered
-    assert "ask them to choose `opt_in` or `opt_out`" in rendered
-    assert "the choice is not all-or-nothing" in rendered
-    assert "Peter has opted in by default" in rendered
+    assert PENDING_PARTNER_SHARING_PROMPT_SLOT in rendered
+    assert "raise the choice naturally this turn" in rendered
+    assert "`set_partner_sharing(opt_in=true)`" in rendered
     # opt-out soft-nudge content should not appear when user is unset
     assert "never pressure or repeat" not in rendered
 
@@ -195,8 +208,8 @@ def test_cross_thread_opt_out_branch_present_when_current_user_opt_out() -> None
     )
 
     assert "private by default" in rendered
-    assert "never pressure or repeat" in rendered
-    assert "gently surface the value sharing could unlock" in rendered
+    assert "do not pressure or repeat the opt-in question" in rendered
+    assert "gently surface the value sharing could unlock" not in rendered
     # urgent-ask phrasing should not appear when user has chosen opt_out
     assert "Treat this as urgent" not in rendered
     assert "ask them to choose `opt_in` or `opt_out`" not in rendered
@@ -254,19 +267,31 @@ def test_partner_perspective_quiet_when_partner_opt_out() -> None:
     assert "Do not paraphrase partner-thread content" in rendered
 
 
-async def test_eval_turn_uses_explicit_pool_prompt_version_and_fake_whatsapp(fake_pool, app_env, monkeypatch) -> None:
+async def test_eval_turn_uses_explicit_pool_prompt_version_and_fake_whatsapp(
+    fake_pool, app_env, monkeypatch
+) -> None:
     eval_pool = fake_pool
     global_pool = type(fake_pool)()
     user, _, message_id = _seed_pair(eval_pool)
     observed: dict[str, object] = {}
 
-    async def oob_ok(pool, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id):
+    async def oob_ok(
+        pool, content, recipient_id, protected_owner_ids=None, *, bot_id, topic_id
+    ):
         assert pool is eval_pool
         assert bot_id == "mediator"
         assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "suggested_rewrite": None}
 
-    async def fake_run_step(client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages, **kwargs):
+    async def fake_run_step(
+        client,
+        ctx,
+        system_prompt,
+        hot_context_rendered,
+        allowed_tools,
+        seed_messages,
+        **kwargs,
+    ):
         assert ctx.pool is eval_pool
         assert "Maya" in system_prompt
         assert "## Recent messages" in hot_context_rendered
@@ -297,12 +322,15 @@ async def test_eval_turn_uses_explicit_pool_prompt_version_and_fake_whatsapp(fak
     assert eval_pool.messages[outbound_id]["processing_state"] == "processed"
     assert eval_pool.messages[message_id]["processing_state"] == "processed"
     assert result.tool_calls == []
-    assert [(send.kind, send.to, send.payload, send.delivery_id) for send in result.whatsapp_sends] == [
-        ("text", user.phone, "I hear you.", "eval-text-1")
-    ]
+    assert [
+        (send.kind, send.to, send.payload, send.delivery_id)
+        for send in result.whatsapp_sends
+    ] == [("text", user.phone, "I hear you.", "eval-text-1")]
 
 
-async def test_eval_turn_rejects_unknown_prompt_version_before_sending(fake_pool, app_env, monkeypatch) -> None:
+async def test_eval_turn_rejects_unknown_prompt_version_before_sending(
+    fake_pool, app_env, monkeypatch
+) -> None:
     user, _, message_id = _seed_pair(fake_pool)
     called = False
 
@@ -313,9 +341,13 @@ async def test_eval_turn_rejects_unknown_prompt_version_before_sending(fake_pool
 
     monkeypatch.setattr(agentic, "run_step", fake_run_step)
 
-    with pytest.raises(UnknownPromptVersion, match="unknown system prompt version: missing"):
+    with pytest.raises(
+        UnknownPromptVersion, match="unknown system prompt version: missing"
+    ):
         await run_eval_turn(fake_pool, [message_id], user, prompt_version="missing")
 
     assert called is False
     assert fake_pool.bot_turns == {}
-    assert [row for row in fake_pool.messages.values() if row["direction"] == "outbound"] == []
+    assert [
+        row for row in fake_pool.messages.values() if row["direction"] == "outbound"
+    ] == []

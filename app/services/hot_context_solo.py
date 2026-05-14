@@ -1,7 +1,7 @@
 """Solo hot context construction (Sprint 5).
 
 Mirrors hot_context.py but for a single-user bot: single about-user bucket,
-no partner, no bridge candidates, no cross-thread sharing defaults.
+no partner content, no bridge candidates.
 """
 
 from __future__ import annotations
@@ -13,10 +13,18 @@ from uuid import UUID
 
 from app.config import get_settings
 from app.models.user import User
-from app.services.text_safety import clean_user_facing_text, looks_like_internal_process_text
-from app.services.time_context import add_calendar_months, temporal_reference, timezone_or_utc
+from app.services.text_safety import (
+    clean_user_facing_text,
+    looks_like_internal_process_text,
+)
+from app.services.time_context import (
+    add_calendar_months,
+    temporal_reference,
+    timezone_or_utc,
+)
 from app.services.tools.common import media_analysis_text
 from app.services.hot_context import peek_other_topics
+from app.services.partner_sharing import get_partner_share, has_dyad_partner
 from app.services.topic_filter import join_artifact_topics
 
 
@@ -42,6 +50,14 @@ class HotContextSolo:
     pregnancy_state: str | None = None
 
 
+def _partner_sharing_state(partner_share: str | None, *, has_partner: bool) -> str:
+    if not has_partner:
+        return "unavailable"
+    if partner_share is None:
+        return "pending"
+    return partner_share
+
+
 def _row_dict(row: Any) -> dict[str, Any]:
     return dict(row)
 
@@ -51,10 +67,14 @@ def _clean_list(value: Any) -> list[Any]:
 
 
 def _iso(value: Any) -> str | None:
-    return value.isoformat() if value is not None and hasattr(value, "isoformat") else None
+    return (
+        value.isoformat() if value is not None and hasattr(value, "isoformat") else None
+    )
 
 
-def _temporal_context_solo(timezone_name: str | None, now_utc: datetime | None = None) -> dict[str, Any]:
+def _temporal_context_solo(
+    timezone_name: str | None, now_utc: datetime | None = None
+) -> dict[str, Any]:
     now = now_utc or datetime.now(UTC)
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
@@ -82,7 +102,9 @@ def _temporal_context_solo(timezone_name: str | None, now_utc: datetime | None =
     }
 
 
-def _time_context(value: datetime | None, timezone_name: str | None, now_utc: datetime) -> dict[str, str] | None:
+def _time_context(
+    value: datetime | None, timezone_name: str | None, now_utc: datetime
+) -> dict[str, str] | None:
     return temporal_reference(value, timezone_name, now=now_utc)
 
 
@@ -123,7 +145,11 @@ def _history_content(item: dict[str, Any]) -> str:
     if item.get("direction") == "outbound":
         raw_content = str(content or "")
         cleaned = clean_user_facing_text(raw_content)
-        content = cleaned if cleaned or looks_like_internal_process_text(raw_content) else content
+        content = (
+            cleaned
+            if cleaned or looks_like_internal_process_text(raw_content)
+            else content
+        )
     return "" if content is None else str(content)
 
 
@@ -179,6 +205,7 @@ async def _user_profile_solo(pool: Any, user: User) -> dict[str, Any]:
         }
     # §16.3 wi 7: surface the canonical user_identities address when present.
     from app.services.user_identity import resolve_user_address
+
     resolved = await resolve_user_address(pool, user.id)
     profile = _row_dict(row)
     if resolved is not None:
@@ -227,6 +254,12 @@ async def build_hot_context_solo(
         pool, topic_id=primary_topic_id, user_id=user.id
     )
     current_user = await _user_profile_solo(pool, user)
+    partner_share = await get_partner_share(pool, user_id=user.id, bot_id=bot_id)
+    current_user["partner_share"] = partner_share
+    current_user["partner_sharing_state"] = _partner_sharing_state(
+        partner_share,
+        has_partner=await has_dyad_partner(pool, user.id),
+    )
     partner_user: dict[str, Any] = {}
     now_utc = datetime.now(UTC)
     user_timezone = timezone_or_utc(current_user.get("timezone") or user.timezone).key
@@ -259,11 +292,29 @@ async def build_hot_context_solo(
     conversation_load = {
         "period": "today",
         "timezone": user_timezone,
-        "period_start": _iso(conversation_load_row["period_start"]) if conversation_load_row else None,
-        "period_end": _iso(conversation_load_row["period_end"]) if conversation_load_row else None,
-        "inbound_count": int(conversation_load_row["inbound_count"] or 0) if conversation_load_row else 0,
-        "outbound_count": int(conversation_load_row["outbound_count"] or 0) if conversation_load_row else 0,
-        "total_count": int(conversation_load_row["total_count"] or 0) if conversation_load_row else 0,
+        "period_start": (
+            _iso(conversation_load_row["period_start"])
+            if conversation_load_row
+            else None
+        ),
+        "period_end": (
+            _iso(conversation_load_row["period_end"]) if conversation_load_row else None
+        ),
+        "inbound_count": (
+            int(conversation_load_row["inbound_count"] or 0)
+            if conversation_load_row
+            else 0
+        ),
+        "outbound_count": (
+            int(conversation_load_row["outbound_count"] or 0)
+            if conversation_load_row
+            else 0
+        ),
+        "total_count": (
+            int(conversation_load_row["total_count"] or 0)
+            if conversation_load_row
+            else 0
+        ),
     }
 
     # OOB: only for the user (no partner)
@@ -299,7 +350,9 @@ async def build_hot_context_solo(
             "related_theme_ids": _clean_list(row["related_theme_ids"]),
             "last_referenced_at": _iso(row["last_referenced_at"]),
             "created_at": _iso(row["created_at"]),
-            "last_referenced_at_time": _time_context(row["last_referenced_at"], user_timezone, now_utc),
+            "last_referenced_at_time": _time_context(
+                row["last_referenced_at"], user_timezone, now_utc
+            ),
             "created_at_time": _time_context(row["created_at"], user_timezone, now_utc),
         }
         for row in await pool.fetch(
@@ -328,8 +381,12 @@ async def build_hot_context_solo(
             "description": row["description"],
             "last_reinforced_at": _iso(row["last_reinforced_at"]),
             "last_active_at": _iso(row["last_active_at"]),
-            "last_reinforced_at_time": _time_context(row["last_reinforced_at"], user_timezone, now_utc),
-            "last_active_at_time": _time_context(row["last_active_at"], user_timezone, now_utc),
+            "last_reinforced_at_time": _time_context(
+                row["last_reinforced_at"], user_timezone, now_utc
+            ),
+            "last_active_at_time": _time_context(
+                row["last_active_at"], user_timezone, now_utc
+            ),
         }
         for row in await pool.fetch(
             f"""\
@@ -378,7 +435,9 @@ async def build_hot_context_solo(
             "related_theme_ids": _clean_list(row["related_theme_ids"]),
             "last_reinforced_at": _iso(row["last_reinforced_at"]),
             "created_at": _iso(row["created_at"]),
-            "last_reinforced_at_time": _time_context(row["last_reinforced_at"], user_timezone, now_utc),
+            "last_reinforced_at_time": _time_context(
+                row["last_reinforced_at"], user_timezone, now_utc
+            ),
             "created_at_time": _time_context(row["created_at"], user_timezone, now_utc),
         }
         for row in await pool.fetch(
@@ -460,7 +519,9 @@ async def build_hot_context_solo(
                 "related_theme_ids": _clean_list(row["related_theme_ids"]),
                 "supporting_message_ids": _clean_list(row["supporting_message_ids"]),
                 "updated_at": _iso(row["updated_at"]),
-                "updated_at_time": _time_context(row["updated_at"], user_timezone, now_utc),
+                "updated_at_time": _time_context(
+                    row["updated_at"], user_timezone, now_utc
+                ),
             }
         )
 
@@ -473,8 +534,14 @@ async def build_hot_context_solo(
             "recipient_id": row["recipient_id"],
             "content": row["content"],
             "media_type": row["media_type"] if "media_type" in row else None,
-            "media_duration_seconds": row["media_duration_seconds"] if "media_duration_seconds" in row else None,
-            "media_analysis": row["media_analysis"] if "media_analysis" in row else None,
+            "media_duration_seconds": (
+                row["media_duration_seconds"]
+                if "media_duration_seconds" in row
+                else None
+            ),
+            "media_analysis": (
+                row["media_analysis"] if "media_analysis" in row else None
+            ),
             "raw_content_hidden": False,
             "sent_at": _iso(row["sent_at"]),
             "sent_at_time": _time_context(row["sent_at"], user_timezone, now_utc),
@@ -508,7 +575,9 @@ async def build_hot_context_solo(
             "message_id": row["message_id"],
             "message_content": row["message_content"],
             "message_sent_at": _iso(row["message_sent_at"]),
-            "message_sent_at_time": _time_context(row["message_sent_at"], user_timezone, now_utc),
+            "message_sent_at_time": _time_context(
+                row["message_sent_at"], user_timezone, now_utc
+            ),
         }
         for row in reversed(
             await pool.fetch(
@@ -586,11 +655,19 @@ async def build_hot_context_solo(
                     "id": row["id"],
                     "charge": row["charge"],
                     "sent_at": _iso(row["sent_at"]),
-                    "sent_at_time": _time_context(row["sent_at"], user_timezone, now_utc),
+                    "sent_at_time": _time_context(
+                        row["sent_at"], user_timezone, now_utc
+                    ),
                     "content": row["content"] if "content" in row else None,
                     "media_type": row["media_type"] if "media_type" in row else None,
-                    "media_duration_seconds": row["media_duration_seconds"] if "media_duration_seconds" in row else None,
-                    "media_analysis": row["media_analysis"] if "media_analysis" in row else None,
+                    "media_duration_seconds": (
+                        row["media_duration_seconds"]
+                        if "media_duration_seconds" in row
+                        else None
+                    ),
+                    "media_analysis": (
+                        row["media_analysis"] if "media_analysis" in row else None
+                    ),
                 }
                 for row in trigger_rows
             ],
@@ -602,7 +679,9 @@ def _line(prefix: str, value: Any) -> str:
     return f"- {prefix}: {_clip(value)}"
 
 
-def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], clip_limit: int = 240) -> str:
+def _render_solo_with_counts(
+    hc: HotContextSolo, truncations: dict[str, int], clip_limit: int = 240
+) -> str:
     lines: list[str] = []
     lines += [
         "## You",
@@ -610,6 +689,8 @@ def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], cl
         f"- name: {_clip(hc.current_user['name'], clip_limit)}",
         f"- timezone: {_clip(hc.current_user['timezone'], clip_limit)}",
         f"- onboarding_state: {_clip(hc.current_user.get('onboarding_state', 'pending'), clip_limit)}",
+        f"- partner_share: {_clip(hc.current_user.get('partner_share'), clip_limit)}",
+        f"- partner_sharing_state: {_clip(hc.current_user.get('partner_sharing_state', 'unavailable'), clip_limit)}",
         f"- style_notes: {_clip(hc.current_user.get('style_notes', ''), clip_limit)}",
     ]
     if hc.temporal_context:
@@ -640,7 +721,9 @@ def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], cl
         ]
     if hc.topic_status:
         ts_updated = hc.topic_status.get("last_updated_at")
-        ts_iso = ts_updated.isoformat() if hasattr(ts_updated, "isoformat") else ts_updated
+        ts_iso = (
+            ts_updated.isoformat() if hasattr(ts_updated, "isoformat") else ts_updated
+        )
         lines += [
             "",
             "## Topic status",
@@ -660,7 +743,11 @@ def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], cl
         lines += ["", "## Cross-topic activity (peek)"]
         for item in hc.cross_topic_peek:
             last_active = item.get("last_active_at")
-            last_iso = last_active.isoformat() if hasattr(last_active, "isoformat") else last_active
+            last_iso = (
+                last_active.isoformat()
+                if hasattr(last_active, "isoformat")
+                else last_active
+            )
             lines.append(
                 f"- {_clip(item.get('slug'), clip_limit)} ({_clip(item.get('display_name'), clip_limit)}): last_active={_clip(last_iso, clip_limit)}"
             )
@@ -712,7 +799,9 @@ def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], cl
             f"- id={_clip_id(item['id'], clip_limit)} time={_clip(_time_label(item, 'updated_at') or 'unknown', clip_limit)} display={item['display']} confidence={item['confidence']} sensitivity={item['sensitivity']} visibility={item['visibility']} sources={_clip(', '.join(str(source) for source in item['source_user_ids']), clip_limit)}: {_clip(item['content'], clip_limit)}"
             for item in hc.distillations
         )
-        lines.append("- use get_distillations before adding or revising synthesized explanations.")
+        lines.append(
+            "- use get_distillations before adding or revising synthesized explanations."
+        )
     else:
         lines.append("- none")
     if truncations.get("distillations"):
@@ -730,7 +819,9 @@ def _render_solo_with_counts(hc: HotContextSolo, truncations: dict[str, int], cl
             f"- {_time_label(item, 'created_at') or item['created_at']} sentiment={item['sentiment']} reaction={_clip(item['content'], clip_limit)} on_message={_clip_id(item['message_id'], clip_limit)} sent={_clip(_time_label(item, 'message_sent_at') or item['message_sent_at'], clip_limit)}: {_clip(clean_user_facing_text(str(item.get('message_content') or '')) or item.get('message_content') or '[no text]', clip_limit)}"
             for item in hc.recent_reactions
         )
-        lines.append("- Treat these as passive feedback only; do not mention them unless naturally relevant to the user's new message.")
+        lines.append(
+            "- Treat these as passive feedback only; do not mention them unless naturally relevant to the user's new message."
+        )
     else:
         lines.append("- none")
     lines += [
@@ -780,7 +871,13 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
     )
-    truncations = {"distillations": 0, "observations": 0, "memories": 0, "recent_messages": 0, "conversation_load": 0}
+    truncations = {
+        "distillations": 0,
+        "observations": 0,
+        "memories": 0,
+        "recent_messages": 0,
+        "conversation_load": 0,
+    }
     clip_limit = 240
     text = _render_solo_with_counts(working, truncations, clip_limit)
     for name in ("distillations", "observations", "memories", "recent_messages"):

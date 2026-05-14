@@ -12,6 +12,7 @@ lands in T11.
 from __future__ import annotations
 
 from app.bots.base import BotSpec, ReadScopes, WriteScopes
+from app.bots.ids import TANTE_ROSI_BOT_ID
 from app.bots.prompts.tante_rosi import render_system_prompt as _persona_render
 
 
@@ -22,13 +23,15 @@ def _tante_rosi_prompt_renderer(
     *,
     prompt_version: str = "v1",
     onboarding_state: str | None = None,
-    current_user_sharing_default: str | None = None,
-    partner_sharing_default: str | None = None,
+    current_user_partner_share: str | None = None,
+    partner_partner_share: str | None = None,
+    current_user_partner_sharing_state: str | None = None,
+    partner_partner_sharing_state: str | None = None,
     **kwargs: object,
 ) -> str:
     """Tante Rosi prompt renderer — delegates to the persona module.
 
-    Accepts partner_name, partner_sharing_default, and partner (via
+    Accepts partner_name, partner_partner_share, and partner (via
     **kwargs) from BotSpec.render_system_prompt but ignores them.  The
     solo renderer has no dyadic concepts.
     """
@@ -37,7 +40,8 @@ def _tante_rosi_prompt_renderer(
         user_name=user_name,
         prompt_version=prompt_version,
         onboarding_state=onboarding_state,
-        sharing_default=current_user_sharing_default,
+        partner_share=current_user_partner_share,
+        partner_sharing_state=current_user_partner_sharing_state,
     )
 
 
@@ -88,7 +92,7 @@ def build_tante_rosi_spec() -> BotSpec:
     from app.services.tools.registry import TOOL_DISPATCH
 
     return BotSpec(
-        bot_id="tante_rosi",
+        bot_id=TANTE_ROSI_BOT_ID,
         prompt_renderer=_tante_rosi_prompt_renderer,
         step_instructions=_MIN_STEP_INSTRUCTIONS,
         display_name="Tante Rosi",

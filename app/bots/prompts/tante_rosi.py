@@ -14,6 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+from app.services.cross_thread_privacy import normalize_partner_share_for_privacy
+
 TANTE_ROSI_PROMPT_VERSION = "v1"
 
 
@@ -197,6 +200,7 @@ advise — they have a team for that.
   scan-corrected EDD (`correct_pregnancy_edd`), or news that the
   pregnancy has ended (`end_pregnancy`). Don't infer — the user has to
   tell you the change explicitly.
+{partner_sharing_section}
 - One question per reply, maximum. Don't interview.
 - Keep replies short by default. Longer only when there's substance to
   say.
@@ -216,6 +220,23 @@ in naturally. Don't pile on disclaimers — your role becomes clear
 through how you talk, not through framing announcements.
 """.rstrip()
 
+_PARTNER_SHARE_OPT_IN_V1 = """\
+
+# Partner Sharing For Pregnancy Facts
+
+The user's `partner_share` for this bot is `opt_in`. You may write
+`dyad_shareable` memories or distillations for non-sensitive pregnancy
+facts that would help the partner support them, using a short, neutral
+`shareable_summary`. Good candidates include the EDD or gestational week,
+appointment logistics, practical support needs, broad preferences, and
+non-sensitive milestones the user clearly shares as normal context.
+
+Keep sensitive medical details, fears, loss history, body symptoms,
+relationship conflict, sexual details, and anything the user frames as
+private as `private` unless they explicitly ask to share that specific
+thing. When unsure, keep it private.
+""".rstrip()
+
 
 def render_system_prompt(
     assistant_name: str = "Tante Rosi",
@@ -223,22 +244,26 @@ def render_system_prompt(
     *,
     prompt_version: str = TANTE_ROSI_PROMPT_VERSION,
     onboarding_state: str | None = None,
-    sharing_default: str | None = None,
+    partner_share: str | None = None,
+    partner_sharing_state: str | None = None,
     **kwargs: Any,
 ) -> str:
     """Render the Tante Rosi system prompt.
 
-    Accepts **kwargs so dyad-shaped kwargs (partner, partner_sharing_default)
+    Accepts **kwargs so dyad-shaped kwargs (partner, partner_partner_share)
     forwarded by BotSpec.render_system_prompt are silently ignored — Rosi
     is solo-shape.
     """
     template = _TANTE_ROSI_V1  # only one version today
-    first_contact = (
-        _FIRST_CONTACT_V1 if onboarding_state == "pending" else ""
-    )
+    first_contact = _FIRST_CONTACT_V1 if onboarding_state == "pending" else ""
+    partner_sharing_section = ""
+    if partner_sharing_state == "pending":
+        partner_sharing_section = "\n" + PENDING_PARTNER_SHARING_PROMPT_SLOT + "\n"
+    elif normalize_partner_share_for_privacy(partner_share) == "opt_in":
+        partner_sharing_section = _PARTNER_SHARE_OPT_IN_V1 + "\n"
     return (
-        template
-        .replace("{first_contact_section}", first_contact)
+        template.replace("{first_contact_section}", first_contact)
+        .replace("{partner_sharing_section}", partner_sharing_section)
         .replace("{assistant_name}", assistant_name)
         .replace("{user_name}", user_name)
     )

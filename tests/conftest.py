@@ -69,6 +69,7 @@ def _seed_relationship_topic_id() -> None:
     rescore_observations.
     """
     import app.bots.registry as _reg
+
     _reg._RELATIONSHIP_TOPIC_ID = UUID("00000000-0000-4000-8000-000000000001")
 
 
@@ -141,13 +142,17 @@ class FakePool:
         self.scheduled_jobs = {}
         self.eval_runs = {}
         self.eval_results = {}
-        self.system_state = {"global_pause": {"key": "global_pause", "paused_at": None, "value": {}}}
+        self.system_state = {
+            "global_pause": {"key": "global_pause", "paused_at": None, "value": {}}
+        }
         self.feedback = {}
         self.artifact_topics: dict[tuple[str, UUID], UUID] = {}
         # S4: topic_status rows keyed by (topic_id, dyad_id) or (topic_id, user_id)
         self.topic_status: dict[tuple[UUID, UUID], dict[str, Any]] = {}
         # S6: user_bot_state rows keyed by (user_id, bot_id)
         self.user_bot_state: dict[tuple[UUID, str], dict[str, Any]] = {}
+        # Per-bot partner sharing uses dyads/dyad_members for partner existence.
+        self.dyad_partners: dict[UUID, UUID] = {}
         # S6: topics rows keyed by slug
         self.topics: dict[str, dict[str, Any]] = {}
         # S6 T5: artifact_topics_rows recorded during multi-topic writes
@@ -160,7 +165,9 @@ class FakePool:
         self.channels: dict[tuple[str, str], dict[str, Any]] = {}
         self._raise_undefined_table_on_channels: bool = False
 
-    def link_topic(self, artifact_table: str, artifact_id: UUID, topic_id: UUID) -> None:
+    def link_topic(
+        self, artifact_table: str, artifact_id: UUID, topic_id: UUID
+    ) -> None:
         """Register a topic link for an artifact row.
 
         Called by tests that need the FakePool to enforce per-topic scoping
@@ -181,6 +188,25 @@ class FakePool:
             return self.artifact_topics[key] == topic_id
         return True
 
+    def _message_matches_bot_topic(
+        self, row: dict[str, Any], bot_id: str | None, topic_id: UUID | None
+    ) -> bool:
+        """Match scoped message reads while preserving pre-scope test fixtures.
+
+        Rows with absent bot/topic keys are legacy fixture rows and default to
+        mediator/relationship. Rows with explicit NULL stay unmatched, matching
+        production behavior for legacy DB rows hidden from partner raw reads.
+        """
+        if bot_id is None or topic_id is None:
+            return False
+        row_bot_id = row["bot_id"] if "bot_id" in row else "mediator"
+        row_topic_id = (
+            row["topic_id"]
+            if "topic_id" in row
+            else UUID("00000000-0000-4000-8000-000000000001")
+        )
+        return row_bot_id == bot_id and row_topic_id == topic_id
+
     def acquire(self) -> FakeAcquireContext:
         return FakeAcquireContext(self)
 
@@ -195,7 +221,9 @@ class FakePool:
         compact = " ".join(sql.split())
         if compact.startswith("INSERT INTO users"):
             name, phone, timezone = args
-            existing = next((u for u in self.users.values() if u["phone"] == phone), None)
+            existing = next(
+                (u for u in self.users.values() if u["phone"] == phone), None
+            )
             if existing is not None:
                 existing["name"] = name
                 return existing
@@ -206,7 +234,6 @@ class FakePool:
                 "timezone": timezone,
                 "onboarding_state": "pending",
                 "pacing_preferences": {},
-                "cross_thread_sharing_default": None,
                 "pregnancy_edd": None,
                 "pregnancy_dating_basis": None,
                 "pregnancy_lmp_date": None,
@@ -220,10 +247,15 @@ class FakePool:
             return row
         if (
             compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id")
-            or compact.startswith("SELECT id, name, phone, timezone, onboarding_state FROM users WHERE id")
-            or compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences FROM users WHERE id")
-            or compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default FROM users WHERE id")
-            or compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default, pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date, pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id")
+            or compact.startswith(
+                "SELECT id, name, phone, timezone, onboarding_state FROM users WHERE id"
+            )
+            or compact.startswith(
+                "SELECT id, name, phone, timezone, onboarding_state, pacing_preferences FROM users WHERE id"
+            )
+            or compact.startswith(
+                "SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date, pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id"
+            )
         ):
             return self.users[args[0]]
         if compact.startswith("SELECT pacing_preferences FROM users WHERE id"):
@@ -242,11 +274,6 @@ class FakePool:
                 if owner == user_id_arg and transport == transport_arg:
                     return {"address": address}
             return None
-        if compact.startswith("SELECT cross_thread_sharing_default FROM users WHERE id"):
-            user = self.users.get(args[0])
-            if user is None:
-                return None
-            return {"cross_thread_sharing_default": user.get("cross_thread_sharing_default")}
         if compact.startswith("UPDATE users SET pacing_preferences"):
             user_id, preferences_json = args
             preferences = _coerce_jsonb(preferences_json)
@@ -259,7 +286,6 @@ class FakePool:
                     "timezone": "UTC",
                     "onboarding_state": "pending",
                     "pacing_preferences": {},
-                    "cross_thread_sharing_default": None,
                     "pregnancy_edd": None,
                     "pregnancy_dating_basis": None,
                     "pregnancy_lmp_date": None,
@@ -292,23 +318,38 @@ class FakePool:
                 row
                 for row in self.messages.values()
                 if row.get("deleted_at") is None
-                and (row.get("sender_id") == user_id or row.get("recipient_id") == user_id)
+                and (
+                    row.get("sender_id") == user_id
+                    or row.get("recipient_id") == user_id
+                )
                 and period_start <= row["sent_at"] < period_end
             ]
             return {
                 "period_start": period_start,
                 "period_end": period_end,
-                "inbound_count": sum(1 for row in messages if row.get("direction") == "inbound"),
-                "outbound_count": sum(1 for row in messages if row.get("direction") == "outbound"),
+                "inbound_count": sum(
+                    1 for row in messages if row.get("direction") == "inbound"
+                ),
+                "outbound_count": sum(
+                    1 for row in messages if row.get("direction") == "outbound"
+                ),
                 "total_count": len(messages),
             }
-        if compact.startswith("SELECT whatsapp_message_id FROM messages WHERE id=$1 AND direction='inbound'"):
+        if compact.startswith(
+            "SELECT whatsapp_message_id FROM messages WHERE id=$1 AND direction='inbound'"
+        ):
             message_id, sender_id = args
             row = self.messages.get(message_id)
-            if row is None or row.get("direction") != "inbound" or row.get("sender_id") != sender_id:
+            if (
+                row is None
+                or row.get("direction") != "inbound"
+                or row.get("sender_id") != sender_id
+            ):
                 return None
             return {"whatsapp_message_id": row.get("whatsapp_message_id")}
-        if compact.startswith("SELECT id, processing_state, whatsapp_message_id, content FROM messages WHERE outbound_part_key"):
+        if compact.startswith(
+            "SELECT id, processing_state, whatsapp_message_id, content FROM messages WHERE outbound_part_key"
+        ):
             part_key = args[0]
             for row in self.messages.values():
                 if row.get("outbound_part_key") == part_key:
@@ -325,7 +366,9 @@ class FakePool:
                 if row.get("outbound_part_key") == part_key:
                     return {"id": row["id"]}
             return None
-        if compact.startswith("SELECT processing_state, whatsapp_message_id FROM messages WHERE id=$1 AND direction='outbound'"):
+        if compact.startswith(
+            "SELECT processing_state, whatsapp_message_id FROM messages WHERE id=$1 AND direction='outbound'"
+        ):
             row = self.messages.get(args[0])
             if row is None or row.get("direction") != "outbound":
                 return None
@@ -333,7 +376,9 @@ class FakePool:
                 "processing_state": row.get("processing_state"),
                 "whatsapp_message_id": row.get("whatsapp_message_id"),
             }
-        if compact.startswith("SELECT id, media_type, media_url FROM messages WHERE id=$1"):
+        if compact.startswith(
+            "SELECT id, media_type, media_url FROM messages WHERE id=$1"
+        ):
             row = self.messages.get(args[0])
             if row is None or row.get("deleted_at") is not None:
                 return None
@@ -342,12 +387,19 @@ class FakePool:
                 "media_type": row.get("media_type"),
                 "media_url": row.get("media_url"),
             }
-        if compact.startswith("SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at FROM messages WHERE id=$1 AND ( sender_id = ANY($2::uuid[]) OR recipient_id = ANY($2::uuid[]) )"):
-            message_id, user_ids = args
+        if compact.startswith(
+            "SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at FROM messages WHERE id=$1 AND ( sender_id = ANY($2::uuid[]) OR recipient_id = ANY($2::uuid[]) )"
+        ):
+            message_id, user_ids = args[:2]
+            bot_filter = args[2] if len(args) > 2 else None
+            topic_filter = args[3] if len(args) > 3 else None
             row = self.messages.get(message_id)
             if row is None:
                 return None
-            if row.get("sender_id") not in user_ids and row.get("recipient_id") not in user_ids:
+            if (
+                row.get("sender_id") not in user_ids
+                and row.get("recipient_id") not in user_ids
+            ):
                 return None
             return {
                 "id": row["id"],
@@ -358,12 +410,28 @@ class FakePool:
                 "whatsapp_message_id": row.get("whatsapp_message_id"),
                 "deleted_at": row.get("deleted_at"),
             }
-        if compact.startswith("SELECT id, direction, sender_id, recipient_id, media_type, media_url, deleted_at FROM messages"):
-            message_id, user_ids = args
+        if (
+            compact.startswith(
+                "SELECT id, direction, sender_id, recipient_id, media_type, media_url, deleted_at"
+            )
+            and "FROM messages" in compact
+        ):
+            message_id, user_ids = args[:2]
+            bot_filter = args[2] if len(args) > 2 else None
+            topic_filter = args[3] if len(args) > 3 else None
             row = self.messages.get(message_id)
             if row is None:
                 return None
-            if row.get("sender_id") not in user_ids and row.get("recipient_id") not in user_ids:
+            if (
+                row.get("sender_id") not in user_ids
+                and row.get("recipient_id") not in user_ids
+            ):
+                return None
+            if (
+                "bot_id=$3" in compact
+                and "topic_id=$4" in compact
+                and not self._message_matches_bot_topic(row, bot_filter, topic_filter)
+            ):
                 return None
             return row
         if compact.startswith("INSERT INTO messages"):
@@ -385,7 +453,11 @@ class FakePool:
                     outbound_topic_id = part_args[1] if len(part_args) >= 2 else None
                 if outbound_part_key is not None:
                     existing = next(
-                        (row for row in self.messages.values() if row.get("outbound_part_key") == outbound_part_key),
+                        (
+                            row
+                            for row in self.messages.values()
+                            if row.get("outbound_part_key") == outbound_part_key
+                        ),
                         None,
                     )
                     if existing is not None:
@@ -396,10 +468,10 @@ class FakePool:
                     "sender_id": None,
                     "recipient_id": recipient_id,
                     "content": content,
-                "processing_state": state,
+                    "processing_state": state,
                     "sent_at": datetime.now(UTC),
                     "charge": None,
-                "whatsapp_message_id": None,
+                    "whatsapp_message_id": None,
                     "media_type": None,
                     "media_url": None,
                     "media_duration_seconds": None,
@@ -418,9 +490,30 @@ class FakePool:
             # Inbound. Accept both the legacy 10-arg form (no content_encrypted)
             # and the 11-arg form that includes the AES-GCM ciphertext column.
             if "content_encrypted" in compact:
-                user_id, content, _content_encrypted, wa_id, sent_at, media_type, media_url, duration, media_analysis, *rest = args
+                (
+                    user_id,
+                    content,
+                    _content_encrypted,
+                    wa_id,
+                    sent_at,
+                    media_type,
+                    media_url,
+                    duration,
+                    media_analysis,
+                    *rest,
+                ) = args
             else:
-                user_id, content, wa_id, sent_at, media_type, media_url, duration, media_analysis, *rest = args
+                (
+                    user_id,
+                    content,
+                    wa_id,
+                    sent_at,
+                    media_type,
+                    media_url,
+                    duration,
+                    media_analysis,
+                    *rest,
+                ) = args
             charge = rest[0] if rest else None
             inbound_bot_id = rest[1] if len(rest) > 1 else None
             inbound_topic_id = rest[2] if len(rest) > 2 else None
@@ -504,7 +597,11 @@ class FakePool:
                 sensitive_metadata_encrypted,
             ) = args
             event_seq = 1 + max(
-                [row["event_seq"] for row in self.turn_audit_events if row["turn_id"] == turn_id],
+                [
+                    row["event_seq"]
+                    for row in self.turn_audit_events
+                    if row["turn_id"] == turn_id
+                ],
                 default=0,
             )
             row = {
@@ -524,7 +621,14 @@ class FakePool:
             self.turn_audit_events.append(row)
             return {"id": row["id"], "event_seq": event_seq}
         if compact.startswith("INSERT INTO public.eval_runs"):
-            prompt_version, scenarios_passed, scenarios_failed, total_cost_usd, git_sha, notes = args
+            (
+                prompt_version,
+                scenarios_passed,
+                scenarios_failed,
+                total_cost_usd,
+                git_sha,
+                notes,
+            ) = args
             row = {
                 "id": uuid4(),
                 "run_at": datetime.now(UTC),
@@ -538,7 +642,14 @@ class FakePool:
             self.eval_runs[row["id"]] = row
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO public.eval_results"):
-            run_id, scenario_name, status, judge_verdicts, tool_calls, failure_reason = args
+            (
+                run_id,
+                scenario_name,
+                status,
+                judge_verdicts,
+                tool_calls,
+                failure_reason,
+            ) = args
             row = {
                 "id": uuid4(),
                 "run_id": run_id,
@@ -553,22 +664,40 @@ class FakePool:
             return {"id": row["id"]}
         if compact.startswith("UPDATE users SET style_notes"):
             notes, user_id = args
-            self.users.setdefault(user_id, {"id": user_id, "name": "User", "phone": "1", "timezone": "UTC"})
+            self.users.setdefault(
+                user_id,
+                {"id": user_id, "name": "User", "phone": "1", "timezone": "UTC"},
+            )
             self.users[user_id]["style_notes"] = notes
             return {"user_id": user_id, "updated_at": datetime.now(UTC)}
-        if compact.startswith("UPDATE users SET cross_thread_sharing_default"):
-            user_id, sharing_default = args
-            self.users.setdefault(user_id, {"id": user_id, "name": "User", "phone": "1", "timezone": "UTC"})
-            self.users[user_id]["cross_thread_sharing_default"] = sharing_default
-            return {"user_id": user_id, "cross_thread_sharing_default": sharing_default, "updated_at": datetime.now(UTC)}
         # --- Pregnancy tool handlers ---
-        if compact.startswith("SELECT id, pregnancy_edd, pregnancy_ended_at FROM users WHERE id"):
+        if compact.startswith(
+            "SELECT id, pregnancy_edd, pregnancy_ended_at FROM users WHERE id"
+        ):
             user_id = args[0]
-            user = self.users.get(user_id, {"id": user_id, "pregnancy_edd": None, "pregnancy_ended_at": None})
-            return {"id": user_id, "pregnancy_edd": user.get("pregnancy_edd"), "pregnancy_ended_at": user.get("pregnancy_ended_at")}
-        if compact.startswith("SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_dating_basis, pregnancy_started_at FROM users WHERE id"):
+            user = self.users.get(
+                user_id,
+                {"id": user_id, "pregnancy_edd": None, "pregnancy_ended_at": None},
+            )
+            return {
+                "id": user_id,
+                "pregnancy_edd": user.get("pregnancy_edd"),
+                "pregnancy_ended_at": user.get("pregnancy_ended_at"),
+            }
+        if compact.startswith(
+            "SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_dating_basis, pregnancy_started_at FROM users WHERE id"
+        ):
             user_id = args[0]
-            user = self.users.get(user_id, {"id": user_id, "pregnancy_edd": None, "pregnancy_ended_at": None, "pregnancy_dating_basis": None, "pregnancy_started_at": None})
+            user = self.users.get(
+                user_id,
+                {
+                    "id": user_id,
+                    "pregnancy_edd": None,
+                    "pregnancy_ended_at": None,
+                    "pregnancy_dating_basis": None,
+                    "pregnancy_started_at": None,
+                },
+            )
             return {
                 "id": user_id,
                 "pregnancy_edd": user.get("pregnancy_edd"),
@@ -576,16 +705,29 @@ class FakePool:
                 "pregnancy_dating_basis": user.get("pregnancy_dating_basis"),
                 "pregnancy_started_at": user.get("pregnancy_started_at"),
             }
-        if compact.startswith("SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id"):
+        if compact.startswith(
+            "SELECT id, pregnancy_edd, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id"
+        ):
             user_id = args[0]
-            user = self.users.get(user_id, {"id": user_id, "pregnancy_edd": None, "pregnancy_ended_at": None, "pregnancy_outcome": None})
+            user = self.users.get(
+                user_id,
+                {
+                    "id": user_id,
+                    "pregnancy_edd": None,
+                    "pregnancy_ended_at": None,
+                    "pregnancy_outcome": None,
+                },
+            )
             return {
                 "id": user_id,
                 "pregnancy_edd": user.get("pregnancy_edd"),
                 "pregnancy_ended_at": user.get("pregnancy_ended_at"),
                 "pregnancy_outcome": user.get("pregnancy_outcome"),
             }
-        if ("UPDATE users SET pregnancy_edd" in compact and "pregnancy_scan_date = COALESCE" in compact):
+        if (
+            "UPDATE users SET pregnancy_edd" in compact
+            and "pregnancy_scan_date = COALESCE" in compact
+        ):
             # correct_pregnancy_edd (MUST come before simpler "UPDATE users SET pregnancy_edd")
             user_id, edd_val, dating_basis, scan_date, scan_corrected_at = args
             user = self.users.get(user_id)
@@ -602,18 +744,29 @@ class FakePool:
             user_id, edd_val, dating_basis, lmp_date, scan_date, started_at = args
             self.users.setdefault(
                 user_id,
-                {"id": user_id, "name": "User", "phone": "1", "timezone": "UTC",
-                 "pregnancy_edd": None, "pregnancy_dating_basis": None,
-                 "pregnancy_lmp_date": None, "pregnancy_scan_date": None,
-                 "pregnancy_started_at": None, "pregnancy_ended_at": None, "pregnancy_outcome": None},
+                {
+                    "id": user_id,
+                    "name": "User",
+                    "phone": "1",
+                    "timezone": "UTC",
+                    "pregnancy_edd": None,
+                    "pregnancy_dating_basis": None,
+                    "pregnancy_lmp_date": None,
+                    "pregnancy_scan_date": None,
+                    "pregnancy_started_at": None,
+                    "pregnancy_ended_at": None,
+                    "pregnancy_outcome": None,
+                },
             )
-            self.users[user_id].update({
-                "pregnancy_edd": edd_val,
-                "pregnancy_dating_basis": dating_basis,
-                "pregnancy_lmp_date": lmp_date,
-                "pregnancy_scan_date": scan_date,
-                "pregnancy_started_at": started_at,
-            })
+            self.users[user_id].update(
+                {
+                    "pregnancy_edd": edd_val,
+                    "pregnancy_dating_basis": dating_basis,
+                    "pregnancy_lmp_date": lmp_date,
+                    "pregnancy_scan_date": scan_date,
+                    "pregnancy_started_at": started_at,
+                }
+            )
             return {"id": user_id}
         if compact.startswith("UPDATE users SET pregnancy_ended_at"):
             # end_pregnancy: UPDATE users SET pregnancy_ended_at = $2, pregnancy_outcome = $3 ...
@@ -671,18 +824,31 @@ class FakePool:
                 "sent_message_id": None,
                 "created_at": now,
                 "updated_at": now,
-                "resolved_at": now if status in {"sent", "declined", "blocked", "addressed", "expired"} else None,
+                "resolved_at": (
+                    now
+                    if status in {"sent", "declined", "blocked", "addressed", "expired"}
+                    else None
+                ),
             }
             self.bridge_candidates[row["id"]] = row
-            return {**dict(row), "partner_path": row.get("partner_path", "message_partner")}
-        if compact.startswith("SELECT id, source_user_id, target_user_id") and "FROM bridge_candidates" in compact:
+            return {
+                **dict(row),
+                "partner_path": row.get("partner_path", "message_partner"),
+            }
+        if (
+            compact.startswith("SELECT id, source_user_id, target_user_id")
+            and "FROM bridge_candidates" in compact
+        ):
             candidate_id, user_id, partner_id = args
             row = self.bridge_candidates.get(candidate_id)
             if row is None:
                 return None
             if {row["source_user_id"], row["target_user_id"]} != {user_id, partner_id}:
                 return None
-            return {**dict(row), "partner_path": row.get("partner_path", "message_partner")}
+            return {
+                **dict(row),
+                "partner_path": row.get("partner_path", "message_partner"),
+            }
         if compact.startswith("UPDATE bridge_candidates SET kind=COALESCE"):
             if "partner_path=COALESCE" in compact:
                 (
@@ -715,7 +881,10 @@ class FakePool:
                 row["kind"] = kind
             if status is not None:
                 row["status"] = status
-                if status in {"sent", "declined", "blocked", "addressed", "expired"} and row.get("resolved_at") is None:
+                if (
+                    status in {"sent", "declined", "blocked", "addressed", "expired"}
+                    and row.get("resolved_at") is None
+                ):
                     row["resolved_at"] = datetime.now(UTC)
             if sensitivity is not None:
                 row["sensitivity"] = sensitivity
@@ -732,7 +901,10 @@ class FakePool:
             if shareable_summary is not None:
                 row["shareable_summary"] = shareable_summary
             row["updated_at"] = datetime.now(UTC)
-            return {**dict(row), "partner_path": row.get("partner_path", "message_partner")}
+            return {
+                **dict(row),
+                "partner_path": row.get("partner_path", "message_partner"),
+            }
         if compact.startswith("UPDATE bridge_candidates SET status=$2"):
             candidate_id, status, sent_message_id, internal_note = args
             row = self.bridge_candidates[candidate_id]
@@ -741,18 +913,39 @@ class FakePool:
                 row["sent_message_id"] = sent_message_id
             if internal_note is not None:
                 row["internal_note"] = internal_note
-            if status in {"sent", "declined", "blocked", "addressed", "expired"} and row.get("resolved_at") is None:
+            if (
+                status in {"sent", "declined", "blocked", "addressed", "expired"}
+                and row.get("resolved_at") is None
+            ):
                 row["resolved_at"] = datetime.now(UTC)
             row["updated_at"] = datetime.now(UTC)
-            return {**dict(row), "partner_path": row.get("partner_path", "message_partner")}
+            return {
+                **dict(row),
+                "partner_path": row.get("partner_path", "message_partner"),
+            }
         if compact.startswith("WITH new_artifact AS ( INSERT INTO memories"):
-            # (about_user_id, content, content_encrypted, related_theme_ids, bot_id, topic_id_list, reason)
-            about_user_id, content, _content_encrypted, related_theme_ids, _bot_id, topic_id_list, reason = args
+            (
+                about_user_id,
+                content,
+                content_encrypted,
+                visibility,
+                shareable_summary,
+                shareable_summary_encrypted,
+                related_theme_ids,
+                bot_id,
+                topic_id_list,
+                reason,
+            ) = args
             row = {
                 "id": uuid4(),
                 "about_user_id": about_user_id,
                 "content": content,
+                "content_encrypted": content_encrypted,
+                "visibility": visibility,
+                "shareable_summary": shareable_summary,
+                "shareable_summary_encrypted": shareable_summary_encrypted,
                 "related_theme_ids": list(related_theme_ids or []),
+                "recorded_by_bot_id": bot_id,
                 "status": "active",
                 "supersedes_memory_id": None,
                 "created_at": datetime.now(UTC),
@@ -760,12 +953,14 @@ class FakePool:
             }
             self.memories[row["id"]] = row
             for tid in list(topic_id_list or []):
-                self.artifact_topics_rows.append({
-                    "artifact_table": "memories",
-                    "artifact_id": row["id"],
-                    "topic_id": tid,
-                    "reason": reason,
-                })
+                self.artifact_topics_rows.append(
+                    {
+                        "artifact_table": "memories",
+                        "artifact_id": row["id"],
+                        "topic_id": tid,
+                        "reason": reason,
+                    }
+                )
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO memories (about_user_id"):
             # (about_user_id, content, content_encrypted, related_theme_ids)
@@ -774,6 +969,9 @@ class FakePool:
                 "id": uuid4(),
                 "about_user_id": about_user_id,
                 "content": content,
+                "visibility": "private",
+                "shareable_summary": None,
+                "shareable_summary_encrypted": None,
                 "related_theme_ids": list(related_theme_ids or []),
                 "status": "active",
                 "supersedes_memory_id": None,
@@ -795,6 +993,9 @@ class FakePool:
                 "id": uuid4(),
                 "about_user_id": old["about_user_id"],
                 "content": new_content,
+                "visibility": "private",
+                "shareable_summary": None,
+                "shareable_summary_encrypted": None,
                 "related_theme_ids": list(related_theme_ids or []),
                 "status": "active",
                 "supersedes_memory_id": old_id,
@@ -817,12 +1018,14 @@ class FakePool:
             }
             self.themes[row["id"]] = row
             for tid in list(topic_id_list or []):
-                self.artifact_topics_rows.append({
-                    "artifact_table": "themes",
-                    "artifact_id": row["id"],
-                    "topic_id": tid,
-                    "reason": reason,
-                })
+                self.artifact_topics_rows.append(
+                    {
+                        "artifact_table": "themes",
+                        "artifact_id": row["id"],
+                        "topic_id": tid,
+                        "reason": reason,
+                    }
+                )
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO themes"):
             title, description, sentiment, health = args
@@ -843,7 +1046,15 @@ class FakePool:
             self.themes.setdefault(theme_id, {"id": theme_id, "status": "active"})
             return {"id": theme_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO watch_items"):
-            owner_user_id, content, due_at, related_theme_ids, _bot_id, topic_id_list, reason = args
+            (
+                owner_user_id,
+                content,
+                due_at,
+                related_theme_ids,
+                bot_id,
+                topic_id_list,
+                reason,
+            ) = args
             row = {
                 "id": uuid4(),
                 "owner_user_id": owner_user_id,
@@ -854,12 +1065,14 @@ class FakePool:
             }
             self.watch_items[row["id"]] = row
             for tid in list(topic_id_list or []):
-                self.artifact_topics_rows.append({
-                    "artifact_table": "watch_items",
-                    "artifact_id": row["id"],
-                    "topic_id": tid,
-                    "reason": reason,
-                })
+                self.artifact_topics_rows.append(
+                    {
+                        "artifact_table": "watch_items",
+                        "artifact_id": row["id"],
+                        "topic_id": tid,
+                        "reason": reason,
+                    }
+                )
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO watch_items"):
             owner_user_id, content, due_at, related_theme_ids = args
@@ -876,15 +1089,32 @@ class FakePool:
         if compact.startswith("UPDATE watch_items SET status='addressed'"):
             note, watch_item_id = args
             self.watch_items.setdefault(watch_item_id, {"id": watch_item_id})
-            self.watch_items[watch_item_id].update(status="addressed", addressing_note=note, addressed_at=datetime.now(UTC))
-            return {"id": watch_item_id, "addressed_at": self.watch_items[watch_item_id]["addressed_at"]}
+            self.watch_items[watch_item_id].update(
+                status="addressed", addressing_note=note, addressed_at=datetime.now(UTC)
+            )
+            return {
+                "id": watch_item_id,
+                "addressed_at": self.watch_items[watch_item_id]["addressed_at"],
+            }
         if compact.startswith("UPDATE watch_items SET"):
             watch_item_id = args[-1]
             self.watch_items.setdefault(watch_item_id, {"id": watch_item_id})
             return {"id": watch_item_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO observations"):
             # (content, content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids, bot_id, topic_id_list, reason)
-            content, _content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids, _bot_id, topic_id_list, reason = args
+            (
+                content,
+                _content_encrypted,
+                about_user_id,
+                confidence,
+                significance,
+                scoring_prompt_version,
+                related_theme_ids,
+                supporting_message_ids,
+                bot_id,
+                topic_id_list,
+                reason,
+            ) = args
             row = {
                 "id": uuid4(),
                 "content": content,
@@ -898,16 +1128,27 @@ class FakePool:
             }
             self.observations[row["id"]] = row
             for tid in list(topic_id_list or []):
-                self.artifact_topics_rows.append({
-                    "artifact_table": "observations",
-                    "artifact_id": row["id"],
-                    "topic_id": tid,
-                    "reason": reason,
-                })
+                self.artifact_topics_rows.append(
+                    {
+                        "artifact_table": "observations",
+                        "artifact_id": row["id"],
+                        "topic_id": tid,
+                        "reason": reason,
+                    }
+                )
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO observations"):
             # (content, content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids)
-            content, _content_encrypted, about_user_id, confidence, significance, scoring_prompt_version, related_theme_ids, supporting_message_ids = args
+            (
+                content,
+                _content_encrypted,
+                about_user_id,
+                confidence,
+                significance,
+                scoring_prompt_version,
+                related_theme_ids,
+                supporting_message_ids,
+            ) = args
             row = {
                 "id": uuid4(),
                 "content": content,
@@ -922,15 +1163,27 @@ class FakePool:
             self.observations[row["id"]] = row
             return {"id": row["id"]}
         if compact.startswith("UPDATE observations SET"):
-            if "significance = $1" in compact and "scoring_prompt_version = $2" in compact:
+            if (
+                "significance = $1" in compact
+                and "scoring_prompt_version = $2" in compact
+            ):
                 significance, scoring_prompt_version, observation_id = args
-                self.observations.setdefault(observation_id, {"id": observation_id, "status": "active"})
+                self.observations.setdefault(
+                    observation_id, {"id": observation_id, "status": "active"}
+                )
                 self.observations[observation_id]["significance"] = significance
-                self.observations[observation_id]["scoring_prompt_version"] = scoring_prompt_version
-                self.observations[observation_id]["last_reinforced_at"] = self.observations[observation_id].get("last_reinforced_at") or datetime.now(UTC)
+                self.observations[observation_id][
+                    "scoring_prompt_version"
+                ] = scoring_prompt_version
+                self.observations[observation_id]["last_reinforced_at"] = (
+                    self.observations[observation_id].get("last_reinforced_at")
+                    or datetime.now(UTC)
+                )
                 return {"id": observation_id}
             observation_id = args[-1]
-            self.observations.setdefault(observation_id, {"id": observation_id, "status": "active"})
+            self.observations.setdefault(
+                observation_id, {"id": observation_id, "status": "active"}
+            )
             return {"id": observation_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO distillations"):
             (
@@ -947,7 +1200,7 @@ class FakePool:
                 related_theme_ids,
                 supporting_message_ids,
                 triggering_message_id,
-                _bot_id,
+                bot_id,
                 topic_id_list,
                 reason,
             ) = args
@@ -976,15 +1229,18 @@ class FakePool:
                 "updated_at": datetime.now(UTC),
                 "revised_at": None,
                 "retired_at": None,
+                "recorded_by_bot_id": bot_id,
             }
             self.distillations[row["id"]] = row
             for tid in list(topic_id_list or []):
-                self.artifact_topics_rows.append({
-                    "artifact_table": "distillations",
-                    "artifact_id": row["id"],
-                    "topic_id": tid,
-                    "reason": reason,
-                })
+                self.artifact_topics_rows.append(
+                    {
+                        "artifact_table": "distillations",
+                        "artifact_id": row["id"],
+                        "topic_id": tid,
+                        "reason": reason,
+                    }
+                )
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO distillations"):
             (
@@ -1001,7 +1257,9 @@ class FakePool:
                 related_theme_ids,
                 supporting_message_ids,
                 triggering_message_id,
+                *rest,
             ) = args
+            recorded_by_bot_id = rest[0] if rest else None
             row = {
                 "id": uuid4(),
                 "content": content,
@@ -1027,6 +1285,7 @@ class FakePool:
                 "updated_at": datetime.now(UTC),
                 "revised_at": None,
                 "retired_at": None,
+                "recorded_by_bot_id": recorded_by_bot_id,
             }
             self.distillations[row["id"]] = row
             return {"id": row["id"]}
@@ -1062,14 +1321,21 @@ class FakePool:
                 row[field] = args[param_index]
                 param_index += 1
                 if field in {"content", "shareable_summary"}:
-                    encrypted_field = f"{field}_encrypted" if field == "content" else "shareable_summary_encrypted"
+                    encrypted_field = (
+                        f"{field}_encrypted"
+                        if field == "content"
+                        else "shareable_summary_encrypted"
+                    )
                     row[encrypted_field] = args[param_index]
                     param_index += 1
             if "retired_at=COALESCE" in compact:
                 row["retired_at"] = row.get("retired_at") or datetime.now(UTC)
             row["updated_at"] = datetime.now(UTC)
             return {"id": distillation_id}
-        if "WITH old AS (" in compact and "revision_count FROM distillations" in compact:
+        if (
+            "WITH old AS (" in compact
+            and "revision_count FROM distillations" in compact
+        ):
             (
                 old_id,
                 new_content,
@@ -1086,6 +1352,7 @@ class FakePool:
                 supporting_message_ids,
                 triggering_message_id,
                 revision_note,
+                recorded_by_bot_id,
                 *_rest,
             ) = args
             old = self.distillations.get(old_id)
@@ -1117,6 +1384,7 @@ class FakePool:
                 "updated_at": datetime.now(UTC),
                 "revised_at": None,
                 "retired_at": None,
+                "recorded_by_bot_id": recorded_by_bot_id,
             }
             self.distillations[new["id"]] = new
             old["status"] = "revised"
@@ -1128,7 +1396,17 @@ class FakePool:
             return {"new_id": new["id"], "old_id": old_id}
         if compact.startswith("WITH new_artifact AS ( INSERT INTO out_of_bounds"):
             # (owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at, bot_id, topic_id_list, reason)
-            owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at, _bot_id, topic_id_list, reason = args
+            (
+                owner_id,
+                sensitive_core,
+                sensitive_core_encrypted,
+                shareable_context,
+                severity,
+                review_at,
+                _bot_id,
+                topic_id_list,
+                reason,
+            ) = args
             row = {
                 "id": uuid4(),
                 "owner_id": owner_id,
@@ -1141,16 +1419,25 @@ class FakePool:
             }
             self.out_of_bounds[row["id"]] = row
             for tid in list(topic_id_list or []):
-                self.artifact_topics_rows.append({
-                    "artifact_table": "out_of_bounds",
-                    "artifact_id": row["id"],
-                    "topic_id": tid,
-                    "reason": reason,
-                })
+                self.artifact_topics_rows.append(
+                    {
+                        "artifact_table": "out_of_bounds",
+                        "artifact_id": row["id"],
+                        "topic_id": tid,
+                        "reason": reason,
+                    }
+                )
             return {"id": row["id"]}
         if compact.startswith("INSERT INTO out_of_bounds"):
             # (owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at)
-            owner_id, sensitive_core, sensitive_core_encrypted, shareable_context, severity, review_at = args
+            (
+                owner_id,
+                sensitive_core,
+                sensitive_core_encrypted,
+                shareable_context,
+                severity,
+                review_at,
+            ) = args
             row = {
                 "id": uuid4(),
                 "owner_id": owner_id,
@@ -1175,13 +1462,23 @@ class FakePool:
         if compact.startswith("UPDATE scheduled_jobs SET status='superseded'"):
             user_id = args[0]
             for job in self.scheduled_jobs.values():
-                if job["user_id"] == user_id and job["job_type"] == "checkin" and job["status"] == "pending":
+                if (
+                    job["user_id"] == user_id
+                    and job["job_type"] == "checkin"
+                    and job["status"] == "pending"
+                ):
                     job["status"] = "superseded"
                     return {"id": job["id"]}
             return None
-        if compact.startswith("INSERT INTO scheduled_jobs") and "SELECT NULL, 'heartbeat'" in compact:
+        if (
+            compact.startswith("INSERT INTO scheduled_jobs")
+            and "SELECT NULL, 'heartbeat'" in compact
+        ):
             scheduled_for = args[0]
-            if any(job["job_type"] == "heartbeat" and job["status"] == "pending" for job in self.scheduled_jobs.values()):
+            if any(
+                job["job_type"] == "heartbeat" and job["status"] == "pending"
+                for job in self.scheduled_jobs.values()
+            ):
                 return None
             row = {
                 "id": uuid4(),
@@ -1198,7 +1495,10 @@ class FakePool:
             }
             self.scheduled_jobs[row["id"]] = row
             return {"id": row["id"], "scheduled_for": scheduled_for}
-        if compact.startswith("INSERT INTO scheduled_jobs") and "'deferred_turn'" in compact:
+        if (
+            compact.startswith("INSERT INTO scheduled_jobs")
+            and "'deferred_turn'" in compact
+        ):
             if len(args) >= 5:
                 user_id, scheduled_for, context_json, bot_id, topic_id = args[:5]
             else:
@@ -1206,7 +1506,9 @@ class FakePool:
                 bot_id = None
                 topic_id = None
             if any(
-                job["user_id"] == user_id and job["job_type"] == "deferred_turn" and job["status"] == "pending"
+                job["user_id"] == user_id
+                and job["job_type"] == "deferred_turn"
+                and job["status"] == "pending"
                 for job in self.scheduled_jobs.values()
             ):
                 return None
@@ -1227,13 +1529,18 @@ class FakePool:
             }
             self.scheduled_jobs[row["id"]] = row
             return {"id": row["id"], "scheduled_for": scheduled_for}
-        if compact.startswith("INSERT INTO scheduled_jobs") and "'scheduled_task'" in compact and "WHERE NOT EXISTS" in compact:
+        if (
+            compact.startswith("INSERT INTO scheduled_jobs")
+            and "'scheduled_task'" in compact
+            and "WHERE NOT EXISTS" in compact
+        ):
             user_id, scheduled_for, context_json = args[:3]
             source_job_id = args[-1]
             if any(
                 job.get("job_type") == "scheduled_task"
                 and job.get("status") == "pending"
-                and str(job.get("context", {}).get("source_job_id")) == str(source_job_id)
+                and str(job.get("context", {}).get("source_job_id"))
+                == str(source_job_id)
                 for job in self.scheduled_jobs.values()
             ):
                 return None
@@ -1254,7 +1561,10 @@ class FakePool:
             }
             self.scheduled_jobs[row["id"]] = row
             return {"id": row["id"], "scheduled_for": scheduled_for}
-        if compact.startswith("INSERT INTO scheduled_jobs") and "'scheduled_task'" in compact:
+        if (
+            compact.startswith("INSERT INTO scheduled_jobs")
+            and "'scheduled_task'" in compact
+        ):
             user_id, scheduled_for, context_json = args[:3]
             row = {
                 "id": uuid4(),
@@ -1272,11 +1582,21 @@ class FakePool:
                 "updated_at": datetime.now(UTC),
             }
             self.scheduled_jobs[row["id"]] = row
-            return {"job_id": row["id"], "scheduled_for": scheduled_for, "context": row["context"]}
-        if compact.startswith("SELECT id, user_id, scheduled_for, context, status FROM scheduled_jobs WHERE id"):
+            return {
+                "job_id": row["id"],
+                "scheduled_for": scheduled_for,
+                "context": row["context"],
+            }
+        if compact.startswith(
+            "SELECT id, user_id, scheduled_for, context, status FROM scheduled_jobs WHERE id"
+        ):
             row = self.scheduled_jobs.get(args[0])
             return dict(row) if row is not None else None
-        if compact.startswith("INSERT INTO scheduled_jobs") and ("'watch_item_due'" in compact or "VALUES ($1, $2, $3, $4::jsonb, 'pending'" in compact and args[1] == "watch_item_due"):
+        if compact.startswith("INSERT INTO scheduled_jobs") and (
+            "'watch_item_due'" in compact
+            or "VALUES ($1, $2, $3, $4::jsonb, 'pending'" in compact
+            and args[1] == "watch_item_due"
+        ):
             if len(args) >= 5:
                 user_id, job_type, scheduled_for, context_json = args[:4]
             elif len(args) == 4:
@@ -1299,7 +1619,11 @@ class FakePool:
             }
             self.scheduled_jobs[row["id"]] = row
             return {"id": row["id"], "scheduled_for": scheduled_for}
-        if compact.startswith("INSERT INTO scheduled_jobs") and ("'oob_review'" in compact or "VALUES ($1, $2, $3, $4::jsonb, 'pending'" in compact and args[1] == "oob_review"):
+        if compact.startswith("INSERT INTO scheduled_jobs") and (
+            "'oob_review'" in compact
+            or "VALUES ($1, $2, $3, $4::jsonb, 'pending'" in compact
+            and args[1] == "oob_review"
+        ):
             if len(args) >= 5:
                 user_id, job_type, scheduled_for, context_json = args[:4]
             elif len(args) == 4:
@@ -1348,10 +1672,14 @@ class FakePool:
                         and job.get("job_type") == "scheduled_task"
                         and job.get("status") == "pending"
                         and (
-                            (target_job_id is not None and str(job["id"]) == str(target_job_id))
+                            (
+                                target_job_id is not None
+                                and str(job["id"]) == str(target_job_id)
+                            )
                             or (
                                 target_task_id is not None
-                                and str(job.get("context", {}).get("task_id")) == str(target_task_id)
+                                and str(job.get("context", {}).get("task_id"))
+                                == str(target_task_id)
                             )
                         )
                     ):
@@ -1362,7 +1690,11 @@ class FakePool:
                 return None
             user_id = args[0]
             for job in self.scheduled_jobs.values():
-                if job["user_id"] == user_id and job["job_type"] == "checkin" and job["status"] == "pending":
+                if (
+                    job["user_id"] == user_id
+                    and job["job_type"] == "checkin"
+                    and job["status"] == "pending"
+                ):
                     job["status"] = "cancelled"
                     return {"id": job["id"]}
             return None
@@ -1375,10 +1707,14 @@ class FakePool:
                     and job.get("job_type") == "scheduled_task"
                     and job.get("status") == "pending"
                     and (
-                        (target_job_id is not None and str(job["id"]) == str(target_job_id))
+                        (
+                            target_job_id is not None
+                            and str(job["id"]) == str(target_job_id)
+                        )
                         or (
                             target_task_id is not None
-                            and str(job.get("context", {}).get("task_id")) == str(target_task_id)
+                            and str(job.get("context", {}).get("task_id"))
+                            == str(target_task_id)
                         )
                     )
                 ):
@@ -1386,9 +1722,16 @@ class FakePool:
                         job["scheduled_for"] = scheduled_for
                     job.setdefault("context", {}).update(patch)
                     job["updated_at"] = datetime.now(UTC)
-                    return {"job_id": job["id"], "scheduled_for": job["scheduled_for"], "context": job["context"]}
+                    return {
+                        "job_id": job["id"],
+                        "scheduled_for": job["scheduled_for"],
+                        "context": job["context"],
+                    }
             return None
-        if compact.startswith("UPDATE scheduled_jobs SET context=COALESCE") and "job_type='scheduled_task'" in compact:
+        if (
+            compact.startswith("UPDATE scheduled_jobs SET context=COALESCE")
+            and "job_type='scheduled_task'" in compact
+        ):
             user_id, target_job_id, context_patch = args
             patch = _coerce_jsonb(context_patch) or {}
             for job in self.scheduled_jobs.values():
@@ -1408,21 +1751,46 @@ class FakePool:
                 1
                 for message in self.messages.values()
                 if message.get("deleted_at") is None
-                and (message.get("sender_id") == user_id or message.get("recipient_id") == user_id)
+                and (
+                    message.get("sender_id") == user_id
+                    or message.get("recipient_id") == user_id
+                )
             )
-            ongoing_count = sum(1 for theme in self.themes.values() if theme.get("status", "active") == "active")
+            ongoing_count = sum(
+                1
+                for theme in self.themes.values()
+                if theme.get("status", "active") == "active"
+            )
             ongoing_count += sum(
                 1
                 for item in self.watch_items.values()
-                if item.get("owner_user_id") == user_id and item.get("status", "open") == "open"
+                if item.get("owner_user_id") == user_id
+                and item.get("status", "open") == "open"
             )
-            return {"conversation_count": conversation_count, "ongoing_count": ongoing_count}
-        if 'FROM watch_items' in compact and 'owner_user_id' in compact and 'due_at' in compact and 'WHERE id' in compact:
+            return {
+                "conversation_count": conversation_count,
+                "ongoing_count": ongoing_count,
+            }
+        if (
+            "FROM watch_items" in compact
+            and "owner_user_id" in compact
+            and "due_at" in compact
+            and "WHERE id" in compact
+        ):
             return self.watch_items.get(args[0])
         if compact.startswith("INSERT INTO feedback"):
             if len(args) >= 8:
                 # log_feedback: from_user_id, target_type, target_id, sentiment, content, source, bot_id, topic_id
-                from_user_id, target_type, target_id, sentiment, content, source, _bot_id, _topic_id = args[:8]
+                (
+                    from_user_id,
+                    target_type,
+                    target_id,
+                    sentiment,
+                    content,
+                    source,
+                    _bot_id,
+                    _topic_id,
+                ) = args[:8]
             elif len(args) == 6:
                 # discord reaction: from_user_id, target_id, sentiment, content, bot_id, topic_id
                 from_user_id, target_id, sentiment, content, _bot_id, _topic_id = args
@@ -1501,24 +1869,41 @@ class FakePool:
             }
             self.pacing_events[row["id"]] = row
             return {"id": row["id"]}
-        if compact.startswith("SELECT id, headline, body, last_updated_at FROM topic_status WHERE topic_id"):
+        if compact.startswith(
+            "SELECT id, headline, body, last_updated_at FROM topic_status WHERE topic_id"
+        ):
             # S4: topic_status fetch. FakePool stores rows in self.topic_status keyed by (topic_id, dyad_id|user_id).
             topic_id = args[0]
             scope_id = args[1]
             row = self.topic_status.get((topic_id, scope_id))
             return dict(row) if row else None
-        if compact.startswith("SELECT id, topic_id FROM messages WHERE whatsapp_message_id"):
+        if compact.startswith(
+            "SELECT id, topic_id FROM messages WHERE whatsapp_message_id"
+        ):
             wa_id = args[0]
             bot_id = args[1] if len(args) > 1 else None
             for row in self.messages.values():
                 if (
                     row.get("whatsapp_message_id") == wa_id
                     and row.get("direction") == "outbound"
-                    and (bot_id is None or row.get("bot_id") == bot_id)
+                    and (
+                        bot_id is None
+                        or self._message_matches_bot_topic(
+                            row,
+                            bot_id,
+                            (
+                                row["topic_id"]
+                                if "topic_id" in row
+                                else UUID("00000000-0000-4000-8000-000000000001")
+                            ),
+                        )
+                    )
                 ):
                     return {"id": row["id"], "topic_id": row.get("topic_id")}
             return None
-        if compact.startswith("SELECT id, sender_id AS user_id, sender_id, bot_id, topic_id"):
+        if compact.startswith(
+            "SELECT id, sender_id AS user_id, sender_id, bot_id, topic_id"
+        ):
             row = self.messages.get(args[0])
             if row is None:
                 return None
@@ -1532,6 +1917,13 @@ class FakePool:
                 "binding_id": row.get("binding_id"),
                 "dyad_id": row.get("dyad_id"),
             }
+        if compact.startswith(
+            "SELECT dm_other.dyad_id, dm_other.user_id AS partner_user_id"
+        ):
+            partner_user_id = self.dyad_partners.get(args[0])
+            if partner_user_id is None:
+                return None
+            return {"dyad_id": uuid4(), "partner_user_id": partner_user_id}
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):
@@ -1580,7 +1972,9 @@ class FakePool:
             return None
         if compact.startswith("SELECT sender_id FROM messages WHERE id"):
             return self.messages[args[0]]["sender_id"]
-        if compact.startswith("SELECT EXISTS ( SELECT 1 FROM messages WHERE direction='inbound'"):
+        if compact.startswith(
+            "SELECT EXISTS ( SELECT 1 FROM messages WHERE direction='inbound'"
+        ):
             user_id, since, triggering_message_ids, *rest = args
             bot_id_filter = rest[0] if rest else None
             triggering = set(triggering_message_ids or [])
@@ -1589,10 +1983,23 @@ class FakePool:
                 and row.get("sender_id") == user_id
                 and row.get("sent_at") > since
                 and row["id"] not in triggering
-                and (bot_id_filter is None or row.get("bot_id") == bot_id_filter or row.get("bot_id") is None)
+                and (
+                    bot_id_filter is None
+                    or self._message_matches_bot_topic(
+                        row,
+                        bot_id_filter,
+                        (
+                            row["topic_id"]
+                            if "topic_id" in row
+                            else UUID("00000000-0000-4000-8000-000000000001")
+                        ),
+                    )
+                )
                 for row in self.messages.values()
             )
-        if compact.startswith("SELECT m.whatsapp_message_id FROM messages m JOIN user_identities ui ON ui.user_id = m.sender_id"):
+        if compact.startswith(
+            "SELECT m.whatsapp_message_id FROM messages m JOIN user_identities ui ON ui.user_id = m.sender_id"
+        ):
             identifier = args[0]
             rows = [
                 message
@@ -1601,12 +2008,15 @@ class FakePool:
                 and message.get("whatsapp_message_id") is not None
                 # In test FakePool, user_identities rows mirror users.phone,
                 # so fall through to matching the identifier against users.
-                and self.users.get(message.get("sender_id"), {}).get("phone") == identifier
+                and self.users.get(message.get("sender_id"), {}).get("phone")
+                == identifier
             ]
             if not rows:
                 return None
             return max(rows, key=lambda row: row["sent_at"])["whatsapp_message_id"]
-        if compact.startswith("SELECT m.whatsapp_message_id FROM messages m JOIN users u ON u.id = m.sender_id"):
+        if compact.startswith(
+            "SELECT m.whatsapp_message_id FROM messages m JOIN users u ON u.id = m.sender_id"
+        ):
             phone = args[0]
             rows = [
                 message
@@ -1618,10 +2028,18 @@ class FakePool:
             if not rows:
                 return None
             return max(rows, key=lambda row: row["sent_at"])["whatsapp_message_id"]
-        if 'SELECT owner_user_id' in compact and 'FROM watch_items' in compact and 'WHERE' in compact:
+        if (
+            "SELECT owner_user_id" in compact
+            and "FROM watch_items" in compact
+            and "WHERE" in compact
+        ):
             row = self.watch_items.get(args[0])
             return row.get("owner_user_id") if row else None
-        if 'SELECT owner_id' in compact and 'FROM out_of_bounds' in compact and 'WHERE' in compact:
+        if (
+            "SELECT owner_id" in compact
+            and "FROM out_of_bounds" in compact
+            and "WHERE" in compact
+        ):
             row = self.out_of_bounds.get(args[0])
             return row.get("owner_id") if row else None
         if compact.startswith("SELECT about_user_id FROM memories WHERE id"):
@@ -1637,14 +2055,22 @@ class FakePool:
         if compact.startswith("SELECT id FROM messages WHERE whatsapp_message_id"):
             wa_id = args[0]
             for row in self.messages.values():
-                if row.get("whatsapp_message_id") == wa_id and row.get("direction") == "outbound":
+                if (
+                    row.get("whatsapp_message_id") == wa_id
+                    and row.get("direction") == "outbound"
+                ):
                     return row["id"]
             return None
-        if compact.startswith("SELECT paused_at FROM system_state WHERE key = 'global_pause'"):
+        if compact.startswith(
+            "SELECT paused_at FROM system_state WHERE key = 'global_pause'"
+        ):
             return self.system_state["global_pause"].get("paused_at")
         if compact.startswith("SELECT paused FROM user_bot_state WHERE user_id"):
             # S2a: per-(user,bot) pause read path — always not paused in tests
             return None
+        if compact.startswith("SELECT partner_share FROM user_bot_state WHERE user_id"):
+            row = self.user_bot_state.get((args[0], args[1]), {})
+            return row.get("partner_share")
         if compact.startswith("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id"):
             return self.bot_turns[args[0]].get("reasoning") or ""
         if compact.startswith("SELECT 1 FROM distillations d JOIN artifact_topics"):
@@ -1652,50 +2078,112 @@ class FakePool:
             topic_id = args[1]
             if row_id in self.distillations:
                 d_row = self.distillations[row_id]
-                if d_row.get("status") == "active" and self._row_matches_topic('distillations', row_id, topic_id):
+                if d_row.get("status") == "active" and self._row_matches_topic(
+                    "distillations", row_id, topic_id
+                ):
                     return 1
             return None
         raise AssertionError(f"unhandled fetchval SQL: {compact}")
 
     async def fetch(self, sql: str, *args):
         compact = " ".join(sql.split())
-        if compact.startswith("SELECT id FROM messages WHERE id = ANY") and "sender_id=$2 OR recipient_id=$2" in compact:
+        if (
+            compact.startswith("SELECT id FROM messages WHERE id = ANY")
+            and "sender_id=$2 OR recipient_id=$2" in compact
+        ):
             wanted = set(args[0])
             source_user_id = args[1]
+            bot_filter = args[2] if len(args) > 2 else None
+            topic_filter = args[3] if len(args) > 3 else None
             return [
                 {"id": row["id"]}
                 for row in self.messages.values()
                 if row["id"] in wanted
                 and row.get("deleted_at") is None
-                and (row.get("sender_id") == source_user_id or row.get("recipient_id") == source_user_id)
+                and (
+                    row.get("sender_id") == source_user_id
+                    or row.get("recipient_id") == source_user_id
+                )
+                and (
+                    "bot_id=$3" not in compact
+                    or "topic_id=$4" not in compact
+                    or self._message_matches_bot_topic(row, bot_filter, topic_filter)
+                )
             ]
         if compact.startswith("SELECT id FROM messages WHERE id = ANY"):
             wanted = set(args[0])
-            return [{"id": row["id"]} for row in self.messages.values() if row["id"] in wanted]
-        if 'FROM themes' in compact and 'WHERE id = ANY' in compact and 'SELECT id' in compact[:25]:
+            has_bot_scope_23 = "bot_id = $2" in compact and "topic_id = $3" in compact
+            has_bot_scope_34 = "bot_id=$3" in compact and "topic_id=$4" in compact
+            if has_bot_scope_23:
+                bot_filter = args[1] if len(args) > 1 else None
+                topic_filter = args[2] if len(args) > 2 else None
+            elif has_bot_scope_34:
+                bot_filter = args[2] if len(args) > 2 else None
+                topic_filter = args[3] if len(args) > 3 else None
+            else:
+                bot_filter = None
+                topic_filter = None
+            return [
+                {"id": row["id"]}
+                for row in self.messages.values()
+                if row["id"] in wanted
+                and (
+                    not (has_bot_scope_23 or has_bot_scope_34)
+                    or self._message_matches_bot_topic(row, bot_filter, topic_filter)
+                )
+            ]
+        if (
+            "FROM themes" in compact
+            and "WHERE id = ANY" in compact
+            and "SELECT id" in compact[:25]
+        ):
             wanted = set(args[0])
-            return [{"id": row["id"]} for row in self.themes.values() if row["id"] in wanted]
-        if 'FROM observations' in compact and 'WHERE id = ANY' in compact and 'SELECT id' in compact[:25]:
+            return [
+                {"id": row["id"]} for row in self.themes.values() if row["id"] in wanted
+            ]
+        if (
+            "FROM observations" in compact
+            and "WHERE id = ANY" in compact
+            and "SELECT id" in compact[:25]
+        ):
             wanted = set(args[0])
-            return [{"id": row["id"]} for row in self.observations.values() if row["id"] in wanted]
-        if 'FROM memories' in compact and 'WHERE id = ANY' in compact and 'SELECT id' in compact[:25]:
+            return [
+                {"id": row["id"]}
+                for row in self.observations.values()
+                if row["id"] in wanted
+            ]
+        if (
+            "FROM memories" in compact
+            and "WHERE id = ANY" in compact
+            and "SELECT id" in compact[:25]
+        ):
             wanted = set(args[0])
-            return [{"id": row["id"]} for row in self.memories.values() if row["id"] in wanted]
-        if compact.startswith("SELECT id, name, phone, timezone FROM users WHERE id <>"):
+            return [
+                {"id": row["id"]}
+                for row in self.memories.values()
+                if row["id"] in wanted
+            ]
+        if compact.startswith(
+            "SELECT id, name, phone, timezone FROM users WHERE id <>"
+        ):
             return [row for user_id, row in self.users.items() if user_id != args[0]]
-        if compact.startswith("SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default, pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date, pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id <>"):
+        if compact.startswith(
+            "SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date, pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome FROM users WHERE id <>"
+        ):
             return [row for user_id, row in self.users.items() if user_id != args[0]]
         if compact.startswith("SELECT bot_id, address FROM channels WHERE transport"):
             if self._raise_undefined_table_on_channels:
                 self._raise_undefined_table_on_channels = False
-                raise _UndefinedTableError("relation \"channels\" does not exist")
+                raise _UndefinedTableError('relation "channels" does not exist')
             transport_val = args[0] if args else "discord"
             return [
                 {"bot_id": row["bot_id"], "address": row["address"]}
                 for (_t, addr), row in self.channels.items()
                 if _t == transport_val
             ]
-        if compact.startswith("SELECT transport, address FROM user_identities WHERE user_id"):
+        if compact.startswith(
+            "SELECT transport, address FROM user_identities WHERE user_id"
+        ):
             uid = args[0]
             return [
                 {"transport": transport, "address": address}
@@ -1709,7 +2197,15 @@ class FakePool:
             ]
         if compact.startswith("SELECT u.id AS user_id"):
             start, end, *rest = args
-            allowed_users = set(rest[0]) if rest else set(self.users)
+            has_bot_scope = "m.bot_id = $3" in compact and "m.topic_id = $4" in compact
+            if has_bot_scope:
+                bot_filter = rest[0] if len(rest) > 0 else None
+                topic_filter = rest[1] if len(rest) > 1 else None
+                allowed_users = set(rest[2]) if len(rest) > 2 else set(self.users)
+            else:
+                bot_filter = None
+                topic_filter = None
+                allowed_users = set(rest[0]) if rest else set(self.users)
             rows = []
             for user in self.users.values():
                 if user["id"] not in allowed_users:
@@ -1719,25 +2215,49 @@ class FakePool:
                     for message in self.messages.values()
                     if message.get("deleted_at") is None
                     and start <= message["sent_at"] <= end
-                    and (message.get("sender_id") == user["id"] or message.get("recipient_id") == user["id"])
+                    and (
+                        message.get("sender_id") == user["id"]
+                        or message.get("recipient_id") == user["id"]
+                    )
+                    and (
+                        not has_bot_scope
+                        or self._message_matches_bot_topic(
+                            message, bot_filter, topic_filter
+                        )
+                    )
                 ]
-                latest = max(messages, key=lambda message: message["sent_at"]) if messages else None
+                latest = (
+                    max(messages, key=lambda message: message["sent_at"])
+                    if messages
+                    else None
+                )
                 rows.append(
                     {
                         "user_id": user["id"],
                         "user_name": user["name"],
-                        "cross_thread_sharing_default": user.get("cross_thread_sharing_default"),
                         "message_count": len(messages),
                         "last_message_at": latest["sent_at"] if latest else None,
                         "latest_content": latest["content"] if latest else None,
                     }
                 )
-            rows.sort(key=lambda row: (row["last_message_at"] is None, row["last_message_at"] or datetime.min.replace(tzinfo=UTC), row["user_name"]))
+            rows.sort(
+                key=lambda row: (
+                    row["last_message_at"] is None,
+                    row["last_message_at"] or datetime.min.replace(tzinfo=UTC),
+                    row["user_name"],
+                )
+            )
             return rows
-        if "FROM bridge_candidates" in compact and "WHERE target_user_id=$1 AND source_user_id=$2" in compact:
+        if (
+            "FROM bridge_candidates" in compact
+            and "WHERE target_user_id=$1 AND source_user_id=$2" in compact
+        ):
             target_user_id, source_user_id = args
             rows = [
-                {**dict(row), "partner_path": row.get("partner_path", "message_partner")}
+                {
+                    **dict(row),
+                    "partner_path": row.get("partner_path", "message_partner"),
+                }
                 for row in self.bridge_candidates.values()
                 if row["target_user_id"] == target_user_id
                 and row["source_user_id"] == source_user_id
@@ -1748,18 +2268,40 @@ class FakePool:
             return rows[:5]
         if "FROM bridge_candidates" in compact:
             if "partner_path" in compact:
-                user_id, partner_id, source_filter, target_filter, status_filter, partner_path_filter, limit = args
+                (
+                    user_id,
+                    partner_id,
+                    source_filter,
+                    target_filter,
+                    status_filter,
+                    partner_path_filter,
+                    limit,
+                ) = args
             else:
-                user_id, partner_id, source_filter, target_filter, status_filter, limit = args
+                (
+                    user_id,
+                    partner_id,
+                    source_filter,
+                    target_filter,
+                    status_filter,
+                    limit,
+                ) = args
                 partner_path_filter = None
             rows = [
-                {**dict(row), "partner_path": row.get("partner_path", "message_partner")}
+                {
+                    **dict(row),
+                    "partner_path": row.get("partner_path", "message_partner"),
+                }
                 for row in self.bridge_candidates.values()
-                if {row["source_user_id"], row["target_user_id"]} == {user_id, partner_id}
+                if {row["source_user_id"], row["target_user_id"]}
+                == {user_id, partner_id}
                 and (source_filter is None or row["source_user_id"] == source_filter)
                 and (target_filter is None or row["target_user_id"] == target_filter)
                 and (status_filter is None or row["status"] == status_filter)
-                and (partner_path_filter is None or row.get("partner_path", "message_partner") == partner_path_filter)
+                and (
+                    partner_path_filter is None
+                    or row.get("partner_path", "message_partner") == partner_path_filter
+                )
             ]
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return rows[:limit]
@@ -1785,20 +2327,94 @@ class FakePool:
                 if row.get("status", "active") == "active"
                 and (owner_filter is None or row["owner_id"] in owner_filter)
             ]
+        if "WITH partner_rows AS" in compact:
+            owner_user_id = args[0]
+            limit = args[1]
+            current_bot_id = args[2]
+            rows = []
+            for row in self.memories.values():
+                if (
+                    row.get("status", "active") == "active"
+                    and row.get("visibility") == "dyad_shareable"
+                    and row.get("shareable_summary")
+                    and row.get("about_user_id") == owner_user_id
+                    and row.get("recorded_by_bot_id") is not None
+                    and row.get("recorded_by_bot_id") != current_bot_id
+                    and self.user_bot_state.get(
+                        (owner_user_id, row.get("recorded_by_bot_id")), {}
+                    ).get("partner_share")
+                    == "opt_in"
+                ):
+                    rows.append(
+                        {
+                            "kind": "memory",
+                            "id": row["id"],
+                            "bot_id": row.get("recorded_by_bot_id"),
+                            "shareable_summary": row.get("shareable_summary"),
+                            "occurred_at": row.get("last_referenced_at")
+                            or row.get("created_at", datetime.now(UTC)),
+                        }
+                    )
+            for row in self.distillations.values():
+                bot_id = row.get("recorded_by_bot_id") or self.messages.get(
+                    row.get("triggering_message_id"), {}
+                ).get("bot_id")
+                if (
+                    row.get("status", "active") == "active"
+                    and row.get("visibility") == "dyad_shareable"
+                    and row.get("shareable_summary")
+                    and owner_user_id in row.get("source_user_ids", [])
+                    and bot_id is not None
+                    and bot_id != current_bot_id
+                    and self.user_bot_state.get((owner_user_id, bot_id), {}).get(
+                        "partner_share"
+                    )
+                    == "opt_in"
+                ):
+                    rows.append(
+                        {
+                            "kind": "distillation",
+                            "id": row["id"],
+                            "bot_id": bot_id,
+                            "shareable_summary": row.get("shareable_summary"),
+                            "occurred_at": row.get("updated_at")
+                            or row.get("created_at", datetime.now(UTC)),
+                        }
+                    )
+            rows.sort(key=lambda item: item["occurred_at"], reverse=True)
+            return rows[:limit]
         # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM memories" in compact:
+            if "m.about_user_id = $1" in compact and args:
+                owner_filter = {args[0]}
+            elif "m.about_user_id = $2" in compact and len(args) > 1:
+                owner_filter = {args[1]}
+            elif args and isinstance(args[0], (list, tuple, set)):
+                owner_filter = set(args[0])
+            elif "m.status = $1" in compact:
+                owner_filter = None
+            else:
+                owner_filter = {args[0]} if args else None
             return [
                 {
                     "id": row["id"],
                     "about_user_id": row.get("about_user_id"),
                     "content": row.get("content", ""),
                     "status": row.get("status", "active"),
+                    "visibility": row.get("visibility", "private"),
+                    "shareable_summary": row.get("shareable_summary"),
+                    "recorded_by_bot_id": row.get("recorded_by_bot_id"),
                     "related_theme_ids": row.get("related_theme_ids", []),
                     "created_at": row.get("created_at", datetime.now(UTC)),
                     "last_referenced_at": row.get("last_referenced_at"),
                 }
                 for row in self.memories.values()
                 if row.get("status", "active") == "active"
+                and (
+                    owner_filter is None
+                    or row.get("about_user_id") in owner_filter
+                    or row.get("about_user_id") is None
+                )
             ]
         if "FROM themes" in compact:
             return list(self.themes.values())[:10]
@@ -1817,7 +2433,8 @@ class FakePool:
                     "related_theme_ids": row.get("related_theme_ids", []),
                 }
                 for row in self.watch_items.values()
-                if row.get("status", "open") == "open" and (not args or row.get("owner_user_id") == args[0])
+                if row.get("status", "open") == "open"
+                and (not args or row.get("owner_user_id") == args[0])
             ]
         # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM observations" in compact:
@@ -1845,7 +2462,8 @@ class FakePool:
                     "surfaced_count": row.get("surfaced_count", 0),
                 }
                 for row in self.observations.values()
-                if row.get("status", "active") == "active" and row.get("significance", 0) >= 3
+                if row.get("status", "active") == "active"
+                and row.get("significance", 0) >= 3
             ]
         # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM distillations" in compact:
@@ -1866,19 +2484,29 @@ class FakePool:
                     "created_from_tool_call_id": row.get("created_from_tool_call_id"),
                     "triggering_message_id": row.get("triggering_message_id"),
                     "supersedes_distillation_id": row.get("supersedes_distillation_id"),
-                    "superseded_by_distillation_id": row.get("superseded_by_distillation_id"),
+                    "superseded_by_distillation_id": row.get(
+                        "superseded_by_distillation_id"
+                    ),
                     "revision_note": row.get("revision_note"),
                     "revision_count": row.get("revision_count", 0),
                     "created_at": row.get("created_at", datetime.now(UTC)),
                     "updated_at": row.get("updated_at", datetime.now(UTC)),
                     "revised_at": row.get("revised_at"),
                     "retired_at": row.get("retired_at"),
+                    "recorded_by_bot_id": row.get("recorded_by_bot_id"),
+                    "visibility_bot_id": row.get("recorded_by_bot_id")
+                    or self.messages.get(row.get("triggering_message_id"), {}).get(
+                        "bot_id"
+                    ),
                 }
                 for row in self.distillations.values()
                 if row.get("status", "active") == "active"
             ]
         if "FROM messages" in compact and "WHERE id = ANY" in compact:
             message_ids = set(args[0])
+            has_bot_scope = "bot_id = $2" in compact and "topic_id = $3" in compact
+            bot_filter = args[1] if has_bot_scope and len(args) > 1 else None
+            topic_filter = args[2] if has_bot_scope and len(args) > 2 else None
             return [
                 {
                     "id": row["id"],
@@ -1890,21 +2518,46 @@ class FakePool:
                     "content": row.get("content"),
                     "media_type": row.get("media_type"),
                     "media_analysis": row.get("media_analysis"),
+                    "media_duration_seconds": row.get("media_duration_seconds"),
+                    "bot_id": row.get("bot_id"),
+                    "topic_id": row.get("topic_id"),
                 }
                 for row in self.messages.values()
                 if row["id"] in message_ids
+                and (
+                    not has_bot_scope
+                    or self._message_matches_bot_topic(row, bot_filter, topic_filter)
+                )
             ]
-        if "FROM messages" in compact and "SELECT id, sender_id" in compact and "sent_at, content" in compact:
+        if (
+            "FROM messages" in compact
+            and "SELECT id, sender_id" in compact
+            and "sent_at, content" in compact
+        ):
             params = list(args)
             limit = params[-1]
-            text_filter = next((arg.strip("%").lower() for arg in params if isinstance(arg, str) and arg.startswith("%")), None)
+            has_bot_scope = "bot_id =" in compact and "topic_id =" in compact
+            allowed = params[0] if params else None
+            bot_filter = params[1] if has_bot_scope and len(params) > 2 else None
+            topic_filter = params[2] if has_bot_scope and len(params) > 2 else None
+            text_filter = next(
+                (
+                    arg.strip("%").lower()
+                    for arg in params
+                    if isinstance(arg, str) and arg.startswith("%")
+                ),
+                None,
+            )
             datetimes = [arg for arg in params if isinstance(arg, datetime)]
             start = datetimes[0] if len(datetimes) >= 1 else None
             end = datetimes[1] if len(datetimes) >= 2 else None
-            id_filters = [arg for arg in params if not isinstance(arg, (str, int, datetime))]
             rows = []
             for row in self.messages.values():
                 if row.get("deleted_at") is not None:
+                    continue
+                if has_bot_scope and not self._message_matches_bot_topic(
+                    row, bot_filter, topic_filter
+                ):
                     continue
                 if start is not None and row["sent_at"] < start:
                     continue
@@ -1916,15 +2569,23 @@ class FakePool:
                     for key in ("explanation", "description", "summary")
                     if isinstance(analysis, dict)
                 )
-                if text_filter and text_filter not in f"{row.get('content') or ''} {analysis_text}".lower():
+                if (
+                    text_filter
+                    and text_filter
+                    not in f"{row.get('content') or ''} {analysis_text}".lower()
+                ):
                     continue
-                if id_filters:
-                    allowed = id_filters[0]
-                    if isinstance(allowed, list):
-                        if row.get("sender_id") not in allowed and row.get("recipient_id") not in allowed:
-                            continue
-                    elif row.get("sender_id") != allowed and row.get("recipient_id") != allowed:
+                if isinstance(allowed, list):
+                    if (
+                        row.get("sender_id") not in allowed
+                        and row.get("recipient_id") not in allowed
+                    ):
                         continue
+                elif allowed is not None and (
+                    row.get("sender_id") != allowed
+                    and row.get("recipient_id") != allowed
+                ):
+                    continue
                 rows.append(
                     {
                         "id": row["id"],
@@ -1936,6 +2597,8 @@ class FakePool:
                         "charge": row.get("charge") or "routine",
                         "direction": row.get("direction"),
                         "recipient_id": row.get("recipient_id"),
+                        "bot_id": row.get("bot_id"),
+                        "topic_id": row.get("topic_id"),
                     }
                 )
             rows.sort(key=lambda row: row["sent_at"], reverse=True)
@@ -1950,14 +2613,21 @@ class FakePool:
                 and row.get("processing_state") == "processed"
                 and row.get("outbound_part_index") is not None
             ]
-            rows.sort(key=lambda row: (row.get("outbound_part_index") or 0, row.get("sent_at")))
+            rows.sort(
+                key=lambda row: (
+                    row.get("outbound_part_index") or 0,
+                    row.get("sent_at"),
+                )
+            )
             return [{"content": row.get("content")} for row in rows]
         if "FROM messages" in compact and "direction='inbound'" in compact:
             user_id, since = args
             rows = [
                 row
                 for row in self.messages.values()
-                if row.get("direction") == "inbound" and row.get("sender_id") == user_id and str(row.get("sent_at")) >= str(since)
+                if row.get("direction") == "inbound"
+                and row.get("sender_id") == user_id
+                and str(row.get("sent_at")) >= str(since)
             ]
             rows.sort(key=lambda row: row["sent_at"])
             return rows
@@ -2029,7 +2699,9 @@ class FakePool:
                     "dyad_id": m.get("dyad_id"),
                 }
                 for m in self.messages.values()
-                if m["processing_state"] == "raw" and m["direction"] == "inbound" and m["id"] not in referenced
+                if m["processing_state"] == "raw"
+                and m["direction"] == "inbound"
+                and m["id"] not in referenced
             ]
         if "FROM messages" in compact and not args:
             rows = list(self.messages.values())
@@ -2037,18 +2709,33 @@ class FakePool:
             return rows[:100]
         if "FROM messages" in compact and "SELECT id, direction" in compact:
             user_filter = args[0]
-            user_ids = set(user_filter) if isinstance(user_filter, list) else {user_filter}
+            has_bot_scope = "bot_id = $2" in compact and "topic_id = $3" in compact
+            bot_filter = args[1] if has_bot_scope and len(args) > 1 else None
+            topic_filter = args[2] if has_bot_scope and len(args) > 2 else None
+            user_ids = (
+                set(user_filter) if isinstance(user_filter, list) else {user_filter}
+            )
             rows = [
                 row
                 for row in self.messages.values()
                 if row.get("deleted_at") is None
-                and (row.get("sender_id") in user_ids or row.get("recipient_id") in user_ids)
+                and (
+                    row.get("sender_id") in user_ids
+                    or row.get("recipient_id") in user_ids
+                )
+                and (
+                    not has_bot_scope
+                    or self._message_matches_bot_topic(row, bot_filter, topic_filter)
+                )
             ]
             rows.sort(key=lambda row: row["sent_at"], reverse=True)
             return rows[:20]
         if "FROM users" in compact and "onboarding_state" in compact:
             return list(self.users.values())
-        if compact.startswith("SELECT event_seq") and "FROM turn_audit_events" in compact:
+        if (
+            compact.startswith("SELECT event_seq")
+            and "FROM turn_audit_events" in compact
+        ):
             turn_id = args[0] if args else None
             rows = [
                 {
@@ -2068,12 +2755,16 @@ class FakePool:
             rows.sort(key=lambda row: row["event_seq"])
             return rows
         if "FROM feedback f JOIN messages m" in compact:
-            user_id, now_utc = args
+            user_id, now_utc = args[:2]
+            has_bot_scope = "m.bot_id = $3" in compact and "m.topic_id = $4" in compact
+            bot_filter = args[2] if has_bot_scope and len(args) > 2 else None
+            topic_filter = args[3] if has_bot_scope and len(args) > 3 else None
             previous_completed_at = max(
                 (
                     turn["completed_at"]
                     for turn in self.bot_turns.values()
-                    if turn.get("user_in_context") == user_id and turn.get("completed_at") is not None
+                    if turn.get("user_in_context") == user_id
+                    and turn.get("completed_at") is not None
                 ),
                 default=None,
             )
@@ -2086,9 +2777,20 @@ class FakePool:
                     continue
                 if feedback.get("from_user_id") != user_id:
                     continue
-                if feedback.get("target_type") != "message" or feedback.get("source") != "reaction":
+                if (
+                    feedback.get("target_type") != "message"
+                    or feedback.get("source") != "reaction"
+                ):
                     continue
-                if message.get("direction") != "outbound" or message.get("recipient_id") != user_id:
+                if (
+                    message.get("direction") != "outbound"
+                    or message.get("recipient_id") != user_id
+                ):
+                    continue
+                if has_bot_scope and (
+                    message.get("bot_id") != bot_filter
+                    or message.get("topic_id") != topic_filter
+                ):
                     continue
                 if not previous_completed_at < feedback["created_at"] <= now_utc:
                     continue
@@ -2131,9 +2833,15 @@ class FakePool:
                     {
                         **turn,
                         "turn_id": turn["id"],
-                        "triggering_content": trigger.get("content") if trigger else None,
-                        "final_outbound_content": outbound.get("content") if outbound else None,
-                        "tool_calls": [tc for tc in self.tool_calls if tc["turn_id"] == turn["id"]],
+                        "triggering_content": (
+                            trigger.get("content") if trigger else None
+                        ),
+                        "final_outbound_content": (
+                            outbound.get("content") if outbound else None
+                        ),
+                        "tool_calls": [
+                            tc for tc in self.tool_calls if tc["turn_id"] == turn["id"]
+                        ],
                         "audit_events": audit_events,
                     }
                 )
@@ -2164,7 +2872,9 @@ class FakePool:
             return rows[:limit]
         if "FROM feedback" in compact:
             rows = list(self.feedback.values())
-            rows.sort(key=lambda row: row.get("created_at", datetime.now(UTC)), reverse=True)
+            rows.sort(
+                key=lambda row: row.get("created_at", datetime.now(UTC)), reverse=True
+            )
             return rows[:50]
         if "FROM public.eval_runs" in compact:
             rows = list(self.eval_runs.values())
@@ -2173,23 +2883,33 @@ class FakePool:
             return rows[:limit]
         if "FROM public.eval_results" in compact:
             run_id = args[0]
-            rows = [row for row in self.eval_results.values() if row["run_id"] == run_id]
+            rows = [
+                row for row in self.eval_results.values() if row["run_id"] == run_id
+            ]
             rows.sort(key=lambda row: row["scenario_name"])
             return rows
         if "FROM scheduled_jobs" in compact:
-            return sorted(self.scheduled_jobs.values(), key=lambda row: row["scheduled_for"], reverse=True)[:50]
-        if compact.startswith("SELECT user_id, bot_id, paused, updated_at, onboarding_state FROM mediator.user_bot_state"):
+            return sorted(
+                self.scheduled_jobs.values(),
+                key=lambda row: row["scheduled_for"],
+                reverse=True,
+            )[:50]
+        if compact.startswith(
+            "SELECT user_id, bot_id, paused, updated_at, onboarding_state FROM mediator.user_bot_state"
+        ):
             # S6: admin user-bot-pauses page. Return rows from self.user_bot_state dict.
             rows = []
             for key, row in self.user_bot_state.items():
                 _user_id, _bot_id = key
-                rows.append({
-                    "user_id": _user_id,
-                    "bot_id": _bot_id,
-                    "paused": row.get("paused", False),
-                    "updated_at": row.get("updated_at", datetime.now(UTC)),
-                    "onboarding_state": row.get("onboarding_state", "pending"),
-                })
+                rows.append(
+                    {
+                        "user_id": _user_id,
+                        "bot_id": _bot_id,
+                        "paused": row.get("paused", False),
+                        "updated_at": row.get("updated_at", datetime.now(UTC)),
+                        "onboarding_state": row.get("onboarding_state", "pending"),
+                    }
+                )
             rows.sort(key=lambda r: (r["bot_id"], str(r["user_id"])))
             return rows
         if "FROM llm_spend_log" in compact:
@@ -2198,9 +2918,21 @@ class FakePool:
                 if isinstance(value, dict):
                     rows.append({"provider": provider, **value})
                 else:
-                    rows.append({"provider": provider, "day": datetime.now(UTC).date(), "total_usd": value, "warned_80_at": None})
+                    rows.append(
+                        {
+                            "provider": provider,
+                            "day": datetime.now(UTC).date(),
+                            "total_usd": value,
+                            "warned_80_at": None,
+                        }
+                    )
             return rows
-        if compact.startswith("SELECT id, topic_id, headline, body, last_updated_at FROM topic_status WHERE") and "topic_id <> $2" in compact:
+        if (
+            compact.startswith(
+                "SELECT id, topic_id, headline, body, last_updated_at FROM topic_status WHERE"
+            )
+            and "topic_id <> $2" in compact
+        ):
             # S6: fetch_cross_topic_status — filter by dyad_id or user_id, exclude topic_id.
             scope_id = args[0]
             exclude_topic_id = args[1]
@@ -2220,9 +2952,19 @@ class FakePool:
                     enriched = dict(row)
                     enriched["slug"] = slug
                     rows.append(enriched)
-            rows.sort(key=lambda r: r.get("last_updated_at", datetime.min.replace(tzinfo=UTC)), reverse=True)
+            rows.sort(
+                key=lambda r: r.get(
+                    "last_updated_at", datetime.min.replace(tzinfo=UTC)
+                ),
+                reverse=True,
+            )
             return rows[:cap]
-        if compact.startswith("SELECT t.id AS topic_id, t.slug, t.display_name, MAX(ts.last_updated_at) AS last_active_at FROM topics t JOIN topic_status ts ON ts.topic_id = t.id WHERE") and "topic_id <> $2" in compact:
+        if (
+            compact.startswith(
+                "SELECT t.id AS topic_id, t.slug, t.display_name, MAX(ts.last_updated_at) AS last_active_at FROM topics t JOIN topic_status ts ON ts.topic_id = t.id WHERE"
+            )
+            and "topic_id <> $2" in compact
+        ):
             # S6: peek_other_topics — filter by dyad_id or user_id, exclude topic_id, within window.
             scope_id = args[0]
             exclude_topic_id = args[1]
@@ -2244,20 +2986,29 @@ class FakePool:
                                 slug = s
                                 display_name = t.get("display_name", s)
                                 break
-                        rows.append({
-                            "topic_id": _topic_id,
-                            "slug": slug,
-                            "display_name": display_name,
-                            "last_active_at": last,
-                        })
-            rows.sort(key=lambda r: r.get("last_active_at", datetime.min.replace(tzinfo=UTC)), reverse=True)
+                        rows.append(
+                            {
+                                "topic_id": _topic_id,
+                                "slug": slug,
+                                "display_name": display_name,
+                                "last_active_at": last,
+                            }
+                        )
+            rows.sort(
+                key=lambda r: r.get("last_active_at", datetime.min.replace(tzinfo=UTC)),
+                reverse=True,
+            )
             return rows[:cap]
         if compact.startswith("SELECT id, slug FROM") and "topics" in compact:
             slugs = args[0]
             result = []
             for slug in slugs:
                 if slug not in self.topics:
-                    self.topics[slug] = {"id": uuid4(), "slug": slug, "display_name": slug.title()}
+                    self.topics[slug] = {
+                        "id": uuid4(),
+                        "slug": slug,
+                        "display_name": slug.title(),
+                    }
                 result.append({"id": self.topics[slug]["id"], "slug": slug})
             return result
         raise AssertionError(f"unhandled fetch SQL: {compact}")
@@ -2268,7 +3019,10 @@ class FakePool:
             return "SET"
         if compact == "SELECT 1":
             return "SELECT 1"
-        if compact.startswith("INSERT INTO system_state") and "paused_at = EXCLUDED.paused_at" in compact:
+        if (
+            compact.startswith("INSERT INTO system_state")
+            and "paused_at = EXCLUDED.paused_at" in compact
+        ):
             paused_at, paused_by_user_id = args
             self.system_state["global_pause"].update(
                 paused_at=paused_at,
@@ -2276,7 +3030,10 @@ class FakePool:
                 updated_at=paused_at,
             )
             return "INSERT 0 1"
-        if compact.startswith("INSERT INTO system_state") and "paused_at = NULL" in compact:
+        if (
+            compact.startswith("INSERT INTO system_state")
+            and "paused_at = NULL" in compact
+        ):
             now = args[0]
             self.system_state["global_pause"].update(
                 paused_at=None,
@@ -2288,7 +3045,9 @@ class FakePool:
             provider, dollars = args
             current = self.llm_spend_log.get(provider, Decimal("0"))
             if isinstance(current, dict):
-                current["total_usd"] = current.get("total_usd", Decimal("0")) + Decimal(dollars)
+                current["total_usd"] = current.get("total_usd", Decimal("0")) + Decimal(
+                    dollars
+                )
             else:
                 self.llm_spend_log[provider] = current + Decimal(dollars)
             return "INSERT 0 1"
@@ -2300,19 +3059,25 @@ class FakePool:
             theme_id, observation_ids = args
             for observation_id in observation_ids:
                 row = self.observations[observation_id]
-                row["related_theme_ids"] = list({*row.get("related_theme_ids", []), theme_id})
+                row["related_theme_ids"] = list(
+                    {*row.get("related_theme_ids", []), theme_id}
+                )
             return f"UPDATE {len(observation_ids)}"
         if compact.startswith("UPDATE memories SET related_theme_ids ="):
             theme_id, memory_ids = args
             for memory_id in memory_ids:
                 row = self.memories[memory_id]
-                row["related_theme_ids"] = list({*row.get("related_theme_ids", []), theme_id})
+                row["related_theme_ids"] = list(
+                    {*row.get("related_theme_ids", []), theme_id}
+                )
             return f"UPDATE {len(memory_ids)}"
         if compact.startswith("UPDATE llm_spend_log SET warned_80_at"):
             provider = args[0]
             current = self.llm_spend_log.get(provider, Decimal("0"))
             if isinstance(current, dict):
-                current["warned_80_at"] = current.get("warned_80_at") or datetime.now(UTC)
+                current["warned_80_at"] = current.get("warned_80_at") or datetime.now(
+                    UTC
+                )
             else:
                 self.llm_spend_log[provider] = {
                     "total_usd": current,
@@ -2332,7 +3097,9 @@ class FakePool:
             media_url, message_id = args
             self.messages[message_id].update(media_type="image", media_url=media_url)
             return "UPDATE 1"
-        if compact.startswith("UPDATE messages SET content=$1, content_encrypted=$2 WHERE id"):
+        if compact.startswith(
+            "UPDATE messages SET content=$1, content_encrypted=$2 WHERE id"
+        ):
             content, content_encrypted, message_id = args
             self.messages[message_id]["content"] = content
             self.messages[message_id]["content_encrypted"] = content_encrypted
@@ -2341,7 +3108,9 @@ class FakePool:
             content, message_id = args
             self.messages[message_id]["content"] = content
             return "UPDATE 1"
-        if compact.startswith("UPDATE messages SET content=$1, content_encrypted=$2, media_analysis=$3"):
+        if compact.startswith(
+            "UPDATE messages SET content=$1, content_encrypted=$2, media_analysis=$3"
+        ):
             content, content_encrypted, analysis, message_id = args
             self.messages[message_id]["content"] = content
             self.messages[message_id]["content_encrypted"] = content_encrypted
@@ -2377,22 +3146,33 @@ class FakePool:
             self.messages[message_id]["whatsapp_message_id"] = wa_id
             self.messages[message_id]["processing_state"] = "processed"
             return "UPDATE 1"
-        if compact.startswith("UPDATE messages SET processing_state='processed' WHERE id = ANY"):
+        if compact.startswith(
+            "UPDATE messages SET processing_state='processed' WHERE id = ANY"
+        ):
             message_ids = set(args[0])
             for message_id in message_ids:
-                if message_id in self.messages and self.messages[message_id]["processing_state"] == "raw":
+                if (
+                    message_id in self.messages
+                    and self.messages[message_id]["processing_state"] == "raw"
+                ):
                     self.messages[message_id]["processing_state"] = "processed"
             return "UPDATE 1"
-        if compact.startswith("UPDATE messages SET processing_state='processed' WHERE id=$1"):
+        if compact.startswith(
+            "UPDATE messages SET processing_state='processed' WHERE id=$1"
+        ):
             self.messages[args[0]]["processing_state"] = "processed"
             return "UPDATE 1"
-        if compact.startswith("UPDATE messages SET processing_state='deferred' WHERE id = ANY"):
+        if compact.startswith(
+            "UPDATE messages SET processing_state='deferred' WHERE id = ANY"
+        ):
             message_ids = set(args[0])
             for message_id in message_ids:
                 if message_id in self.messages:
                     self.messages[message_id]["processing_state"] = "deferred"
             return "UPDATE 1"
-        if compact.startswith("UPDATE messages SET processing_state='raw' WHERE id = ANY"):
+        if compact.startswith(
+            "UPDATE messages SET processing_state='raw' WHERE id = ANY"
+        ):
             message_ids = set(args[0])
             for message_id in message_ids:
                 if message_id in self.messages:
@@ -2404,7 +3184,12 @@ class FakePool:
             wa_id = args[-1]
             for message in self.messages.values():
                 if message["whatsapp_message_id"] == wa_id:
-                    message["edit_history"] = [{"content": message["content"], "at": datetime.now(UTC).isoformat()}]
+                    message["edit_history"] = [
+                        {
+                            "content": message["content"],
+                            "at": datetime.now(UTC).isoformat(),
+                        }
+                    ]
                     message["content"] = new_content
                     if content_encrypted is not None:
                         message["content_encrypted"] = content_encrypted
@@ -2420,20 +3205,31 @@ class FakePool:
             if "job_type = ANY" in compact:
                 job_types = set(args[1])
                 for job in self.scheduled_jobs.values():
-                    if job.get("status") == "pending" and job.get("job_type") in job_types:
+                    if (
+                        job.get("status") == "pending"
+                        and job.get("job_type") in job_types
+                    ):
                         job.update(
                             status="superseded",
-                            cancellation_reason=job.get("cancellation_reason") or "global pause",
+                            cancellation_reason=job.get("cancellation_reason")
+                            or "global pause",
                             claimed_at=None,
                             claimed_by=None,
                         )
                 return "UPDATE 1"
             user_id = args[0]
             for job in self.scheduled_jobs.values():
-                if job.get("user_id") == user_id and job.get("job_type") == "checkin" and job.get("status") == "pending":
+                if (
+                    job.get("user_id") == user_id
+                    and job.get("job_type") == "checkin"
+                    and job.get("status") == "pending"
+                ):
                     job["status"] = "superseded"
             return "UPDATE 1"
-        if compact.startswith("UPDATE scheduled_jobs SET status='superseded'") and "context->>" in compact:
+        if (
+            compact.startswith("UPDATE scheduled_jobs SET status='superseded'")
+            and "context->>" in compact
+        ):
             job_type, context_key, context_id = args
             for job in self.scheduled_jobs.values():
                 if (
@@ -2443,10 +3239,15 @@ class FakePool:
                 ):
                     job["status"] = "superseded"
             return "UPDATE 1"
-        if compact.startswith("UPDATE scheduled_jobs SET status = 'cancelled'") and "interval '24 hours'" in compact:
+        if (
+            compact.startswith("UPDATE scheduled_jobs SET status = 'cancelled'")
+            and "interval '24 hours'" in compact
+        ):
             now = args[0]
             for job in self.scheduled_jobs.values():
-                if job["status"] == "pending" and job["scheduled_for"] < now - timedelta(hours=24):
+                if job["status"] == "pending" and job[
+                    "scheduled_for"
+                ] < now - timedelta(hours=24):
                     job["status"] = "cancelled"
                     job["cancellation_reason"] = "too stale"
                     job["claimed_at"] = None
@@ -2465,7 +3266,10 @@ class FakePool:
                     job["claimed_at"] = None
                     job["claimed_by"] = None
             return "UPDATE 1"
-        if compact.startswith("UPDATE scheduled_jobs SET claimed_at = NULL") and "interval '1 hour'" in compact:
+        if (
+            compact.startswith("UPDATE scheduled_jobs SET claimed_at = NULL")
+            and "interval '1 hour'" in compact
+        ):
             now = args[0]
             for job in self.scheduled_jobs.values():
                 if (
@@ -2478,11 +3282,15 @@ class FakePool:
             return "UPDATE 1"
         if compact.startswith("UPDATE scheduled_jobs SET status = 'fired'"):
             now, job_id = args
-            self.scheduled_jobs[job_id].update(status="fired", fired_at=now, claimed_at=None, claimed_by=None)
+            self.scheduled_jobs[job_id].update(
+                status="fired", fired_at=now, claimed_at=None, claimed_by=None
+            )
             return "UPDATE 1"
         if compact.startswith("UPDATE scheduled_jobs SET status = 'withheld'"):
             now, job_id = args
-            self.scheduled_jobs[job_id].update(status="withheld", claimed_at=None, claimed_by=None, updated_at=now)
+            self.scheduled_jobs[job_id].update(
+                status="withheld", claimed_at=None, claimed_by=None, updated_at=now
+            )
             return "UPDATE 1"
         if compact.startswith("UPDATE scheduled_jobs SET attempt_count = $1"):
             attempt_count, error, now, job_id = args
@@ -2493,7 +3301,10 @@ class FakePool:
                 claimed_by=None,
             )
             return "UPDATE 1"
-        if compact.startswith("UPDATE scheduled_jobs SET status = 'cancelled'") and "attempt_count = $1" in compact:
+        if (
+            compact.startswith("UPDATE scheduled_jobs SET status = 'cancelled'")
+            and "attempt_count = $1" in compact
+        ):
             attempt_count, error, reason, now, job_id = args
             self.scheduled_jobs[job_id].update(
                 status="cancelled",
@@ -2506,40 +3317,64 @@ class FakePool:
             return "UPDATE 1"
         if compact.startswith("UPDATE themes SET status = 'dormant'"):
             now = args[0]
-            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
+            topic_id = args[-1] if "FROM artifact_topics" in compact else None
             for theme in self.themes.values():
                 last = theme.get("last_reinforced_at") or theme.get("first_seen_at")
-                if theme.get("status") == "active" and last is not None and last <= now - timedelta(weeks=6):
-                    if topic_id is not None and not self._row_matches_topic('themes', theme['id'], topic_id):
+                if (
+                    theme.get("status") == "active"
+                    and last is not None
+                    and last <= now - timedelta(weeks=6)
+                ):
+                    if topic_id is not None and not self._row_matches_topic(
+                        "themes", theme["id"], topic_id
+                    ):
                         continue
                     theme["status"] = "dormant"
                     theme["updated_at"] = now
             return "UPDATE 1"
         if compact.startswith("UPDATE themes SET status = 'resolved_by_time'"):
             now = args[0]
-            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
+            topic_id = args[-1] if "FROM artifact_topics" in compact else None
             for theme in self.themes.values():
-                if theme.get("status") == "dormant" and theme.get("updated_at") is not None and theme["updated_at"] <= now - timedelta(days=120):
-                    if topic_id is not None and not self._row_matches_topic('themes', theme['id'], topic_id):
+                if (
+                    theme.get("status") == "dormant"
+                    and theme.get("updated_at") is not None
+                    and theme["updated_at"] <= now - timedelta(days=120)
+                ):
+                    if topic_id is not None and not self._row_matches_topic(
+                        "themes", theme["id"], topic_id
+                    ):
                         continue
                     theme["status"] = "resolved_by_time"
                     theme["updated_at"] = now
             return "UPDATE 1"
         if compact.startswith("UPDATE observations SET status = 'stale'"):
             now = args[0]
-            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
+            topic_id = args[-1] if "FROM artifact_topics" in compact else None
             for observation in self.observations.values():
-                last = observation.get("last_reinforced_at") or observation.get("created_at")
-                if observation.get("status") == "active" and last is not None and last <= now - timedelta(days=183):
-                    if topic_id is not None and not self._row_matches_topic('observations', observation['id'], topic_id):
+                last = observation.get("last_reinforced_at") or observation.get(
+                    "created_at"
+                )
+                if (
+                    observation.get("status") == "active"
+                    and last is not None
+                    and last <= now - timedelta(days=183)
+                ):
+                    if topic_id is not None and not self._row_matches_topic(
+                        "observations", observation["id"], topic_id
+                    ):
                         continue
                     observation["status"] = "stale"
             return "UPDATE 1"
-        if compact.startswith("UPDATE observations SET confidence = CASE observations.confidence") or compact.startswith("UPDATE observations SET confidence = CASE confidence"):
+        if compact.startswith(
+            "UPDATE observations SET confidence = CASE observations.confidence"
+        ) or compact.startswith("UPDATE observations SET confidence = CASE confidence"):
             now = args[0]
-            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
+            topic_id = args[-1] if "FROM artifact_topics" in compact else None
             for observation in self.observations.values():
-                last = observation.get("last_reinforced_at") or observation.get("created_at")
+                last = observation.get("last_reinforced_at") or observation.get(
+                    "created_at"
+                )
                 if (
                     observation.get("status") == "active"
                     and last is not None
@@ -2547,13 +3382,17 @@ class FakePool:
                     and last > now - timedelta(days=183)
                     and observation.get("confidence") in {"high", "medium"}
                 ):
-                    if topic_id is not None and not self._row_matches_topic('observations', observation['id'], topic_id):
+                    if topic_id is not None and not self._row_matches_topic(
+                        "observations", observation["id"], topic_id
+                    ):
                         continue
-                    observation["confidence"] = "medium" if observation["confidence"] == "high" else "low"
+                    observation["confidence"] = (
+                        "medium" if observation["confidence"] == "high" else "low"
+                    )
             return "UPDATE 1"
         if compact.startswith("UPDATE watch_items SET status = 'expired'"):
             now = args[0]
-            topic_id = args[-1] if 'FROM artifact_topics' in compact else None
+            topic_id = args[-1] if "FROM artifact_topics" in compact else None
             for item in self.watch_items.values():
                 if (
                     item.get("status") == "open"
@@ -2561,19 +3400,26 @@ class FakePool:
                     and item.get("addressed_at") is None
                     and item["due_at"] <= now - timedelta(days=30)
                 ):
-                    if topic_id is not None and not self._row_matches_topic('watch_items', item['id'], topic_id):
+                    if topic_id is not None and not self._row_matches_topic(
+                        "watch_items", item["id"], topic_id
+                    ):
                         continue
                     item["status"] = "expired"
             return "UPDATE 1"
         if compact.startswith("UPDATE messages SET content='[deleted]'"):
             content_encrypted = args[0] if args else None
             for message in self.messages.values():
-                if message["deleted_at"] is not None and message["content"] != "[deleted]":
+                if (
+                    message["deleted_at"] is not None
+                    and message["content"] != "[deleted]"
+                ):
                     message["content"] = "[deleted]"
                     if content_encrypted is not None:
                         message["content_encrypted"] = content_encrypted
             return "UPDATE 1"
-        if compact.startswith("UPDATE bot_turns SET failure_reason='crashed_after_send'"):
+        if compact.startswith(
+            "UPDATE bot_turns SET failure_reason='crashed_after_send'"
+        ):
             for turn in self.bot_turns.values():
                 if (
                     turn["completed_at"] is None
@@ -2587,12 +3433,21 @@ class FakePool:
             self.bot_turns[turn_id]["reasoning"] = reasoning
             self.bot_turns[turn_id]["reasoning_encrypted"] = reasoning_encrypted
             return "UPDATE 1"
-        if compact.startswith("UPDATE bot_turns SET final_output_message_id=$1 WHERE id=$2"):
+        if compact.startswith(
+            "UPDATE bot_turns SET final_output_message_id=$1 WHERE id=$2"
+        ):
             final_output_message_id, turn_id = args
             self.bot_turns[turn_id]["final_output_message_id"] = final_output_message_id
             return "UPDATE 1"
         if compact.startswith("UPDATE bot_turns SET final_output_message_id"):
-            final_output_message_id, reasoning, reasoning_encrypted, duration_ms, tool_call_count, turn_id = args
+            (
+                final_output_message_id,
+                reasoning,
+                reasoning_encrypted,
+                duration_ms,
+                tool_call_count,
+                turn_id,
+            ) = args
             self.bot_turns[turn_id].update(
                 final_output_message_id=final_output_message_id,
                 reasoning=reasoning,
@@ -2629,16 +3484,25 @@ class FakePool:
                 }
             )
             return "INSERT 0 1"
-        if compact.startswith("INSERT INTO user_bot_state") or compact.startswith("INSERT INTO mediator.user_bot_state"):
-            # S6: set_user_bot_paused — store in self.user_bot_state keyed by (user_id, bot_id).
-            user_id, bot_id, paused = args[:3]
-            self.user_bot_state[(user_id, bot_id)] = {
+        if compact.startswith("INSERT INTO user_bot_state") or compact.startswith(
+            "INSERT INTO mediator.user_bot_state"
+        ):
+            user_id, bot_id, value = args[:3]
+            existing = self.user_bot_state.get((user_id, bot_id), {})
+            row = {
                 "user_id": user_id,
                 "bot_id": bot_id,
-                "paused": paused,
                 "updated_at": datetime.now(UTC),
-                "onboarding_state": "pending",
+                "onboarding_state": existing.get("onboarding_state", "pending"),
+                "paused": existing.get("paused"),
+                "partner_share": existing.get("partner_share"),
             }
+            if "partner_share" in compact:
+                row["partner_share"] = value
+            else:
+                # S6: set_user_bot_paused — store in self.user_bot_state keyed by (user_id, bot_id).
+                row["paused"] = value
+            self.user_bot_state[(user_id, bot_id)] = row
             return "INSERT 0 1"
         if compact.startswith("DELETE FROM llm_spend_log"):
             self.llm_spend_log.clear()
@@ -2705,5 +3569,7 @@ def make_inbound_scope():
 async def async_client(app_env: None, fake_asyncpg: None) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with app.router.lifespan_context(app):
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
             yield client

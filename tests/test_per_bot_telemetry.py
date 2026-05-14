@@ -47,12 +47,24 @@ def _make_ctx(
     tid = topic_id or uuid4()
 
     # Ensure topics exist in FakePool
-    pool.topics.setdefault(topic_slug, {"id": tid, "slug": topic_slug, "display_name": topic_slug.title()})
+    pool.topics.setdefault(
+        topic_slug, {"id": tid, "slug": topic_slug, "display_name": topic_slug.title()}
+    )
 
-    user = User(id=user_id, name="testuser", phone="+15551234567", timezone="America/New_York",
-                cross_thread_sharing_default="opt_in", onboarding_state="welcomed")
-    partner = User(id=uuid4(), name="partner", phone="+15559876543", timezone="America/New_York",
-                   cross_thread_sharing_default="opt_in", onboarding_state="welcomed")
+    user = User(
+        id=user_id,
+        name="testuser",
+        phone="+15551234567",
+        timezone="America/New_York",
+        onboarding_state="welcomed",
+    )
+    partner = User(
+        id=uuid4(),
+        name="partner",
+        phone="+15559876543",
+        timezone="America/New_York",
+        onboarding_state="welcomed",
+    )
 
     ctx = TurnContext(
         pool=pool,
@@ -86,10 +98,15 @@ async def test_telemetry_coach_add_memory(caplog: pytest.LogCaptureFixture) -> N
     """Coach add_memory log records carry bot_id and topic_id."""
     pool = FakePool()
     coach_topic_id = uuid4()
-    pool.topics["career"] = {"id": coach_topic_id, "slug": "career", "display_name": "Career"}
+    pool.topics["career"] = {
+        "id": coach_topic_id,
+        "slug": "career",
+        "display_name": "Career",
+    }
     ctx = _make_ctx(pool, bot_id="coach", topic_id=coach_topic_id, topic_slug="career")
 
     from tool_schemas import AddMemoryInput as AMI
+
     args = AMI(about_user_id=ctx.user.id, content="Test memory content")
 
     caplog.set_level(logging.INFO, logger="app.services.tools.write_tools")
@@ -104,15 +121,28 @@ async def test_telemetry_coach_add_memory(caplog: pytest.LogCaptureFixture) -> N
 
 
 @pytest.mark.asyncio
-async def test_telemetry_mediator_log_observation(caplog: pytest.LogCaptureFixture) -> None:
+async def test_telemetry_mediator_log_observation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Mediator log_observation log records carry bot_id and topic_id."""
     pool = FakePool()
     med_topic_id = uuid4()
-    pool.topics["relationship"] = {"id": med_topic_id, "slug": "relationship", "display_name": "Relationship"}
-    ctx = _make_ctx(pool, bot_id="mediator", topic_id=med_topic_id, topic_slug="relationship")
+    pool.topics["relationship"] = {
+        "id": med_topic_id,
+        "slug": "relationship",
+        "display_name": "Relationship",
+    }
+    ctx = _make_ctx(
+        pool, bot_id="mediator", topic_id=med_topic_id, topic_slug="relationship"
+    )
 
     from tool_schemas import LogObservationInput as LOI, Confidence
-    args = LOI(content="Test observation", about_user_id=ctx.user.id, confidence=Confidence.medium)
+
+    args = LOI(
+        content="Test observation",
+        about_user_id=ctx.user.id,
+        confidence=Confidence.medium,
+    )
 
     caplog.set_level(logging.INFO, logger="app.services.tools.write_tools")
 

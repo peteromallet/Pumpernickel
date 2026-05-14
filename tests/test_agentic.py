@@ -44,17 +44,24 @@ class TrackingPool(FakePool):
         compact = " ".join(sql.split())
         if compact.startswith("INSERT INTO bot_turns"):
             self.mark("turn:open")
-        if compact.startswith("INSERT INTO messages") and "direction, recipient_id" in compact:
+        if (
+            compact.startswith("INSERT INTO messages")
+            and "direction, recipient_id" in compact
+        ):
             self.mark("outbound:insert")
         if compact.startswith("UPDATE observations SET"):
             self.mark("write:update_observation")
             observation_id = args[-1]
-            self.observations.setdefault(observation_id, {"id": observation_id, "status": "active"})
+            self.observations.setdefault(
+                observation_id, {"id": observation_id, "status": "active"}
+            )
             self.observations[observation_id]["last_reinforced_at"] = datetime.now(UTC)
             if args and isinstance(args[0], str):
                 self.observations[observation_id]["content"] = args[0]
             return {"id": observation_id}
-        if compact.startswith("INSERT INTO watch_items") or compact.startswith("WITH new_artifact AS ( INSERT INTO watch_items"):
+        if compact.startswith("INSERT INTO watch_items") or compact.startswith(
+            "WITH new_artifact AS ( INSERT INTO watch_items"
+        ):
             self.mark("write:add_watch_item")
         if compact.startswith("INSERT INTO scheduled_jobs"):
             self.mark("write:schedule_checkin")
@@ -62,7 +69,11 @@ class TrackingPool(FakePool):
 
     async def fetch(self, sql: str, *args):
         compact = " ".join(sql.split())
-        if compact.startswith("SELECT id, sender_id") and "sent_at, content" in compact and "FROM messages" in compact:
+        if (
+            compact.startswith("SELECT id, sender_id")
+            and "sent_at, content" in compact
+            and "FROM messages" in compact
+        ):
             self.mark("read:search_messages")
             rows = [
                 row
@@ -84,7 +95,10 @@ class TrackingPool(FakePool):
                 for row in self.observations.values()
                 if row.get("status", "active") == "active"
             ]
-        if compact.startswith("SELECT id, title, status") and "FROM themes" in compact:
+        if (
+            compact.startswith("SELECT id, title, status")
+            or compact.startswith("SELECT t.id, t.title, t.status")
+        ) and "FROM themes" in compact:
             self.mark("read:list_themes")
             return list(self.themes.values())[: args[0]]
         if "FROM watch_items" in compact:
@@ -103,7 +117,9 @@ class TrackingPool(FakePool):
                     "final_outbound_content": None,
                     "reasoning": row.get("reasoning", ""),
                     "tool_calls": [
-                        tool_call for tool_call in self.tool_calls if tool_call["turn_id"] == row["id"]
+                        tool_call
+                        for tool_call in self.tool_calls
+                        if tool_call["turn_id"] == row["id"]
                     ],
                 }
                 for row in self.bot_turns.values()
@@ -112,7 +128,9 @@ class TrackingPool(FakePool):
 
     async def execute(self, sql: str, *args) -> str:
         compact = " ".join(sql.split())
-        if compact.startswith("UPDATE messages SET processing_state='processed' WHERE id = ANY"):
+        if compact.startswith(
+            "UPDATE messages SET processing_state='processed' WHERE id = ANY"
+        ):
             self.mark("messages:processed")
         if compact.startswith("INSERT INTO llm_spend_log"):
             self.spend_records.append(Decimal(str(args[1])))
@@ -120,13 +138,19 @@ class TrackingPool(FakePool):
             self.mark(f"tool_call:{args[1]}")
         if compact.startswith("UPDATE bot_turns SET final_output_message_id"):
             self.mark("turn:complete")
-        if compact.startswith("UPDATE bot_turns SET reasoning") and args and "ESCALATION:" in str(args[0]):
+        if (
+            compact.startswith("UPDATE bot_turns SET reasoning")
+            and args
+            and "ESCALATION:" in str(args[0])
+        ):
             self.mark("reason:escalation")
         return await super().execute(sql, *args)
 
 
 class FakeMessages:
-    def __init__(self, responses: list[SimpleNamespace], requests: list[dict], pool: TrackingPool) -> None:
+    def __init__(
+        self, responses: list[SimpleNamespace], requests: list[dict], pool: TrackingPool
+    ) -> None:
         self.responses = responses
         self.requests = requests
         self.pool = pool
@@ -140,12 +164,16 @@ class FakeMessages:
 
 
 class FakeClient:
-    def __init__(self, responses: list[SimpleNamespace], requests: list[dict], pool: TrackingPool) -> None:
+    def __init__(
+        self, responses: list[SimpleNamespace], requests: list[dict], pool: TrackingPool
+    ) -> None:
         self.messages = FakeMessages(responses, requests, pool)
 
 
 class FakeAnthropicFactory:
-    def __init__(self, responses: list[SimpleNamespace], requests: list[dict], pool: TrackingPool) -> None:
+    def __init__(
+        self, responses: list[SimpleNamespace], requests: list[dict], pool: TrackingPool
+    ) -> None:
         self.responses = responses
         self.requests = requests
         self.pool = pool
@@ -154,19 +182,38 @@ class FakeAnthropicFactory:
         return FakeClient(self.responses, self.requests, self.pool)
 
 
-def _response(content: list[dict], stop_reason: str = "end_turn", usage: dict | None = None) -> SimpleNamespace:
-    return SimpleNamespace(content=content, stop_reason=stop_reason, usage=usage or dict(USAGE))
+def _response(
+    content: list[dict], stop_reason: str = "end_turn", usage: dict | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=content, stop_reason=stop_reason, usage=usage or dict(USAGE)
+    )
 
 
 def _tool(name: str, input_: dict, n: int) -> SimpleNamespace:
-    return _response([{"type": "tool_use", "id": f"toolu_{n}", "name": name, "input": input_}], "tool_use")
+    return _response(
+        [{"type": "tool_use", "id": f"toolu_{n}", "name": name, "input": input_}],
+        "tool_use",
+    )
 
 
-def _seed_pair(pool: TrackingPool, *, charge: str = "charged", content: str = "I need help"):
+def _seed_pair(
+    pool: TrackingPool, *, charge: str = "charged", content: str = "I need help"
+):
     user = User(uuid4(), "Maya", "15555550100", "UTC")
     partner = User(uuid4(), "Ben", "15555550101", "UTC")
-    pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
-    pool.users[partner.id] = {"id": partner.id, "name": partner.name, "phone": partner.phone, "timezone": partner.timezone}
+    pool.users[user.id] = {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "timezone": user.timezone,
+    }
+    pool.users[partner.id] = {
+        "id": partner.id,
+        "name": partner.name,
+        "phone": partner.phone,
+        "timezone": partner.timezone,
+    }
     message_id = uuid4()
     pool.messages[message_id] = {
         "id": message_id,
@@ -237,7 +284,9 @@ def _seed_context_rows(pool: TrackingPool, user: User) -> tuple[UUID, UUID]:
     return observation_id, theme_id
 
 
-def _patch_whatsapp(monkeypatch: pytest.MonkeyPatch, sent: list[tuple[str, str, object]]) -> None:
+def _patch_whatsapp(
+    monkeypatch: pytest.MonkeyPatch, sent: list[tuple[str, str, object]]
+) -> None:
     async def fake_send_text(phone: str, content: str):
         sent.append(("text", phone, content))
         return {"messages": [{"id": f"wa-{len(sent)}"}]}
@@ -274,30 +323,71 @@ async def test_agentic_e2e_ordering_cache_spend_and_oob(app_env, monkeypatch):
     requests: list[dict] = []
     when = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
     responses = [
-        _tool("get_observations", {"about_user_id": str(user.id), "min_significance": 3}, 1),
+        _tool(
+            "get_observations",
+            {"about_user_id": str(user.id), "min_significance": 3},
+            1,
+        ),
         _tool("search_messages", {"text_contains": "repair", "limit": 5}, 2),
-        _tool("list_themes", {"active_only": True, "sort_by": "last_reinforced", "limit": 10}, 3),
+        _tool(
+            "list_themes",
+            {"active_only": True, "sort_by": "last_reinforced", "limit": 10},
+            3,
+        ),
         _tool("list_watch_items", {"owner_user_id": str(user.id)}, 4),
         _response([]),
         _response([{"type": "text", "text": outbound}]),
-        _tool("update_observation", {"observation_id": str(observation_id), "content": "Direct repair still matters."}, 5),
-        _tool("add_watch_item", {"owner_user_id": str(user.id), "content": "Check whether the repair conversation happened."}, 6),
+        _tool(
+            "update_observation",
+            {
+                "observation_id": str(observation_id),
+                "content": "Direct repair still matters.",
+            },
+            5,
+        ),
+        _tool(
+            "add_watch_item",
+            {
+                "owner_user_id": str(user.id),
+                "content": "Check whether the repair conversation happened.",
+            },
+            6,
+        ),
         _response([]),
         _tool(
             "schedule_checkin",
-            {"user_id": str(user.id), "when": when, "about_what": "repair conversation", "reason": "follow up"},
+            {
+                "user_id": str(user.id),
+                "when": when,
+                "about_what": "repair conversation",
+                "reason": "follow up",
+            },
             7,
         ),
         _response([]),
     ]
 
-    async def counting_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
-        check_oob_calls.append((content, recipient_id, protected_owner_ids, bot_id, topic_id))
+    async def counting_oob(
+        pool_arg,
+        content: str,
+        recipient_id: UUID,
+        protected_owner_ids=None,
+        *,
+        bot_id,
+        topic_id,
+    ) -> dict:
+        check_oob_calls.append(
+            (content, recipient_id, protected_owner_ids, bot_id, topic_id)
+        )
         return {"verdict": "ok", "reason": "test", "rewrite": None}
 
     monkeypatch.setattr(hooks, "check_oob", counting_oob)
     _patch_whatsapp(monkeypatch, whatsapp_sent)
-    monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
+    monkeypatch.setattr(
+        agentic.anthropic,
+        "AsyncAnthropic",
+        FakeAnthropicFactory(responses, requests, pool),
+    )
     agentic.set_pool(pool)
 
     await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
@@ -342,29 +432,50 @@ async def test_agentic_e2e_ordering_cache_spend_and_oob(app_env, monkeypatch):
     assert requests[0]["tools"][-1]["cache_control"] == {"type": "ephemeral"}
     assert requests[5]["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert requests[5]["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert labels.index("read:get_observations") < labels.index("outbound:insert") < labels.index("tool_call:update_observation")
+    assert (
+        labels.index("read:get_observations")
+        < labels.index("outbound:insert")
+        < labels.index("tool_call:update_observation")
+    )
 
 
 async def test_agentic_why_query_uses_get_bot_actions(app_env, monkeypatch):
     pool = TrackingPool()
-    user, _, message_id = _seed_pair(pool, charge="routine", content="Why did you tell her that?")
+    user, _, message_id = _seed_pair(
+        pool, charge="routine", content="Why did you tell her that?"
+    )
     requests: list[dict] = []
     whatsapp_sent: list[tuple[str, str, object]] = []
     responses = [
         _tool("get_bot_actions", {}, 1),
         _response([]),
-        _response([{"type": "text", "text": "I checked the action log before answering."}]),
+        _response(
+            [{"type": "text", "text": "I checked the action log before answering."}]
+        ),
         _response([]),
     ]
 
     _patch_whatsapp(monkeypatch, whatsapp_sent)
-    async def async_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+
+    async def async_oob(
+        pool_arg,
+        content: str,
+        recipient_id: UUID,
+        protected_owner_ids=None,
+        *,
+        bot_id,
+        topic_id,
+    ) -> dict:
         assert bot_id == "mediator"
         assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "rewrite": None}
 
     monkeypatch.setattr(hooks, "check_oob", async_oob)
-    monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
+    monkeypatch.setattr(
+        agentic.anthropic,
+        "AsyncAnthropic",
+        FakeAnthropicFactory(responses, requests, pool),
+    )
     agentic.set_pool(pool)
 
     await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
@@ -383,7 +494,15 @@ async def test_agentic_uses_oob_rewrite_before_sending(app_env, monkeypatch):
         _response([]),
     ]
 
-    async def rewriting_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+    async def rewriting_oob(
+        pool_arg,
+        content: str,
+        recipient_id: UUID,
+        protected_owner_ids=None,
+        *,
+        bot_id,
+        topic_id,
+    ) -> dict:
         assert bot_id == "mediator"
         assert topic_id is not None
         oob_calls.append(content)
@@ -394,25 +513,43 @@ async def test_agentic_uses_oob_rewrite_before_sending(app_env, monkeypatch):
                 "suggested_rewrite": "Safer version.",
                 "checker_failed": False,
             }
-        return {"verdict": "ok", "reason": "safe", "suggested_rewrite": None, "checker_failed": False}
+        return {
+            "verdict": "ok",
+            "reason": "safe",
+            "suggested_rewrite": None,
+            "checker_failed": False,
+        }
 
     _patch_whatsapp(monkeypatch, whatsapp_sent)
     monkeypatch.setattr(hooks, "check_oob", rewriting_oob)
-    monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
+    monkeypatch.setattr(
+        agentic.anthropic,
+        "AsyncAnthropic",
+        FakeAnthropicFactory(responses, requests, pool),
+    )
     agentic.set_pool(pool)
 
     await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
-    outbound = next(row for row in pool.messages.values() if row.get("direction") == "outbound")
+    outbound = next(
+        row for row in pool.messages.values() if row.get("direction") == "outbound"
+    )
     assert outbound["content"] == "Safer version."
     assert whatsapp_sent[0][2] == "Safer version."
     assert oob_calls[:2] == ["Draft with protected detail.", "Safer version."]
-    assert "Outbound rewritten by OOB checker before send" in next(iter(pool.bot_turns.values()))["reasoning"]
+    assert (
+        "Outbound rewritten by OOB checker before send"
+        in next(iter(pool.bot_turns.values()))["reasoning"]
+    )
 
 
-async def test_agentic_current_user_oob_block_prevents_provider_delivery(app_env, monkeypatch):
+async def test_agentic_current_user_oob_block_prevents_provider_delivery(
+    app_env, monkeypatch
+):
     pool = TrackingPool()
-    user, partner, message_id = _seed_pair(pool, charge="routine", content="Can you help?")
+    user, partner, message_id = _seed_pair(
+        pool, charge="routine", content="Can you help?"
+    )
     requests: list[dict] = []
     whatsapp_sent: list[tuple[str, str, object]] = []
     oob_calls: list[tuple[str, UUID, list[UUID] | None]] = []
@@ -422,7 +559,15 @@ async def test_agentic_current_user_oob_block_prevents_provider_delivery(app_env
         _response([]),
     ]
 
-    async def blocking_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+    async def blocking_oob(
+        pool_arg,
+        content: str,
+        recipient_id: UUID,
+        protected_owner_ids=None,
+        *,
+        bot_id,
+        topic_id,
+    ) -> dict:
         oob_calls.append((content, recipient_id, protected_owner_ids, bot_id, topic_id))
         return {
             "verdict": "block",
@@ -433,28 +578,51 @@ async def test_agentic_current_user_oob_block_prevents_provider_delivery(app_env
 
     _patch_whatsapp(monkeypatch, whatsapp_sent)
     monkeypatch.setattr(hooks, "check_oob", blocking_oob)
-    monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
+    monkeypatch.setattr(
+        agentic.anthropic,
+        "AsyncAnthropic",
+        FakeAnthropicFactory(responses, requests, pool),
+    )
     agentic.set_pool(pool)
 
     await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     assert whatsapp_sent == []
     assert len(oob_calls) == 1
-    assert oob_calls[0][:4] == (blocked_text, user.id, [user.id, partner.id], "mediator")
+    assert oob_calls[0][:4] == (
+        blocked_text,
+        user.id,
+        [user.id, partner.id],
+        "mediator",
+    )
     assert oob_calls[0][4] is not None
     assert not any(row.get("direction") == "outbound" for row in pool.messages.values())
-    assert "Outbound blocked before send by OOB checker" in next(iter(pool.bot_turns.values()))["reasoning"]
+    assert (
+        "Outbound blocked before send by OOB checker"
+        in next(iter(pool.bot_turns.values()))["reasoning"]
+    )
 
 
-async def test_agentic_crisis_escalation_routes_to_partner_with_template(app_env, monkeypatch):
+async def test_agentic_crisis_escalation_routes_to_partner_with_template(
+    app_env, monkeypatch
+):
     pool = TrackingPool()
-    user, partner, message_id = _seed_pair(pool, charge="crisis", content="I might hurt myself")
+    user, partner, message_id = _seed_pair(
+        pool, charge="crisis", content="I might hurt myself"
+    )
     requests: list[dict] = []
     whatsapp_sent: list[tuple[str, str, object]] = []
     escalation_spy: list[tuple[User, str, object, UUID | None, list[UUID] | None]] = []
     escalation_content = "Maya may need immediate support right now."
     responses = [
-        _response([{"type": "text", "text": "I am here with you. If you might act on this now, contact local emergency support or a trusted person nearby."}]),
+        _response(
+            [
+                {
+                    "type": "text",
+                    "text": "I am here with you. If you might act on this now, contact local emergency support or a trusted person nearby.",
+                }
+            ]
+        ),
         _tool(
             "escalate_to_partner",
             {
@@ -470,7 +638,16 @@ async def test_agentic_crisis_escalation_routes_to_partner_with_template(app_env
     ]
 
     _patch_whatsapp(monkeypatch, whatsapp_sent)
-    async def async_oob(pool_arg, content: str, recipient_id: UUID, protected_owner_ids=None, *, bot_id, topic_id) -> dict:
+
+    async def async_oob(
+        pool_arg,
+        content: str,
+        recipient_id: UUID,
+        protected_owner_ids=None,
+        *,
+        bot_id,
+        topic_id,
+    ) -> dict:
         assert bot_id == "mediator"
         assert topic_id is not None
         return {"verdict": "ok", "reason": "test", "rewrite": None}
@@ -478,8 +655,27 @@ async def test_agentic_crisis_escalation_routes_to_partner_with_template(app_env
     monkeypatch.setattr(hooks, "check_oob", async_oob)
     original_send = write_tools.send_outbound
 
-    async def spy_send(pool_arg, recipient, content, *, template_fallback=None, bot_turn_id=None, protected_owner_ids=None, scope):
-        escalation_spy.append((recipient, content, template_fallback, bot_turn_id, protected_owner_ids, scope.bot_id, scope.topic_id))
+    async def spy_send(
+        pool_arg,
+        recipient,
+        content,
+        *,
+        template_fallback=None,
+        bot_turn_id=None,
+        protected_owner_ids=None,
+        scope,
+    ):
+        escalation_spy.append(
+            (
+                recipient,
+                content,
+                template_fallback,
+                bot_turn_id,
+                protected_owner_ids,
+                scope.bot_id,
+                scope.topic_id,
+            )
+        )
         return await original_send(
             pool_arg,
             recipient,
@@ -491,18 +687,32 @@ async def test_agentic_crisis_escalation_routes_to_partner_with_template(app_env
         )
 
     monkeypatch.setattr(write_tools, "send_outbound", spy_send)
-    monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", FakeAnthropicFactory(responses, requests, pool))
+    monkeypatch.setattr(
+        agentic.anthropic,
+        "AsyncAnthropic",
+        FakeAnthropicFactory(responses, requests, pool),
+    )
     agentic.set_pool(pool)
 
     await agentic.run_agentic_turn([message_id], user, scope=_scope_for(user))
 
     supportive_outbound = next(
-        row for row in pool.messages.values() if row.get("recipient_id") == user.id and row.get("direction") == "outbound"
+        row
+        for row in pool.messages.values()
+        if row.get("recipient_id") == user.id and row.get("direction") == "outbound"
     )
     banned = ("attachment", "adhd", "avoidant")
     assert all(token not in supportive_outbound["content"].lower() for token in banned)
     assert escalation_spy
-    recipient, content, template_fallback, turn_id, protected_owner_ids, bot_id, topic_id = escalation_spy[0]
+    (
+        recipient,
+        content,
+        template_fallback,
+        turn_id,
+        protected_owner_ids,
+        bot_id,
+        topic_id,
+    ) = escalation_spy[0]
     assert recipient.id == partner.id
     assert recipient.id != user.id
     assert content == escalation_content

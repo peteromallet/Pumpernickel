@@ -111,7 +111,11 @@ def obs_fields(ctx_or_scope) -> dict[str, Any]:
     ):
         val = getattr(ctx_or_scope, field, None)
         if val is not None:
-            key = "topic_id" if field == "primary_topic_id" and "topic_id" not in result else field
+            key = (
+                "topic_id"
+                if field == "primary_topic_id" and "topic_id" not in result
+                else field
+            )
             result[key] = str(val) if not isinstance(val, (str, type(None))) else val
     return result
 
@@ -134,7 +138,7 @@ def scope_from_turn_context(ctx: TurnContext) -> InboundScope:
 async def partner_of(pool: Any, user: User) -> User:
     rows = await pool.fetch(
         """
-        SELECT id, name, phone, timezone, onboarding_state, pacing_preferences, cross_thread_sharing_default,
+        SELECT id, name, phone, timezone, onboarding_state, pacing_preferences,
                pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date,
                pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome
         FROM users
@@ -143,27 +147,49 @@ async def partner_of(pool: Any, user: User) -> User:
         user.id,
     )
     if len(rows) != 1:
-        raise ValueError(f"expected exactly one partner for user {user.id}, found {len(rows)}")
+        raise ValueError(
+            f"expected exactly one partner for user {user.id}, found {len(rows)}"
+        )
     row = rows[0]
     # §16.3 wi 7: prefer the canonical user_identities address; fall back to phone.
     from app.services.user_identity import resolve_user_address
+
     address = await resolve_user_address(pool, row["id"]) or row["phone"]
     return User(
         id=row["id"],
         name=row["name"],
         phone=address,
         timezone=row["timezone"],
-        onboarding_state=row["onboarding_state"] if "onboarding_state" in row else "pending",
-        pacing_preferences=dict(row["pacing_preferences"] or {}) if "pacing_preferences" in row else {},
-        cross_thread_sharing_default=row["cross_thread_sharing_default"] if "cross_thread_sharing_default" in row else None,
+        onboarding_state=(
+            row["onboarding_state"] if "onboarding_state" in row else "pending"
+        ),
+        pacing_preferences=(
+            dict(row["pacing_preferences"] or {}) if "pacing_preferences" in row else {}
+        ),
         pregnancy_edd=row["pregnancy_edd"] if "pregnancy_edd" in row else None,
-        pregnancy_dating_basis=row["pregnancy_dating_basis"] if "pregnancy_dating_basis" in row else None,
-        pregnancy_lmp_date=row["pregnancy_lmp_date"] if "pregnancy_lmp_date" in row else None,
-        pregnancy_scan_date=row["pregnancy_scan_date"] if "pregnancy_scan_date" in row else None,
-        pregnancy_scan_corrected_at=row["pregnancy_scan_corrected_at"] if "pregnancy_scan_corrected_at" in row else None,
-        pregnancy_started_at=row["pregnancy_started_at"] if "pregnancy_started_at" in row else None,
-        pregnancy_ended_at=row["pregnancy_ended_at"] if "pregnancy_ended_at" in row else None,
-        pregnancy_outcome=row["pregnancy_outcome"] if "pregnancy_outcome" in row else None,
+        pregnancy_dating_basis=(
+            row["pregnancy_dating_basis"] if "pregnancy_dating_basis" in row else None
+        ),
+        pregnancy_lmp_date=(
+            row["pregnancy_lmp_date"] if "pregnancy_lmp_date" in row else None
+        ),
+        pregnancy_scan_date=(
+            row["pregnancy_scan_date"] if "pregnancy_scan_date" in row else None
+        ),
+        pregnancy_scan_corrected_at=(
+            row["pregnancy_scan_corrected_at"]
+            if "pregnancy_scan_corrected_at" in row
+            else None
+        ),
+        pregnancy_started_at=(
+            row["pregnancy_started_at"] if "pregnancy_started_at" in row else None
+        ),
+        pregnancy_ended_at=(
+            row["pregnancy_ended_at"] if "pregnancy_ended_at" in row else None
+        ),
+        pregnancy_outcome=(
+            row["pregnancy_outcome"] if "pregnancy_outcome" in row else None
+        ),
     )
 
 

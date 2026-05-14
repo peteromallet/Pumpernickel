@@ -12,9 +12,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel
 
 from app.services.checkins import schedule_checkin_record
-from app.services.cross_thread_privacy import normalize_sharing_default, raw_message_visibility
+from app.services.cross_thread_privacy import (
+    raw_message_visibility,
+)
 from app.services.crypto import encrypt_value
 from app.config import get_settings
+from app.services.partner_sharing import get_partner_share, set_partner_share
 from app.services.vision import explain_stored_image
 from app.services.messaging import send_outbound, _append_turn_reasoning, _call_oob_hook
 from app.services import discord, scoring
@@ -98,8 +101,8 @@ from tool_schemas import (
     UpdateDistillationOutput,
     UpdateMemoryInput,
     UpdateMemoryOutput,
-    UpdateCrossThreadSharingDefaultInput,
-    UpdateCrossThreadSharingDefaultOutput,
+    SetPartnerSharingInput,
+    SetPartnerSharingOutput,
     UpdateOOBInput,
     UpdateOOBOutput,
     UpdateObservationInput,
@@ -210,7 +213,9 @@ async def _schedule_context_job(
     )
 
 
-async def update_user_style_notes(ctx: TurnContext, args: UpdateUserStyleNotesInput) -> UpdateUserStyleNotesOutput:
+async def update_user_style_notes(
+    ctx: TurnContext, args: UpdateUserStyleNotesInput
+) -> UpdateUserStyleNotesOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -220,47 +225,47 @@ async def update_user_style_notes(ctx: TurnContext, args: UpdateUserStyleNotesIn
         args.notes,
         args.user_id,
     )
-    result = UpdateUserStyleNotesOutput(user_id=row["user_id"], updated_at=row["updated_at"])
+    result = UpdateUserStyleNotesOutput(
+        user_id=row["user_id"], updated_at=row["updated_at"]
+    )
     await _log_tool_call(ctx, "update_user_style_notes", args, started, result)
     return result
 
 
-async def update_cross_thread_sharing_default(
+async def set_partner_sharing(
     ctx: TurnContext,
-    args: UpdateCrossThreadSharingDefaultInput,
-) -> UpdateCrossThreadSharingDefaultOutput:
+    args: SetPartnerSharingInput,
+) -> SetPartnerSharingOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
     started = _start()
-    if args.user_id != ctx.user.id:
+    if ctx.bot_id is None:
         result = {
-            "error": "sharing_default_rejected",
-            "reason": "can only update the current user's sharing default",
+            "error": "partner_sharing_rejected",
+            "reason": "set_partner_sharing requires the calling bot scope",
         }
-        await _log_tool_call(ctx, "update_cross_thread_sharing_default", args, started, result)
+        await _log_tool_call(ctx, "set_partner_sharing", args, started, result)
         raise ToolCallRejected(result)
-    row = await ctx.pool.fetchrow(
-        """
-        UPDATE users
-        SET cross_thread_sharing_default=$2
-        WHERE id=$1
-        RETURNING id AS user_id, cross_thread_sharing_default, now() AS updated_at
-        """,
-        args.user_id,
-        args.default.value,
+    partner_share = await set_partner_share(
+        ctx.pool,
+        user_id=ctx.user.id,
+        bot_id=ctx.bot_id,
+        opt_in=args.opt_in,
     )
-    result = UpdateCrossThreadSharingDefaultOutput(
-        user_id=row["user_id"],
-        default=row["cross_thread_sharing_default"],
-        updated_at=row["updated_at"],
+    updated_at = datetime.now(UTC)
+    result = SetPartnerSharingOutput(
+        user_id=ctx.user.id,
+        bot_id=ctx.bot_id,
+        partner_share=partner_share,
+        updated_at=updated_at,
     )
     await _append_turn_reasoning(
         ctx.pool,
         ctx.turn_id,
-        f"Cross-thread sharing default set for user_id={args.user_id}: {args.default.value}. reason={args.reason}",
+        f"Partner sharing set for user_id={ctx.user.id}, bot_id={ctx.bot_id}: {partner_share}. reason={args.reason}",
     )
-    await _log_tool_call(ctx, "update_cross_thread_sharing_default", args, started, result)
+    await _log_tool_call(ctx, "set_partner_sharing", args, started, result)
     return result
 
 
@@ -312,7 +317,9 @@ async def create_bridge_candidate(
         }
         await _log_tool_call(ctx, "create_bridge_candidate", args, started, result)
         raise ToolCallRejected(result)
-    await _require_existing_source_messages(ctx, args.source_message_ids, args.source_user_id)
+    await _require_existing_source_messages(
+        ctx, args.source_message_ids, args.source_user_id
+    )
     await _require_existing_ids(ctx, "memories", args.related_memory_ids)
     await _require_existing_ids(ctx, "observations", args.related_observation_ids)
 
@@ -321,12 +328,16 @@ async def create_bridge_candidate(
     elif args.status == BridgeCandidateStatus.blocked:
         status = BridgeCandidateStatus.blocked
     else:
-        source_default = await _sharing_default_for_user(ctx, args.source_user_id)
+        source_partner_share = await _partner_share_for_bot(ctx, args.source_user_id)
         low_or_medium = args.sensitivity in {
             BridgeCandidateSensitivity.low,
             BridgeCandidateSensitivity.medium,
         }
-        status = BridgeCandidateStatus.ready if source_default == "opt_in" and low_or_medium else BridgeCandidateStatus.pending
+        status = (
+            BridgeCandidateStatus.ready
+            if source_partner_share == "opt_in" and low_or_medium
+            else BridgeCandidateStatus.pending
+        )
     resolved_at_sql = "now()" if status.value in _BRIDGE_RESOLVED_STATUSES else "NULL"
     row = await ctx.pool.fetchrow(
         f"""
@@ -387,8 +398,7 @@ async def update_bridge_candidate(
         }
         if (
             existing["status"] not in {"ready", "sent", "addressed"}
-            or
-            args.kind is not None
+            or args.kind is not None
             or args.sensitivity is not None
             or args.source_message_ids is not None
             or args.related_memory_ids is not None
@@ -405,7 +415,10 @@ async def update_bridge_candidate(
             await _log_tool_call(ctx, "update_bridge_candidate", args, started, result)
             raise ToolCallRejected(result)
     status_update = args.status
-    if args.partner_path is not None and existing["status"] in _BRIDGE_RESOLVED_STATUSES:
+    if (
+        args.partner_path is not None
+        and existing["status"] in _BRIDGE_RESOLVED_STATUSES
+    ):
         result = {
             "error": "bridge_candidate_partner_path_locked",
             "reason": "partner_path cannot be changed after a bridge candidate reaches a terminal status",
@@ -413,7 +426,10 @@ async def update_bridge_candidate(
         await _log_tool_call(ctx, "update_bridge_candidate", args, started, result)
         raise ToolCallRejected(result)
     if args.partner_path == BridgeCandidatePartnerPath.do_not_bridge:
-        if status_update is not None and status_update != BridgeCandidateStatus.declined:
+        if (
+            status_update is not None
+            and status_update != BridgeCandidateStatus.declined
+        ):
             result = {
                 "error": "bridge_candidate_status_rejected",
                 "reason": "do_not_bridge candidates must be marked declined",
@@ -422,7 +438,9 @@ async def update_bridge_candidate(
             raise ToolCallRejected(result)
         status_update = BridgeCandidateStatus.declined
     if args.source_message_ids is not None:
-        await _require_existing_source_messages(ctx, args.source_message_ids, existing["source_user_id"])
+        await _require_existing_source_messages(
+            ctx, args.source_message_ids, existing["source_user_id"]
+        )
     if args.related_memory_ids is not None:
         await _require_existing_ids(ctx, "memories", args.related_memory_ids)
     if args.related_observation_ids is not None:
@@ -464,7 +482,9 @@ async def update_bridge_candidate(
         args.internal_note,
         args.shareable_summary,
     )
-    result = UpdateBridgeCandidateOutput(candidate=_bridge_candidate_for_context(ctx, row))
+    result = UpdateBridgeCandidateOutput(
+        candidate=_bridge_candidate_for_context(ctx, row)
+    )
     await _log_tool_call(ctx, "update_bridge_candidate", args, started, result)
     return result
 
@@ -513,7 +533,10 @@ async def send_bridge_candidate(
         topic_id=turn_scope.topic_id,
     )
     if verdict["verdict"] in {"block", "rewrite"}:
-        note = _append_note(existing["internal_note"], f"OOB {verdict['verdict']}: {verdict.get('reason', '')}")
+        note = _append_note(
+            existing["internal_note"],
+            f"OOB {verdict['verdict']}: {verdict.get('reason', '')}",
+        )
         row = await _set_bridge_candidate_status(
             ctx,
             args.candidate_id,
@@ -548,22 +571,32 @@ async def send_bridge_candidate(
     return result
 
 
-def _bridge_users_in_current_dyad(ctx: TurnContext, source_user_id: Any, target_user_id: Any) -> bool:
+def _bridge_users_in_current_dyad(
+    ctx: TurnContext, source_user_id: Any, target_user_id: Any
+) -> bool:
     dyad = {ctx.user.id, ctx.partner.id}
-    return source_user_id in dyad and target_user_id in dyad and source_user_id != target_user_id
+    return (
+        source_user_id in dyad
+        and target_user_id in dyad
+        and source_user_id != target_user_id
+    )
 
 
-async def _sharing_default_for_user(ctx: TurnContext, user_id: Any) -> str:
-    row = await ctx.pool.fetchrow("SELECT cross_thread_sharing_default FROM users WHERE id=$1", user_id)
-    if row is not None:
-        return normalize_sharing_default(row["cross_thread_sharing_default"])
-    for user in (ctx.user, ctx.partner):
-        if user.id == user_id:
-            return normalize_sharing_default(user.cross_thread_sharing_default)
-    return "unset"
+async def _partner_share_for_bot(
+    ctx: TurnContext, user_id: Any, bot_id: str | None = None
+) -> str:
+    effective_bot_id = bot_id if bot_id is not None else ctx.bot_id
+    if effective_bot_id is None:
+        return "unset"
+    partner_share = await get_partner_share(
+        ctx.pool, user_id=user_id, bot_id=effective_bot_id
+    )
+    return partner_share or "unset"
 
 
-async def _require_existing_source_messages(ctx: TurnContext, message_ids: list[Any], source_user_id: Any) -> None:
+async def _require_existing_source_messages(
+    ctx: TurnContext, message_ids: list[Any], source_user_id: Any
+) -> None:
     rows = await ctx.pool.fetch(
         """
         SELECT id
@@ -571,9 +604,13 @@ async def _require_existing_source_messages(ctx: TurnContext, message_ids: list[
         WHERE id = ANY($1::uuid[])
           AND deleted_at IS NULL
           AND (sender_id=$2 OR recipient_id=$2)
+          AND bot_id=$3
+          AND topic_id=$4
         """,
         message_ids,
         source_user_id,
+        ctx.bot_id,
+        ctx.primary_topic_id,
     )
     found = {row["id"] for row in rows}
     missing = [message_id for message_id in message_ids if message_id not in found]
@@ -591,7 +628,9 @@ async def _require_existing_ids(ctx: TurnContext, table: str, ids: list[Any]) ->
         return
     if table not in {"memories", "observations"}:
         raise ValueError("unsupported bridge link table")
-    rows = await ctx.pool.fetch(f"SELECT id FROM {table} WHERE id = ANY($1::uuid[])", ids)
+    rows = await ctx.pool.fetch(
+        f"SELECT id FROM {table} WHERE id = ANY($1::uuid[])", ids
+    )
     found = {row["id"] for row in rows}
     missing = [row_id for row_id in ids if row_id not in found]
     if missing:
@@ -614,7 +653,9 @@ async def _require_existing_distillation_links(
 ) -> None:
     dyad_ids = {ctx.user.id, ctx.partner.id}
     if source_user_ids is not None:
-        invalid_sources = [user_id for user_id in source_user_ids if user_id not in dyad_ids]
+        invalid_sources = [
+            user_id for user_id in source_user_ids if user_id not in dyad_ids
+        ]
         if invalid_sources:
             raise ToolCallRejected(
                 {
@@ -637,6 +678,8 @@ async def _require_existing_distillation_links(
                 FROM messages
                 WHERE id = ANY($1::uuid[])
                   AND deleted_at IS NULL
+                  AND bot_id=$3
+                  AND topic_id=$4
                   AND (
                     sender_id = ANY($2::uuid[])
                     OR recipient_id = ANY($2::uuid[])
@@ -644,12 +687,17 @@ async def _require_existing_distillation_links(
                 """,
                 ids,
                 list(dyad_ids),
+                ctx.bot_id,
+                ctx.primary_topic_id,
             )
         else:
-            alias = {'memories': 'm', 'observations': 'o', 'themes': 't'}.get(table, table[:1])
+            alias = {"memories": "m", "observations": "o", "themes": "t"}.get(
+                table, table[:1]
+            )
             rows = await ctx.pool.fetch(
                 f"SELECT {alias}.id FROM {table} {alias} {join_artifact_topics(alias, '$2')} WHERE {alias}.id = ANY($1::uuid[])",
-                ids, ctx.primary_topic_id,
+                ids,
+                ctx.primary_topic_id,
             )
         found = {row["id"] for row in rows}
         missing = [row_id for row_id in ids if row_id not in found]
@@ -662,11 +710,15 @@ async def _require_existing_distillation_links(
             )
 
 
-def _default_supporting_message_ids(ctx: TurnContext, message_ids: list[Any]) -> list[Any]:
+def _default_supporting_message_ids(
+    ctx: TurnContext, message_ids: list[Any]
+) -> list[Any]:
     return message_ids or list(ctx.triggering_message_ids)
 
 
-async def _fetch_bridge_candidate_row(ctx: TurnContext, candidate_id: Any) -> Any | None:
+async def _fetch_bridge_candidate_row(
+    ctx: TurnContext, candidate_id: Any
+) -> Any | None:
     return await ctx.pool.fetchrow(
         """
         SELECT id, source_user_id, target_user_id, kind, status, sensitivity, partner_path,
@@ -745,7 +797,10 @@ def _assert_solo_about_user(
     BEFORE the scope guard per lesson #8 — it is an additive pre-check, not
     a replacement.
     """
-    if getattr(ctx, "bot_spec", None) is None or ctx.bot_spec.participants_shape != "solo":
+    if (
+        getattr(ctx, "bot_spec", None) is None
+        or ctx.bot_spec.participants_shape != "solo"
+    ):
         return None
     if target_user_id is None:
         return {"error": f"{field_name} is required for solo bots", "is_error": True}
@@ -773,7 +828,10 @@ async def _assert_solo_owns_row(
     separately, but ownership is a stronger invariant: even within scope, a
     solo bot must not mutate another user's row.
     """
-    if getattr(ctx, "bot_spec", None) is None or ctx.bot_spec.participants_shape != "solo":
+    if (
+        getattr(ctx, "bot_spec", None) is None
+        or ctx.bot_spec.participants_shape != "solo"
+    ):
         return None
     actual = await ctx.pool.fetchval(
         f"SELECT {owner_field} FROM {table} WHERE id = $1",
@@ -826,18 +884,29 @@ async def add_memory(ctx: TurnContext, args: AddMemoryInput) -> AddMemoryOutput:
     row = await ctx.pool.fetchrow(
         """
         WITH new_artifact AS (
-            INSERT INTO memories (about_user_id, content, content_encrypted, related_theme_ids, recorded_by_bot_id)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO memories (
+                about_user_id, content, content_encrypted, visibility,
+                shareable_summary, shareable_summary_encrypted,
+                related_theme_ids, recorded_by_bot_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id
         )
         INSERT INTO artifact_topics (artifact_table, artifact_id, topic_id, tagged_by_bot_id, status, reason)
-        SELECT 'memories', new_artifact.id, t.tid, $5, 'active', $7
-        FROM new_artifact CROSS JOIN unnest($6::uuid[]) AS t(tid)
+        SELECT 'memories', new_artifact.id, t.tid, $8, 'active', $10
+        FROM new_artifact CROSS JOIN unnest($9::uuid[]) AS t(tid)
         RETURNING artifact_id AS id
         """,
         args.about_user_id,
         args.content,
         encrypt_value(args.content),
+        args.visibility.value,
+        args.shareable_summary,
+        (
+            encrypt_value(args.shareable_summary)
+            if args.shareable_summary is not None
+            else None
+        ),
         args.related_theme_ids,
         ctx.bot_id,
         topic_id_list,
@@ -848,7 +917,9 @@ async def add_memory(ctx: TurnContext, args: AddMemoryInput) -> AddMemoryOutput:
     return result
 
 
-async def update_memory(ctx: TurnContext, args: UpdateMemoryInput) -> UpdateMemoryOutput:
+async def update_memory(
+    ctx: TurnContext, args: UpdateMemoryInput
+) -> UpdateMemoryOutput:
     _solo_err = await _assert_solo_owns_row(
         ctx, table="memories", row_id=args.memory_id, owner_field="about_user_id"
     )
@@ -874,13 +945,18 @@ async def update_memory(ctx: TurnContext, args: UpdateMemoryInput) -> UpdateMemo
     if not sets:
         sets.append("last_referenced_at=now()")
     params.append(args.memory_id)
-    row = await ctx.pool.fetchrow(f"UPDATE memories SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
+    row = await ctx.pool.fetchrow(
+        f"UPDATE memories SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id",
+        *params,
+    )
     result = UpdateMemoryOutput(id=row["id"])
     await _log_tool_call(ctx, "update_memory", args, started, result)
     return result
 
 
-async def supersede_memory(ctx: TurnContext, args: SupersedeMemoryInput) -> SupersedeMemoryOutput:
+async def supersede_memory(
+    ctx: TurnContext, args: SupersedeMemoryInput
+) -> SupersedeMemoryOutput:
     _solo_err = await _assert_solo_owns_row(
         ctx, table="memories", row_id=args.old_memory_id, owner_field="about_user_id"
     )
@@ -970,14 +1046,21 @@ async def update_theme(ctx: TurnContext, args: UpdateThemeInput) -> UpdateThemeO
     if args.mark_reinforced:
         sets.append("last_reinforced_at=now()")
     params.append(args.theme_id)
-    row = await ctx.pool.fetchrow(f"UPDATE themes SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
+    row = await ctx.pool.fetchrow(
+        f"UPDATE themes SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id",
+        *params,
+    )
     result = UpdateThemeOutput(id=row["id"])
     await _log_tool_call(ctx, "update_theme", args, started, result)
     return result
 
 
-async def add_watch_item(ctx: TurnContext, args: AddWatchItemInput) -> AddWatchItemOutput:
-    _solo_err = _assert_solo_about_user(ctx, args.owner_user_id, field_name="owner_user_id")
+async def add_watch_item(
+    ctx: TurnContext, args: AddWatchItemInput
+) -> AddWatchItemOutput:
+    _solo_err = _assert_solo_about_user(
+        ctx, args.owner_user_id, field_name="owner_user_id"
+    )
     if _solo_err is not None:
         raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
@@ -1024,7 +1107,9 @@ async def add_watch_item(ctx: TurnContext, args: AddWatchItemInput) -> AddWatchI
     return result
 
 
-async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> UpdateWatchItemOutput:
+async def update_watch_item(
+    ctx: TurnContext, args: UpdateWatchItemInput
+) -> UpdateWatchItemOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -1039,11 +1124,15 @@ async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> Upd
     if not sets:
         sets.append("content=content")
     params.append(args.watch_item_id)
-    row = await ctx.pool.fetchrow(f"UPDATE watch_items SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
+    row = await ctx.pool.fetchrow(
+        f"UPDATE watch_items SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id",
+        *params,
+    )
     if args.due_at is not None:
         owner_user_id = await ctx.pool.fetchval(
             f"SELECT w.owner_user_id FROM watch_items w {join_artifact_topics('w', '$2')} WHERE w.id=$1",
-            args.watch_item_id, ctx.primary_topic_id,
+            args.watch_item_id,
+            ctx.primary_topic_id,
         )
         await _schedule_context_job(
             ctx.pool,
@@ -1060,7 +1149,9 @@ async def update_watch_item(ctx: TurnContext, args: UpdateWatchItemInput) -> Upd
     return result
 
 
-async def address_watch_item(ctx: TurnContext, args: AddressWatchItemInput) -> AddressWatchItemOutput:
+async def address_watch_item(
+    ctx: TurnContext, args: AddressWatchItemInput
+) -> AddressWatchItemOutput:
     _solo_err = await _assert_solo_owns_row(
         ctx, table="watch_items", row_id=args.watch_item_id, owner_field="owner_user_id"
     )
@@ -1085,7 +1176,9 @@ async def address_watch_item(ctx: TurnContext, args: AddressWatchItemInput) -> A
     return result
 
 
-async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObservationOutput:
+async def log_observation(
+    ctx: TurnContext, args: LogObservationInput
+) -> LogObservationOutput:
     _solo_err = _assert_solo_about_user(ctx, args.about_user_id)
     if _solo_err is not None:
         raise ToolCallRejected(_solo_err)
@@ -1099,10 +1192,14 @@ async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObs
     started = _start()
     significance = args.significance
     supporting_message_ids = args.supporting_message_ids or ctx.triggering_message_ids
-    logged_args = args.model_copy(update={"supporting_message_ids": supporting_message_ids})
+    logged_args = args.model_copy(
+        update={"supporting_message_ids": supporting_message_ids}
+    )
     scoring_prompt_version = SCORING_PROMPT_VERSION
     if significance is None:
-        significance, _reason, scoring_prompt_version = await scoring.score_observation(ctx.pool, content=args.content)
+        significance, _reason, scoring_prompt_version = await scoring.score_observation(
+            ctx.pool, content=args.content
+        )
     row = await ctx.pool.fetchrow(
         """
         WITH new_artifact AS (
@@ -1135,9 +1232,14 @@ async def log_observation(ctx: TurnContext, args: LogObservationInput) -> LogObs
     return result
 
 
-async def update_observation(ctx: TurnContext, args: UpdateObservationInput) -> UpdateObservationOutput:
+async def update_observation(
+    ctx: TurnContext, args: UpdateObservationInput
+) -> UpdateObservationOutput:
     _solo_err = await _assert_solo_owns_row(
-        ctx, table="observations", row_id=args.observation_id, owner_field="about_user_id"
+        ctx,
+        table="observations",
+        row_id=args.observation_id,
+        owner_field="about_user_id",
     )
     if _solo_err is not None:
         raise ToolCallRejected(_solo_err)
@@ -1156,16 +1258,26 @@ async def update_observation(ctx: TurnContext, args: UpdateObservationInput) -> 
                 params.append(encrypt_value(value))
                 sets.append(f"content_encrypted=${len(params)}")
     params.append(args.observation_id)
-    row = await ctx.pool.fetchrow(f"UPDATE observations SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
+    row = await ctx.pool.fetchrow(
+        f"UPDATE observations SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id",
+        *params,
+    )
     result = UpdateObservationOutput(id=row["id"])
     await _log_tool_call(ctx, "update_observation", args, started, result)
     return result
 
 
-async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddDistillationOutput:
-    if getattr(ctx, "bot_spec", None) is not None and ctx.bot_spec.participants_shape == "solo":
+async def add_distillation(
+    ctx: TurnContext, args: AddDistillationInput
+) -> AddDistillationOutput:
+    if (
+        getattr(ctx, "bot_spec", None) is not None
+        and ctx.bot_spec.participants_shape == "solo"
+    ):
         for src in args.source_user_ids or []:
-            _solo_err = _assert_solo_about_user(ctx, src, field_name="source_user_ids[*]")
+            _solo_err = _assert_solo_about_user(
+                ctx, src, field_name="source_user_ids[*]"
+            )
             if _solo_err is not None:
                 raise ToolCallRejected(_solo_err)
     _err = check_write_scope(ctx)
@@ -1176,8 +1288,12 @@ async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddD
     topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
     topic_id_list = [topic_id_map[slug] for slug in topic_slugs]
     started = _start()
-    supporting_message_ids = _default_supporting_message_ids(ctx, args.supporting_message_ids)
-    logged_args = args.model_copy(update={"supporting_message_ids": supporting_message_ids})
+    supporting_message_ids = _default_supporting_message_ids(
+        ctx, args.supporting_message_ids
+    )
+    logged_args = args.model_copy(
+        update={"supporting_message_ids": supporting_message_ids}
+    )
     try:
         await _require_existing_distillation_links(
             ctx,
@@ -1216,7 +1332,11 @@ async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddD
         args.sensitivity.value,
         args.visibility.value,
         args.shareable_summary,
-        encrypt_value(args.shareable_summary) if args.shareable_summary is not None else None,
+        (
+            encrypt_value(args.shareable_summary)
+            if args.shareable_summary is not None
+            else None
+        ),
         args.source_user_ids,
         args.related_memory_ids,
         args.related_observation_ids,
@@ -1232,7 +1352,9 @@ async def add_distillation(ctx: TurnContext, args: AddDistillationInput) -> AddD
     return result
 
 
-async def update_distillation(ctx: TurnContext, args: UpdateDistillationInput) -> UpdateDistillationOutput:
+async def update_distillation(
+    ctx: TurnContext, args: UpdateDistillationInput
+) -> UpdateDistillationOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
@@ -1290,13 +1412,19 @@ async def update_distillation(ctx: TurnContext, args: UpdateDistillationInput) -
     return result
 
 
-async def revise_distillation(ctx: TurnContext, args: ReviseDistillationInput) -> ReviseDistillationOutput:
+async def revise_distillation(
+    ctx: TurnContext, args: ReviseDistillationInput
+) -> ReviseDistillationOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
     started = _start()
-    supporting_message_ids = _default_supporting_message_ids(ctx, args.supporting_message_ids)
-    logged_args = args.model_copy(update={"supporting_message_ids": supporting_message_ids})
+    supporting_message_ids = _default_supporting_message_ids(
+        ctx, args.supporting_message_ids
+    )
+    logged_args = args.model_copy(
+        update={"supporting_message_ids": supporting_message_ids}
+    )
     try:
         await _require_existing_distillation_links(
             ctx,
@@ -1307,12 +1435,15 @@ async def revise_distillation(ctx: TurnContext, args: ReviseDistillationInput) -
             supporting_message_ids=supporting_message_ids,
         )
     except ToolCallRejected as exc:
-        await _log_tool_call(ctx, "revise_distillation", logged_args, started, exc.result)
+        await _log_tool_call(
+            ctx, "revise_distillation", logged_args, started, exc.result
+        )
         raise
     # Topic-scoped pre-check: ensure the old distillation belongs to this topic
     exists = await ctx.pool.fetchval(
         f"SELECT 1 FROM distillations d {join_artifact_topics('d', '$2')} WHERE d.id = $1 AND d.status = 'active'",
-        args.old_distillation_id, ctx.primary_topic_id,
+        args.old_distillation_id,
+        ctx.primary_topic_id,
     )
     if not exists:
         raise ToolCallRejected(
@@ -1373,7 +1504,11 @@ async def revise_distillation(ctx: TurnContext, args: ReviseDistillationInput) -
         args.sensitivity.value,
         args.visibility.value,
         args.shareable_summary,
-        encrypt_value(args.shareable_summary) if args.shareable_summary is not None else None,
+        (
+            encrypt_value(args.shareable_summary)
+            if args.shareable_summary is not None
+            else None
+        ),
         args.source_user_ids,
         args.related_memory_ids,
         args.related_observation_ids,
@@ -1466,11 +1601,15 @@ async def update_oob(ctx: TurnContext, args: UpdateOOBInput) -> UpdateOOBOutput:
     if not sets:
         sets.append("sensitive_core=sensitive_core")
     params.append(args.oob_id)
-    row = await ctx.pool.fetchrow(f"UPDATE out_of_bounds SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id", *params)
+    row = await ctx.pool.fetchrow(
+        f"UPDATE out_of_bounds SET {', '.join(sets)} WHERE id=${len(params)} RETURNING id",
+        *params,
+    )
     if args.review_at is not None:
         owner_id = await ctx.pool.fetchval(
             f"SELECT x.owner_id FROM out_of_bounds x {join_artifact_topics('x', '$2')} WHERE x.id=$1",
-            args.oob_id, ctx.primary_topic_id,
+            args.oob_id,
+            ctx.primary_topic_id,
         )
         await _schedule_context_job(
             ctx.pool,
@@ -1506,12 +1645,16 @@ async def lift_oob(ctx: TurnContext, args: LiftOOBInput) -> LiftOOBOutput:
     return result
 
 
-async def schedule_checkin(ctx: TurnContext, args: ScheduleCheckinInput) -> ScheduleCheckinOutput:
+async def schedule_checkin(
+    ctx: TurnContext, args: ScheduleCheckinInput
+) -> ScheduleCheckinOutput:
     _err = check_write_scope(ctx)
     if _err is not None:
         raise ToolCallRejected({"error": _err})
     started = _start()
-    scheduled_for = _scheduled_for_from_schedule_fields(ctx, args.when, args.delay, args.local_when)
+    scheduled_for = _scheduled_for_from_schedule_fields(
+        ctx, args.when, args.delay, args.local_when
+    )
     old, row = await schedule_checkin_record(
         ctx.pool,
         args.user_id,
@@ -1529,7 +1672,9 @@ async def schedule_checkin(ctx: TurnContext, args: ScheduleCheckinInput) -> Sche
     return result
 
 
-async def cancel_scheduled_checkin(ctx: TurnContext, args: CancelScheduledCheckinInput) -> CancelScheduledCheckinOutput:
+async def cancel_scheduled_checkin(
+    ctx: TurnContext, args: CancelScheduledCheckinInput
+) -> CancelScheduledCheckinOutput:
     started = _start()
     row = await ctx.pool.fetchrow(
         """
@@ -1577,15 +1722,21 @@ def _reject_utc_when_for_local_user(ctx: TurnContext, when: datetime) -> None:
 
 
 def _delay_delta(delay: ScheduleDelay) -> timedelta:
-    return timedelta(weeks=delay.weeks, days=delay.days, hours=delay.hours, minutes=delay.minutes)
+    return timedelta(
+        weeks=delay.weeks, days=delay.days, hours=delay.hours, minutes=delay.minutes
+    )
 
 
-def _timezone_for_local_schedule(ctx: TurnContext, timezone_name: str | None) -> ZoneInfo:
+def _timezone_for_local_schedule(
+    ctx: TurnContext, timezone_name: str | None
+) -> ZoneInfo:
     requested = timezone_name or getattr(ctx.user, "timezone", None) or "UTC"
     try:
         return ZoneInfo(str(requested))
     except ZoneInfoNotFoundError as exc:
-        raise ToolCallRejected({"error": "invalid_timezone", "timezone": str(requested)}) from exc
+        raise ToolCallRejected(
+            {"error": "invalid_timezone", "timezone": str(requested)}
+        ) from exc
 
 
 def _local_when_to_utc(ctx: TurnContext, local_when: LocalScheduleTime) -> datetime:
@@ -1594,7 +1745,9 @@ def _local_when_to_utc(ctx: TurnContext, local_when: LocalScheduleTime) -> datet
     return local_dt.astimezone(UTC)
 
 
-def _scheduled_for_from_local_when(ctx: TurnContext, local_when: LocalScheduleTime) -> datetime:
+def _scheduled_for_from_local_when(
+    ctx: TurnContext, local_when: LocalScheduleTime
+) -> datetime:
     return _future_utc(_local_when_to_utc(ctx, local_when), field_name="local_when")
 
 
@@ -1621,7 +1774,9 @@ def _scheduled_task_recurrence_payload(value: Any) -> dict[str, Any] | None:
     return normalize_recurrence(raw)
 
 
-def _scheduled_task_context(*, task_id: Any, brief: str, recurrence: dict[str, Any] | None) -> dict[str, Any]:
+def _scheduled_task_context(
+    *, task_id: Any, brief: str, recurrence: dict[str, Any] | None
+) -> dict[str, Any]:
     return {
         "task_id": str(task_id),
         "brief": brief,
@@ -1651,26 +1806,40 @@ def _scheduled_task_row(row: Any, ctx: TurnContext) -> ScheduledTaskRow:
         scheduled_for_time=temporal_reference(row["scheduled_for"], timezone, now=now),
         recurrence=recurrence,
         recurrence_until_time=temporal_reference(
-            datetime.fromisoformat(recurrence_until) if isinstance(recurrence_until, str) else recurrence_until,
+            (
+                datetime.fromisoformat(recurrence_until)
+                if isinstance(recurrence_until, str)
+                else recurrence_until
+            ),
             timezone,
             now=now,
         ),
         delayed=bool(_row_value(row, "delayed", False)),
         created_at=_row_value(row, "created_at"),
-        created_at_time=temporal_reference(_row_value(row, "created_at"), timezone, now=now),
+        created_at_time=temporal_reference(
+            _row_value(row, "created_at"), timezone, now=now
+        ),
     )
 
 
-def _scheduled_task_target(args: UpdateScheduledTaskInput | CancelScheduledTaskInput, ctx: TurnContext) -> tuple[Any | None, str | None]:
+def _scheduled_task_target(
+    args: UpdateScheduledTaskInput | CancelScheduledTaskInput, ctx: TurnContext
+) -> tuple[Any | None, str | None]:
     if args.current_task:
         current = current_scheduled_task(ctx)
         if current is None:
-            raise ToolCallRejected({"error": "current_task=true is only valid during a scheduled_task turn"})
+            raise ToolCallRejected(
+                {
+                    "error": "current_task=true is only valid during a scheduled_task turn"
+                }
+            )
         return current["job_id"], None
     return args.job_id, str(args.task_id) if args.task_id is not None else None
 
 
-async def list_scheduled_tasks(ctx: TurnContext, args: ListScheduledTasksInput) -> ListScheduledTasksOutput:
+async def list_scheduled_tasks(
+    ctx: TurnContext, args: ListScheduledTasksInput
+) -> ListScheduledTasksOutput:
     started = _start()
     rows = await ctx.pool.fetch(
         """
@@ -1687,17 +1856,25 @@ async def list_scheduled_tasks(ctx: TurnContext, args: ListScheduledTasksInput) 
         args.include_recurring,
         args.limit,
     )
-    result = ListScheduledTasksOutput(tasks=[_scheduled_task_row(row, ctx) for row in rows])
+    result = ListScheduledTasksOutput(
+        tasks=[_scheduled_task_row(row, ctx) for row in rows]
+    )
     await _log_tool_call(ctx, "list_scheduled_tasks", args, started, result)
     return result
 
 
-async def schedule_task(ctx: TurnContext, args: ScheduleTaskInput) -> ScheduleTaskOutput:
+async def schedule_task(
+    ctx: TurnContext, args: ScheduleTaskInput
+) -> ScheduleTaskOutput:
     started = _start()
     task_id = uuid4()
     recurrence = _scheduled_task_recurrence_payload(args.recurrence)
-    scheduled_for = _scheduled_for_from_schedule_fields(ctx, args.when, args.delay, args.local_when)
-    context = _scheduled_task_context(task_id=task_id, brief=args.brief, recurrence=recurrence)
+    scheduled_for = _scheduled_for_from_schedule_fields(
+        ctx, args.when, args.delay, args.local_when
+    )
+    context = _scheduled_task_context(
+        task_id=task_id, brief=args.brief, recurrence=recurrence
+    )
     row = await ctx.pool.fetchrow(
         """
         INSERT INTO scheduled_jobs (user_id, job_type, scheduled_for, context, status, bot_id, topic_id)
@@ -1720,17 +1897,25 @@ async def schedule_task(ctx: TurnContext, args: ScheduleTaskInput) -> ScheduleTa
     return result
 
 
-def _reject_unauthorized_current_scheduled_task(ctx: TurnContext, current_task: bool) -> None:
+def _reject_unauthorized_current_scheduled_task(
+    ctx: TurnContext, current_task: bool
+) -> None:
     if current_task and current_scheduled_task(ctx) is None:
-        raise ToolCallRejected({"error": "current_task=true is only valid during a scheduled_task turn"})
+        raise ToolCallRejected(
+            {"error": "current_task=true is only valid during a scheduled_task turn"}
+        )
 
 
-async def update_scheduled_task(ctx: TurnContext, args: UpdateScheduledTaskInput) -> UpdateScheduledTaskOutput:
+async def update_scheduled_task(
+    ctx: TurnContext, args: UpdateScheduledTaskInput
+) -> UpdateScheduledTaskOutput:
     started = _start()
     target_job_id, target_task_id = _scheduled_task_target(args, ctx)
     scheduled_for = (
         _scheduled_for_from_schedule_fields(ctx, args.when, args.delay, args.local_when)
-        if args.when is not None or args.delay is not None or args.local_when is not None
+        if args.when is not None
+        or args.delay is not None
+        or args.local_when is not None
         else None
     )
     context_patch: dict[str, Any] = {}
@@ -1738,7 +1923,9 @@ async def update_scheduled_task(ctx: TurnContext, args: UpdateScheduledTaskInput
         context_patch["brief"] = args.brief
     recurrence_was_set = "recurrence" in args.model_fields_set
     if recurrence_was_set:
-        context_patch["recurrence"] = _scheduled_task_recurrence_payload(args.recurrence)
+        context_patch["recurrence"] = _scheduled_task_recurrence_payload(
+            args.recurrence
+        )
     row = await ctx.pool.fetchrow(
         """
         UPDATE scheduled_jobs
@@ -1758,7 +1945,9 @@ async def update_scheduled_task(ctx: TurnContext, args: UpdateScheduledTaskInput
         context_patch,
     )
     if row is None:
-        result = UpdateScheduledTaskOutput(action="noop", job_id=target_job_id, task_id=target_task_id)
+        result = UpdateScheduledTaskOutput(
+            action="noop", job_id=target_job_id, task_id=target_task_id
+        )
     else:
         task = _scheduled_task_row(row, ctx)
         result = UpdateScheduledTaskOutput(
@@ -1772,7 +1961,9 @@ async def update_scheduled_task(ctx: TurnContext, args: UpdateScheduledTaskInput
     return result
 
 
-async def cancel_scheduled_task(ctx: TurnContext, args: CancelScheduledTaskInput) -> CancelScheduledTaskOutput:
+async def cancel_scheduled_task(
+    ctx: TurnContext, args: CancelScheduledTaskInput
+) -> CancelScheduledTaskOutput:
     started = _start()
     target_job_id, target_task_id = _scheduled_task_target(args, ctx)
     if args.current_task:
@@ -1815,7 +2006,9 @@ async def cancel_scheduled_task(ctx: TurnContext, args: CancelScheduledTaskInput
             args.reason,
         )
     if row is None:
-        result = CancelScheduledTaskOutput(action="noop", job_id=target_job_id, task_id=target_task_id)
+        result = CancelScheduledTaskOutput(
+            action="noop", job_id=target_job_id, task_id=target_task_id
+        )
     else:
         context = row["context"]
         result = CancelScheduledTaskOutput(
@@ -1827,10 +2020,16 @@ async def cancel_scheduled_task(ctx: TurnContext, args: CancelScheduledTaskInput
     return result
 
 
-async def escalate_to_partner(ctx: TurnContext, args: EscalateToPartnerInput) -> EscalateToPartnerOutput:
+async def escalate_to_partner(
+    ctx: TurnContext, args: EscalateToPartnerInput
+) -> EscalateToPartnerOutput:
     started = _start()
     if args.from_user_id != ctx.user.id or args.to_user_id != ctx.partner.id:
-        logger.warning("escalate_to_partner overriding model-supplied IDs for turn_id=%s", ctx.turn_id, extra=obs_fields(ctx))
+        logger.warning(
+            "escalate_to_partner overriding model-supplied IDs for turn_id=%s",
+            ctx.turn_id,
+            extra=obs_fields(ctx),
+        )
     allowed_by_crisis = ctx.trigger_charge == "crisis"
     allowed_by_explicit_request = ctx.explicit_partner_alert_requested
     if not allowed_by_crisis and not allowed_by_explicit_request:
@@ -1840,7 +2039,9 @@ async def escalate_to_partner(ctx: TurnContext, args: EscalateToPartnerInput) ->
         }
         await _log_tool_call(ctx, "escalate_to_partner", args, started, result)
         raise ToolCallRejected(result)
-    template = TemplateCall(name="escalation", params=[ctx.partner.name, ctx.user.name, args.content])
+    template = TemplateCall(
+        name="escalation", params=[ctx.partner.name, ctx.user.name, args.content]
+    )
     out_id = await send_outbound(
         ctx.pool,
         ctx.partner,
@@ -1855,7 +2056,12 @@ async def escalate_to_partner(ctx: TurnContext, args: EscalateToPartnerInput) ->
         ctx.turn_id,
         f"ESCALATION_SENT gate={'crisis' if allowed_by_crisis else 'explicit_partner_alert'} reason={args.reason} outbound_message_id={out_id}",
     )
-    result = EscalateToPartnerOutput(action="sent", outbound_message_id=out_id, used_template=False, reason_if_deferred=None)
+    result = EscalateToPartnerOutput(
+        action="sent",
+        outbound_message_id=out_id,
+        used_template=False,
+        reason_if_deferred=None,
+    )
     await _log_tool_call(ctx, "escalate_to_partner", args, started, result)
     return result
 
@@ -1876,7 +2082,9 @@ async def _fetch_dyad_message(ctx: TurnContext, message_id: Any) -> Any | None:
     )
 
 
-async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput) -> EditOutboundMessageOutput:
+async def edit_outbound_message(
+    ctx: TurnContext, args: EditOutboundMessageInput
+) -> EditOutboundMessageOutput:
     started = _start()
     if ctx.partner is None:
         logger.warning(
@@ -1938,8 +2146,15 @@ async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput
         await _log_tool_call(ctx, "edit_outbound_message", args, started, result)
         return result
 
-    recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
-    await discord.edit_text(recipient_phone, row["whatsapp_message_id"], args.content, bot_id=turn_scope.bot_id)
+    recipient_phone = (
+        ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+    )
+    await discord.edit_text(
+        recipient_phone,
+        row["whatsapp_message_id"],
+        args.content,
+        bot_id=turn_scope.bot_id,
+    )
     await ctx.pool.execute(
         """
         UPDATE messages
@@ -1965,7 +2180,9 @@ async def edit_outbound_message(ctx: TurnContext, args: EditOutboundMessageInput
     return result
 
 
-async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageInput) -> DeleteOutboundMessageOutput:
+async def delete_outbound_message(
+    ctx: TurnContext, args: DeleteOutboundMessageInput
+) -> DeleteOutboundMessageOutput:
     started = _start()
     if ctx.partner is None:
         logger.warning(
@@ -2006,9 +2223,13 @@ async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageI
         await _log_tool_call(ctx, "delete_outbound_message", args, started, result)
         return result
 
-    recipient_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+    recipient_phone = (
+        ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+    )
     turn_scope = scope_from_turn_context(ctx)
-    await discord.delete_text(recipient_phone, row["whatsapp_message_id"], bot_id=turn_scope.bot_id)
+    await discord.delete_text(
+        recipient_phone, row["whatsapp_message_id"], bot_id=turn_scope.bot_id
+    )
     await ctx.pool.execute(
         "UPDATE messages SET deleted_at = now(), processing_state='expired' WHERE id=$1",
         args.message_id,
@@ -2023,7 +2244,9 @@ async def delete_outbound_message(ctx: TurnContext, args: DeleteOutboundMessageI
     return result
 
 
-async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> ReactToMessageOutput:
+async def react_to_message(
+    ctx: TurnContext, args: ReactToMessageInput
+) -> ReactToMessageOutput:
     started = _start()
     if ctx.partner is None:
         logger.warning(
@@ -2041,7 +2264,11 @@ async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> React
         return result
 
     row = await _fetch_dyad_message(ctx, args.message_id)
-    if row is None or row["whatsapp_message_id"] is None or row["deleted_at"] is not None:
+    if (
+        row is None
+        or row["whatsapp_message_id"] is None
+        or row["deleted_at"] is not None
+    ):
         result = ReactToMessageOutput(
             action="not_found",
             message_id=args.message_id,
@@ -2064,11 +2291,17 @@ async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> React
         return result
 
     if row["direction"] == "inbound":
-        target_phone = ctx.user.phone if row["sender_id"] == ctx.user.id else ctx.partner.phone
+        target_phone = (
+            ctx.user.phone if row["sender_id"] == ctx.user.id else ctx.partner.phone
+        )
     else:
-        target_phone = ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+        target_phone = (
+            ctx.user.phone if row["recipient_id"] == ctx.user.id else ctx.partner.phone
+        )
     turn_scope = scope_from_turn_context(ctx)
-    await discord.add_reaction(target_phone, row["whatsapp_message_id"], args.emoji, bot_id=turn_scope.bot_id)
+    await discord.add_reaction(
+        target_phone, row["whatsapp_message_id"], args.emoji, bot_id=turn_scope.bot_id
+    )
     result = ReactToMessageOutput(
         action="reacted",
         message_id=args.message_id,
@@ -2080,37 +2313,49 @@ async def react_to_message(ctx: TurnContext, args: ReactToMessageInput) -> React
     return result
 
 
-async def explain_media_item(ctx: TurnContext, args: ExplainMediaItemInput) -> ExplainMediaItemOutput:
+async def explain_media_item(
+    ctx: TurnContext, args: ExplainMediaItemInput
+) -> ExplainMediaItemOutput:
     started = _start()
     row = await ctx.pool.fetchrow(
         """
-        SELECT id, direction, sender_id, recipient_id, media_type, media_url, deleted_at
+        SELECT id, direction, sender_id, recipient_id, media_type, media_url, deleted_at, bot_id
         FROM messages
         WHERE id=$1
           AND (
             sender_id = ANY($2::uuid[])
             OR recipient_id = ANY($2::uuid[])
           )
+          AND bot_id=$3
+          AND topic_id=$4
         """,
         args.message_id,
         [ctx.user.id, ctx.partner.id],
+        ctx.bot_id,
+        ctx.primary_topic_id,
     )
     if row is None or row["deleted_at"] is not None:
-        result = ExplainMediaItemOutput(action="not_found", message_id=args.message_id, reason="message not found")
+        result = ExplainMediaItemOutput(
+            action="not_found", message_id=args.message_id, reason="message not found"
+        )
         await _log_tool_call(ctx, "explain_media_item", args, started, result)
         return result
     owner_id = _message_thread_owner_id(row)
-    sharing_default = ctx.user.cross_thread_sharing_default if owner_id == ctx.user.id else ctx.partner.cross_thread_sharing_default
+    partner_share = "unset"
+    if owner_id == ctx.user.id:
+        partner_share = "opt_in"
+    elif row["bot_id"] is not None:
+        partner_share = await _partner_share_for_bot(ctx, owner_id, row["bot_id"])
     if not raw_message_visibility(
         viewer_user_id=ctx.user.id,
         thread_owner_user_id=owner_id,
-        thread_owner_sharing_default=sharing_default,
+        thread_owner_partner_share=partner_share,
     ).visible:
         result = ExplainMediaItemOutput(
             action="blocked",
             message_id=args.message_id,
             media_type=row["media_type"],
-            reason="raw partner media hidden by sharing_default",
+            reason="raw partner media hidden by partner_share",
         )
         await _log_tool_call(ctx, "explain_media_item", args, started, result)
         return result
@@ -2174,7 +2419,9 @@ async def log_feedback(ctx: TurnContext, args: LogFeedbackInput) -> LogFeedbackO
 # ---------------------------------------------------------------------------
 
 
-async def set_pregnancy_edd(ctx: TurnContext, args: "SetPregnancyEddInput") -> "SetPregnancyEddOutput":
+async def set_pregnancy_edd(
+    ctx: TurnContext, args: "SetPregnancyEddInput"
+) -> "SetPregnancyEddOutput":
     """Initial pregnancy capture. Requires no active pregnancy on ctx.user."""
     from datetime import date as _date, datetime as _datetime
 
@@ -2189,14 +2436,16 @@ async def set_pregnancy_edd(ctx: TurnContext, args: "SetPregnancyEddInput") -> "
         ctx.user.id,
     )
     if row["pregnancy_edd"] is not None and row["pregnancy_ended_at"] is None:
-        raise ToolCallRejected({
-            "error": "pregnancy_already_active",
-            "reason": (
-                "There is already an active pregnancy (EDD "
-                f"{row['pregnancy_edd'].isoformat()}). "
-                "Use correct_pregnancy_edd to revise or end_pregnancy to close it first."
-            ),
-        })
+        raise ToolCallRejected(
+            {
+                "error": "pregnancy_already_active",
+                "reason": (
+                    "There is already an active pregnancy (EDD "
+                    f"{row['pregnancy_edd'].isoformat()}). "
+                    "Use correct_pregnancy_edd to revise or end_pregnancy to close it first."
+                ),
+            }
+        )
 
     lmp_date = _date.fromisoformat(args.lmp_date) if args.lmp_date else None
     scan_date = _date.fromisoformat(args.scan_date) if args.scan_date else None
@@ -2245,7 +2494,8 @@ async def set_pregnancy_edd(ctx: TurnContext, args: "SetPregnancyEddInput") -> "
 
 
 async def correct_pregnancy_edd(
-    ctx: TurnContext, args: "CorrectPregnancyEddInput",
+    ctx: TurnContext,
+    args: "CorrectPregnancyEddInput",
 ) -> "CorrectPregnancyEddOutput":
     """Mid-pregnancy EDD revision (e.g. after a dating scan). Requires an active pregnancy."""
     from datetime import date as _date, datetime as _datetime
@@ -2261,13 +2511,15 @@ async def correct_pregnancy_edd(
         ctx.user.id,
     )
     if row["pregnancy_edd"] is None or row["pregnancy_ended_at"] is not None:
-        raise ToolCallRejected({
-            "error": "no_active_pregnancy",
-            "reason": (
-                "There is no active pregnancy to correct. "
-                "Use set_pregnancy_edd to start tracking a pregnancy first."
-            ),
-        })
+        raise ToolCallRejected(
+            {
+                "error": "no_active_pregnancy",
+                "reason": (
+                    "There is no active pregnancy to correct. "
+                    "Use set_pregnancy_edd to start tracking a pregnancy first."
+                ),
+            }
+        )
 
     scan_date = _date.fromisoformat(args.scan_date) if args.scan_date else None
     scan_corrected_at = (
@@ -2317,7 +2569,9 @@ async def correct_pregnancy_edd(
     return result
 
 
-async def end_pregnancy(ctx: TurnContext, args: "EndPregnancyInput") -> "EndPregnancyOutput":
+async def end_pregnancy(
+    ctx: TurnContext, args: "EndPregnancyInput"
+) -> "EndPregnancyOutput":
     """Close the active pregnancy. Errors if no active pregnancy or already ended."""
     from datetime import datetime as _datetime
 
@@ -2328,17 +2582,21 @@ async def end_pregnancy(ctx: TurnContext, args: "EndPregnancyInput") -> "EndPreg
         ctx.user.id,
     )
     if row["pregnancy_edd"] is None:
-        raise ToolCallRejected({
-            "error": "no_active_pregnancy",
-            "reason": "There is no pregnancy to end — EDD has never been set.",
-        })
+        raise ToolCallRejected(
+            {
+                "error": "no_active_pregnancy",
+                "reason": "There is no pregnancy to end — EDD has never been set.",
+            }
+        )
     if row["pregnancy_ended_at"] is not None:
-        raise ToolCallRejected({
-            "error": "pregnancy_already_ended",
-            "reason": (
-                f"pregnancy already ended on {row['pregnancy_ended_at'].isoformat()}"
-            ),
-        })
+        raise ToolCallRejected(
+            {
+                "error": "pregnancy_already_ended",
+                "reason": (
+                    f"pregnancy already ended on {row['pregnancy_ended_at'].isoformat()}"
+                ),
+            }
+        )
 
     if args.ended_at:
         ended_at = _datetime.fromisoformat(args.ended_at)
@@ -2380,16 +2638,20 @@ def _check_edd_window(edd: "date") -> None:
     from datetime import date as _date, timedelta
 
     if edd > _date.today() + timedelta(days=365):
-        raise ToolCallRejected({
-            "error": "edd_too_far_future",
-            "reason": (
-                f"EDD {edd.isoformat()} is more than 1 year in the future. "
-                "This looks like a data error — please check the date."
-            ),
-        })
+        raise ToolCallRejected(
+            {
+                "error": "edd_too_far_future",
+                "reason": (
+                    f"EDD {edd.isoformat()} is more than 1 year in the future. "
+                    "This looks like a data error — please check the date."
+                ),
+            }
+        )
 
 
-async def set_topic_status(ctx: TurnContext, args: SetTopicStatusInput) -> SetTopicStatusOutput:
+async def set_topic_status(
+    ctx: TurnContext, args: SetTopicStatusInput
+) -> SetTopicStatusOutput:
     """Upsert the bot-authored status row for this topic+scope (§7).
 
     First-line write-scope check; XOR validation on scope/user_id/dyad_id;
@@ -2402,7 +2664,9 @@ async def set_topic_status(ctx: TurnContext, args: SetTopicStatusInput) -> SetTo
     started = _start()
     if args.scope == "user":
         if args.user_id is None:
-            raise ToolCallRejected({"error": "set_topic_status: scope=user requires user_id"})
+            raise ToolCallRejected(
+                {"error": "set_topic_status: scope=user requires user_id"}
+            )
         row = await ctx.pool.fetchrow(
             """
             INSERT INTO topic_status (topic_id, user_id, headline, body, last_updated_by_bot_id)
@@ -2422,7 +2686,9 @@ async def set_topic_status(ctx: TurnContext, args: SetTopicStatusInput) -> SetTo
         )
     else:
         if ctx.dyad_id is None:
-            raise ToolCallRejected({"error": "set_topic_status: scope=dyad requires ctx.dyad_id"})
+            raise ToolCallRejected(
+                {"error": "set_topic_status: scope=dyad requires ctx.dyad_id"}
+            )
         row = await ctx.pool.fetchrow(
             """
             INSERT INTO topic_status (topic_id, dyad_id, headline, body, last_updated_by_bot_id)
@@ -2444,7 +2710,9 @@ async def set_topic_status(ctx: TurnContext, args: SetTopicStatusInput) -> SetTo
         status_id=row["id"],
         headline=row["headline"],
         body=row["body"],
-        updated_at=row["last_updated_at"].isoformat() if row["last_updated_at"] else None,
+        updated_at=(
+            row["last_updated_at"].isoformat() if row["last_updated_at"] else None
+        ),
     )
     await _log_tool_call(ctx, "set_topic_status", args, started, result)
     return result

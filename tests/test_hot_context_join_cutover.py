@@ -9,7 +9,6 @@ Off-limits rule: we create a new file rather than touching test_hot_context.py.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -23,12 +22,12 @@ pytestmark = pytest.mark.anyio
 # Fixed UUIDs matching the s2b capture script
 USER_A_ID = UUID("aaaaaaaa-aaaa-4aaa-8aaa-000000000001")
 USER_B_ID = UUID("bbbbbbbb-bbbb-4bbb-8bbb-000000000002")
-MEM_ID    = UUID("cccccccc-cccc-4ccc-8ccc-000000000003")
-THEME_ID  = UUID("dddddddd-dddd-4ddd-8ddd-000000000004")
-WATCH_ID  = UUID("eeeeeeee-eeee-4eee-8eee-000000000005")
-OBS_ID    = UUID("ffffffff-ffff-4fff-8fff-000000000006")
-DIST_ID   = UUID("11111111-1111-4111-8111-000000000007")
-OOB_ID    = UUID("22222222-2222-4222-8222-000000000008")
+MEM_ID = UUID("cccccccc-cccc-4ccc-8ccc-000000000003")
+THEME_ID = UUID("dddddddd-dddd-4ddd-8ddd-000000000004")
+WATCH_ID = UUID("eeeeeeee-eeee-4eee-8eee-000000000005")
+OBS_ID = UUID("ffffffff-ffff-4fff-8fff-000000000006")
+DIST_ID = UUID("11111111-1111-4111-8111-000000000007")
+OOB_ID = UUID("22222222-2222-4222-8222-000000000008")
 
 FROZEN_NOW = datetime(2026, 5, 12, 12, 0, 0, tzinfo=UTC)
 
@@ -40,7 +39,8 @@ _S2B_RENDERED_HOT_CONTEXT = (
     "- name: Alice\n"
     "- timezone: America/New_York\n"
     "- onboarding_state: welcomed\n"
-    "- sharing_default: opt_in\n"
+    "- partner_share: opt_in\n"
+    "- partner_sharing_state: opt_in\n"
     "- style_notes: \n"
     "\n"
     "## Your Partner\n"
@@ -48,7 +48,8 @@ _S2B_RENDERED_HOT_CONTEXT = (
     "- name: Bob\n"
     "- timezone: America/Chicago\n"
     "- onboarding_state: welcomed\n"
-    "- sharing_default: opt_in\n"
+    "- partner_share: opt_in\n"
+    "- partner_sharing_state: opt_in\n"
     "- style_notes: \n"
     "\n"
     "## Current time\n"
@@ -69,9 +70,11 @@ _S2B_RENDERED_HOT_CONTEXT = (
     " For phrases like 'for the next month', use the"
     " one_month_from_now/local_date anchors rather than guessing.\n"
     "\n"
-    "## Sharing defaults\n"
+    "## Partner sharing\n"
     "- current_user: opt_in\n"
+    "- current_user_state: opt_in\n"
     "- partner: opt_in\n"
+    "- partner_state: opt_in\n"
     "\n"
     "## Conversation load\n"
     "- period: today\n"
@@ -117,12 +120,15 @@ _S2B_RENDERED_HOT_CONTEXT = (
     "## Distillations\n"
     "- id=11111111-1111-4111-8111-000000000007"
     " time=2026-05-02 08:00 New York (10 days ago;"
-    " utc=2026-05-02T12:00:00+00:00) display=full_content"
+    " utc=2026-05-02T12:00:00+00:00) display=shareable_summary"
     " confidence=high sensitivity=low visibility=dyad_shareable"
     " sources=aaaaaaaa-aaaa-4aaa-8aaa-000000000001,"
-    " bbbbbbbb-bbbb-4bbb-8bbb-000000000002: The couple works best"
-    " when they communicate expectations clearly in writing\n"
+    " bbbbbbbb-bbbb-4bbb-8bbb-000000000002: Written communication helps clarify"
+    " expectations\n"
     "- use get_distillations before adding or revising synthesized explanations.\n"
+    "\n"
+    "## Partner shareable summaries\n"
+    "- none\n"
     "\n"
     "## Bridge candidates\n"
     "- none\n"
@@ -141,47 +147,76 @@ _S2B_RENDERED_HOT_CONTEXT = (
 
 def _seed_fixture(pool) -> tuple[User, User]:
     """Seed one artifact of each family + two users; return (user, partner)."""
-    pool.users.setdefault(USER_A_ID, {
-        "id": USER_A_ID, "name": "Alice", "phone": "15555550100",
-        "timezone": "America/New_York", "style_notes": "", "onboarding_state": "welcomed",
-        "cross_thread_sharing_default": "opt_in",
-    })
-    pool.users.setdefault(USER_B_ID, {
-        "id": USER_B_ID, "name": "Bob", "phone": "15555550101",
-        "timezone": "America/Chicago", "style_notes": "", "onboarding_state": "welcomed",
-        "cross_thread_sharing_default": "opt_in",
-    })
+    pool.users.setdefault(
+        USER_A_ID,
+        {
+            "id": USER_A_ID,
+            "name": "Alice",
+            "phone": "15555550100",
+            "timezone": "America/New_York",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+        },
+    )
+    pool.users.setdefault(
+        USER_B_ID,
+        {
+            "id": USER_B_ID,
+            "name": "Bob",
+            "phone": "15555550101",
+            "timezone": "America/Chicago",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+        },
+    )
+    pool.user_bot_state[(USER_A_ID, "mediator")] = {"partner_share": "opt_in"}
+    pool.user_bot_state[(USER_B_ID, "mediator")] = {"partner_share": "opt_in"}
 
-    user = User(id=USER_A_ID, name="Alice", phone="15555550100", timezone="America/New_York")
-    partner = User(id=USER_B_ID, name="Bob", phone="15555550101", timezone="America/Chicago")
+    user = User(
+        id=USER_A_ID, name="Alice", phone="15555550100", timezone="America/New_York"
+    )
+    partner = User(
+        id=USER_B_ID, name="Bob", phone="15555550101", timezone="America/Chicago"
+    )
 
     pool.memories[MEM_ID] = {
-        "id": MEM_ID, "about_user_id": USER_A_ID,
+        "id": MEM_ID,
+        "about_user_id": USER_A_ID,
         "content": "Alice prefers direct communication",
-        "related_theme_ids": [], "status": "active",
+        "related_theme_ids": [],
+        "status": "active",
         "created_at": FROZEN_NOW - timedelta(days=30),
         "last_referenced_at": FROZEN_NOW - timedelta(days=5),
     }
     pool.themes[THEME_ID] = {
-        "id": THEME_ID, "title": "Communication styles",
+        "id": THEME_ID,
+        "title": "Communication styles",
         "description": "Alice and Bob have different communication preferences",
-        "status": "active", "sentiment": "neutral", "health": "stable",
+        "status": "active",
+        "sentiment": "neutral",
+        "health": "stable",
         "last_reinforced_at": FROZEN_NOW - timedelta(days=10),
         "last_active_at": FROZEN_NOW - timedelta(days=3),
         "first_seen_at": FROZEN_NOW - timedelta(days=60),
     }
     pool.watch_items[WATCH_ID] = {
-        "id": WATCH_ID, "owner_user_id": USER_A_ID,
+        "id": WATCH_ID,
+        "owner_user_id": USER_A_ID,
         "content": "Schedule weekly check-in call",
-        "due_at": FROZEN_NOW + timedelta(days=3), "status": "open",
+        "due_at": FROZEN_NOW + timedelta(days=3),
+        "status": "open",
         "created_at": FROZEN_NOW - timedelta(days=1),
         "related_theme_ids": [THEME_ID],
-        "addressing_note": None, "addressed_at": None,
+        "addressing_note": None,
+        "addressed_at": None,
     }
     pool.observations[OBS_ID] = {
-        "id": OBS_ID, "about_user_id": USER_B_ID,
+        "id": OBS_ID,
+        "about_user_id": USER_B_ID,
         "content": "Bob responds better to written communication than calls",
-        "confidence": "high", "significance": 4, "status": "active",
+        "confidence": "high",
+        "significance": 4,
+        "status": "active",
         "related_theme_ids": [THEME_ID],
         "last_reinforced_at": FROZEN_NOW - timedelta(days=15),
         "created_at": FROZEN_NOW - timedelta(days=45),
@@ -189,24 +224,31 @@ def _seed_fixture(pool) -> tuple[User, User]:
     pool.distillations[DIST_ID] = {
         "id": DIST_ID,
         "content": "The couple works best when they communicate expectations clearly in writing",
-        "confidence": "high", "status": "active",
-        "sensitivity": "low", "visibility": "dyad_shareable",
+        "confidence": "high",
+        "status": "active",
+        "sensitivity": "low",
+        "visibility": "dyad_shareable",
         "shareable_summary": "Written communication helps clarify expectations",
         "source_user_ids": [USER_A_ID, USER_B_ID],
         "related_memory_ids": [MEM_ID],
         "related_observation_ids": [OBS_ID],
         "related_theme_ids": [THEME_ID],
         "supporting_message_ids": [],
-        "revision_note": None, "revision_count": 0,
+        "revision_note": None,
+        "revision_count": 0,
         "created_at": FROZEN_NOW - timedelta(days=20),
         "updated_at": FROZEN_NOW - timedelta(days=10),
+        "recorded_by_bot_id": "mediator",
     }
     pool.out_of_bounds[OOB_ID] = {
-        "id": OOB_ID, "owner_id": USER_A_ID,
+        "id": OOB_ID,
+        "owner_id": USER_A_ID,
         "shareable_context": "Alice's financial concerns",
         "sensitive_core": "Alice's financial concerns (private)",
-        "severity": "firm", "review_at": FROZEN_NOW + timedelta(days=90),
-        "status": "active", "created_at": FROZEN_NOW - timedelta(days=10),
+        "severity": "firm",
+        "review_at": FROZEN_NOW + timedelta(days=90),
+        "status": "active",
+        "created_at": FROZEN_NOW - timedelta(days=10),
     }
 
     # Link every artifact to the relationship topic
@@ -250,7 +292,10 @@ async def test_hot_context_output_unchanged_post_join_cutover(fake_pool, monkeyp
 
     try:
         hc = await build_hot_context(
-            fake_pool, user, partner, [],
+            fake_pool,
+            user,
+            partner,
+            [],
             primary_topic_id=get_relationship_topic_id(),
         )
         rendered = render_hot_context(hc)
@@ -274,12 +319,14 @@ async def test_hot_context_output_unchanged_post_join_cutover(fake_pool, monkeyp
     assert len(hc.active_oob) == 1
 
 
-async def test_build_hot_context_raises_when_topic_registry_unset(fake_pool, monkeypatch):
+async def test_build_hot_context_raises_when_topic_registry_unset(
+    fake_pool, monkeypatch
+):
     """RuntimeError when get_relationship_topic_id() returns None and no
     primary_topic_id is passed."""
     user, partner = _seed_fixture(fake_pool)
 
-# Force registry to return None.  build_hot_context imported
+    # Force registry to return None.  build_hot_context imported
     # get_relationship_topic_id directly, so we must patch the reference
     # in hot_context, not in bots.registry.
     monkeypatch.setattr(

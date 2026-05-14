@@ -5,6 +5,7 @@ coach: no partner placeholder, no bridges, no in-person redirect, no dyadic
 crisis escalation gate.
 """
 
+from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
 from app.services.crisis_solo import SOLO_CRISIS_SECTION_V1
 
 SOLO_SYSTEM_PROMPT_VERSION = "v1"
@@ -38,6 +39,7 @@ out-of-bounds boundaries, and redirect toward real-world action when that is
 the better tool.
 
 {{first_contact_section}}
+{{partner_sharing_section}}
 # Definitions
 
 **Crisis** — used to determine when the bot drops the coach role:
@@ -390,7 +392,8 @@ def render_solo_system_prompt(
     *,
     prompt_version: str = SOLO_SYSTEM_PROMPT_VERSION,
     onboarding_state: str | None = None,
-    sharing_default: str | None = None,
+    partner_share: str | None = None,
+    partner_sharing_state: str | None = None,
     topic_display_name: str = "career",
     **kwargs: object,
 ) -> str:
@@ -402,15 +405,22 @@ def render_solo_system_prompt(
     """
     template = SOLO_PROMPT_REGISTRY.get(prompt_version, SOLO_SYSTEM_PROMPT_V1)
     if onboarding_state == "pending":
-        first_contact = "\n\n" + SOLO_FIRST_CONTACT_REGISTRY.get(
-            prompt_version, SOLO_FIRST_CONTACT_V1
-        ) + "\n"
+        first_contact = (
+            "\n\n"
+            + SOLO_FIRST_CONTACT_REGISTRY.get(prompt_version, SOLO_FIRST_CONTACT_V1)
+            + "\n"
+        )
     else:
         first_contact = ""
+    partner_sharing_section = (
+        f"\n{PENDING_PARTNER_SHARING_PROMPT_SLOT}\n"
+        if partner_sharing_state == "pending"
+        else ""
+    )
 
     return (
-        template
-        .replace("{first_contact_section}", first_contact)
+        template.replace("{first_contact_section}", first_contact)
+        .replace("{partner_sharing_section}", partner_sharing_section)
         .replace("{assistant_name}", assistant_name)
         .replace("{user_name}", user_name)
         .replace("{topic_display_name}", topic_display_name)

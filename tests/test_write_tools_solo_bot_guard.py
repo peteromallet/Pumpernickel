@@ -26,7 +26,10 @@ from app.services.turn_context import TurnContext
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ctx(fake_pool, *, partner=None, bot_id="tante_rosi", user_phone="15555550100"):
+
+def _make_ctx(
+    fake_pool, *, partner=None, bot_id="tante_rosi", user_phone="15555550100"
+):
     """Build a minimal TurnContext for solo-bot guard tests."""
     from datetime import UTC, datetime
     from app.models.user import User
@@ -39,7 +42,6 @@ def _make_ctx(fake_pool, *, partner=None, bot_id="tante_rosi", user_phone="15555
         "timezone": "UTC",
         "onboarding_state": "pending",
         "pacing_preferences": {},
-        "cross_thread_sharing_default": None,
         "pregnancy_edd": None,
         "pregnancy_dating_basis": None,
         "pregnancy_lmp_date": None,
@@ -71,6 +73,7 @@ def _make_ctx(fake_pool, *, partner=None, bot_id="tante_rosi", user_phone="15555
 def _seed_outbound_message(fake_pool, message_id, recipient_id, whatsapp_id):
     """Seed an outbound message row for the test."""
     from datetime import UTC, datetime
+
     fake_pool.messages[message_id] = {
         "id": message_id,
         "direction": "outbound",
@@ -98,6 +101,7 @@ def _seed_outbound_message(fake_pool, message_id, recipient_id, whatsapp_id):
 # edit_outbound_message solo-bot guard
 # ---------------------------------------------------------------------------
 
+
 class TestEditOutboundMessageSoloGuard:
     """edit_outbound_message returns action='unsupported' when ctx.partner is None."""
 
@@ -111,15 +115,19 @@ class TestEditOutboundMessageSoloGuard:
             "timezone": "UTC",
             "onboarding_state": "pending",
             "pacing_preferences": {},
-            "cross_thread_sharing_default": None,
         }
         message_id = uuid4()
         _seed_outbound_message(fake_pool, message_id, user_id, "discord-msg-1")
 
-        ctx = _make_ctx(fake_pool, partner=None, bot_id="tante_rosi", user_phone="15555550100")
+        ctx = _make_ctx(
+            fake_pool, partner=None, bot_id="tante_rosi", user_phone="15555550100"
+        )
 
         result = await edit_outbound_message(
-            ctx, EditOutboundMessageInput(message_id=str(message_id), content="edited", reason="test edit")
+            ctx,
+            EditOutboundMessageInput(
+                message_id=str(message_id), content="edited", reason="test edit"
+            ),
         )
 
         assert isinstance(result, EditOutboundMessageOutput)
@@ -138,14 +146,20 @@ class TestEditOutboundMessageSoloGuard:
         user_id = uuid4()
         partner_id = uuid4()
         fake_pool.users[user_id] = {
-            "id": user_id, "name": "A", "phone": "15555550100", "timezone": "UTC",
-            "onboarding_state": "pending", "pacing_preferences": {},
-            "cross_thread_sharing_default": None,
+            "id": user_id,
+            "name": "A",
+            "phone": "15555550100",
+            "timezone": "UTC",
+            "onboarding_state": "pending",
+            "pacing_preferences": {},
         }
         fake_pool.users[partner_id] = {
-            "id": partner_id, "name": "B", "phone": "15555550101", "timezone": "UTC",
-            "onboarding_state": "pending", "pacing_preferences": {},
-            "cross_thread_sharing_default": None,
+            "id": partner_id,
+            "name": "B",
+            "phone": "15555550101",
+            "timezone": "UTC",
+            "onboarding_state": "pending",
+            "pacing_preferences": {},
         }
         user = User(id=user_id, name="A", phone="15555550100", timezone="UTC")
         partner = User(id=partner_id, name="B", phone="15555550101", timezone="UTC")
@@ -153,7 +167,9 @@ class TestEditOutboundMessageSoloGuard:
         message_id = uuid4()
         _seed_outbound_message(fake_pool, message_id, user_id, "discord-msg-1")
 
-        ctx = _make_ctx(fake_pool, partner=partner, bot_id="mediator", user_phone="15555550100")
+        ctx = _make_ctx(
+            fake_pool, partner=partner, bot_id="mediator", user_phone="15555550100"
+        )
         # Override with actual user
         ctx.user = user
 
@@ -162,10 +178,15 @@ class TestEditOutboundMessageSoloGuard:
         async def fake_edit_text(to, msg_id, content, *, bot_id):
             edit_called.append((to, msg_id, content, bot_id))
 
-        monkeypatch.setattr("app.services.tools.write_tools.discord.edit_text", fake_edit_text)
+        monkeypatch.setattr(
+            "app.services.tools.write_tools.discord.edit_text", fake_edit_text
+        )
 
         result = await edit_outbound_message(
-            ctx, EditOutboundMessageInput(message_id=str(message_id), content="edited", reason="test partner edit")
+            ctx,
+            EditOutboundMessageInput(
+                message_id=str(message_id), content="edited", reason="test partner edit"
+            ),
         )
 
         assert isinstance(result, EditOutboundMessageOutput)
@@ -177,6 +198,7 @@ class TestEditOutboundMessageSoloGuard:
 # delete_outbound_message solo-bot guard
 # ---------------------------------------------------------------------------
 
+
 class TestDeleteOutboundMessageSoloGuard:
     """delete_outbound_message returns action='unsupported' when ctx.partner is None."""
 
@@ -184,17 +206,23 @@ class TestDeleteOutboundMessageSoloGuard:
         """Solo bot → unsupported."""
         user_id = uuid4()
         fake_pool.users[user_id] = {
-            "id": user_id, "name": "Solo User", "phone": "15555550100", "timezone": "UTC",
-            "onboarding_state": "pending", "pacing_preferences": {},
-            "cross_thread_sharing_default": None,
+            "id": user_id,
+            "name": "Solo User",
+            "phone": "15555550100",
+            "timezone": "UTC",
+            "onboarding_state": "pending",
+            "pacing_preferences": {},
         }
         message_id = uuid4()
         _seed_outbound_message(fake_pool, message_id, user_id, "discord-msg-1")
 
-        ctx = _make_ctx(fake_pool, partner=None, bot_id="tante_rosi", user_phone="15555550100")
+        ctx = _make_ctx(
+            fake_pool, partner=None, bot_id="tante_rosi", user_phone="15555550100"
+        )
 
         result = await delete_outbound_message(
-            ctx, DeleteOutboundMessageInput(message_id=str(message_id), reason="cleanup")
+            ctx,
+            DeleteOutboundMessageInput(message_id=str(message_id), reason="cleanup"),
         )
 
         assert isinstance(result, DeleteOutboundMessageOutput)
@@ -206,6 +234,7 @@ class TestDeleteOutboundMessageSoloGuard:
 # react_to_message solo-bot guard
 # ---------------------------------------------------------------------------
 
+
 class TestReactToMessageSoloGuard:
     """react_to_message returns action='unsupported' when ctx.partner is None."""
 
@@ -213,17 +242,25 @@ class TestReactToMessageSoloGuard:
         """Solo bot → unsupported."""
         user_id = uuid4()
         fake_pool.users[user_id] = {
-            "id": user_id, "name": "Solo User", "phone": "15555550100", "timezone": "UTC",
-            "onboarding_state": "pending", "pacing_preferences": {},
-            "cross_thread_sharing_default": None,
+            "id": user_id,
+            "name": "Solo User",
+            "phone": "15555550100",
+            "timezone": "UTC",
+            "onboarding_state": "pending",
+            "pacing_preferences": {},
         }
         message_id = uuid4()
         _seed_outbound_message(fake_pool, message_id, user_id, "discord-msg-1")
 
-        ctx = _make_ctx(fake_pool, partner=None, bot_id="tante_rosi", user_phone="15555550100")
+        ctx = _make_ctx(
+            fake_pool, partner=None, bot_id="tante_rosi", user_phone="15555550100"
+        )
 
         result = await react_to_message(
-            ctx, ReactToMessageInput(message_id=str(message_id), emoji="👍", reason="feedback")
+            ctx,
+            ReactToMessageInput(
+                message_id=str(message_id), emoji="👍", reason="feedback"
+            ),
         )
 
         assert isinstance(result, ReactToMessageOutput)

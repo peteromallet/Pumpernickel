@@ -18,16 +18,29 @@ from app.config import get_settings
 from app.models.user import User, claim_onboarding_welcome
 from app.services import discord, hooks, system_state
 from app.services.hot_context import build_hot_context, render_hot_context
-from app.services.hot_context_solo import build_hot_context_solo, render_hot_context_solo
+from app.services.hot_context_solo import (
+    build_hot_context_solo,
+    render_hot_context_solo,
+)
 from app.services.messaging import send_outbound, sent_contents_for_turn
+from app.services.partner_sharing import get_partner_share
 from app.services.spend import is_under_cap, record_llm_cost
 from app.services.crypto import encrypt_value
 from app.services.scope import InboundScope
 from app.services.text_safety import clean_user_facing_text
-from app.services.tools.registry import STEP_ALLOWED_TOOLS, call_tool, to_anthropic_tools
+from app.services.tools.registry import (
+    STEP_ALLOWED_TOOLS,
+    call_tool,
+    to_anthropic_tools,
+)
 from app.services.turn_audit import record_turn_event
 from app.services.turn_plan import make_turn_plan, orient_summary, pick_default_skeleton
-from app.services.turn_context import BeforePacedSend, TurnContext, obs_fields, partner_of
+from app.services.turn_context import (
+    BeforePacedSend,
+    TurnContext,
+    obs_fields,
+    partner_of,
+)
 
 import tool_schemas as _tool_schemas_module
 
@@ -60,7 +73,9 @@ class BoundedLoopExceeded(Exception):
     failure_reason = "bounded_loop_exceeded"
 
 
-REACTION_DIRECTIVE_RE = re.compile(r"^\s*\[react:\s*(?P<emoji>[^\]\s]+)\s*\]\s*$", re.IGNORECASE)
+REACTION_DIRECTIVE_RE = re.compile(
+    r"^\s*\[react:\s*(?P<emoji>[^\]\s]+)\s*\]\s*$", re.IGNORECASE
+)
 PACING_CONTEXT_KEYS = (
     "action",
     "reason",
@@ -113,7 +128,9 @@ def _compact_json_value(value: Any, *, text_limit: int = 180) -> Any:
             compact[str(key)] = _compact_json_value(item, text_limit=text_limit)
         return compact
     if isinstance(value, (list, tuple, set)):
-        return [_compact_json_value(item, text_limit=text_limit) for item in list(value)[:8]]
+        return [
+            _compact_json_value(item, text_limit=text_limit) for item in list(value)[:8]
+        ]
     return str(value)
 
 
@@ -139,7 +156,12 @@ def _compact_pacing_context(pacing_context: Any) -> dict[str, Any] | None:
 
     preference_snapshot = _attr(pacing_context, "preference_snapshot")
     if isinstance(preference_snapshot, Mapping):
-        preference_keys = ("conversation_pace", "allow_reactions", "min_wait_s", "max_wait_s")
+        preference_keys = (
+            "conversation_pace",
+            "allow_reactions",
+            "min_wait_s",
+            "max_wait_s",
+        )
         preferences = {
             key: _compact_json_value(preference_snapshot[key])
             for key in preference_keys
@@ -200,7 +222,9 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
     return data
 
 
-def _system_blocks(system_prompt: str, hot_context_rendered: str) -> list[dict[str, Any]]:
+def _system_blocks(
+    system_prompt: str, hot_context_rendered: str
+) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = [
         {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": hot_context_rendered},
@@ -266,7 +290,11 @@ async def _create_message_with_retry(
         except Exception as exc:  # Anthropic SDK transient subclasses vary by version.
             last_error = exc
             if attempt == 0:
-                logger.warning("anthropic message create failed; retrying once: %s", exc, extra=obs_fields(ctx))
+                logger.warning(
+                    "anthropic message create failed; retrying once: %s",
+                    exc,
+                    extra=obs_fields(ctx),
+                )
                 continue
             raise LLMPhaseError(str(exc)) from exc
         await _record_response_cost(ctx.pool, _attr(response, "usage", {}))
@@ -287,7 +315,9 @@ async def run_step(
 ) -> tuple[str, list[dict[str, Any]], int]:
     settings = get_settings()
     if client is None:
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key.get_secret_value()
+        )
 
     system = _system_blocks(system_prompt, hot_context_rendered)
     tools = _anthropic_tools(allowed_tools)
@@ -305,9 +335,13 @@ async def run_step(
             model=model,
             max_tokens=max_tokens,
         )
-        content_blocks = [_block_to_dict(block) for block in (_attr(response, "content", []) or [])]
+        content_blocks = [
+            _block_to_dict(block) for block in (_attr(response, "content", []) or [])
+        ]
         messages.append({"role": "assistant", "content": content_blocks})
-        tool_uses = [block for block in content_blocks if block.get("type") == "tool_use"]
+        tool_uses = [
+            block for block in content_blocks if block.get("type") == "tool_use"
+        ]
         if not tool_uses or _attr(response, "stop_reason") != "tool_use":
             final_text = "\n".join(
                 str(block.get("text", "")).strip()
@@ -317,8 +351,13 @@ async def run_step(
             return final_text, messages, tool_call_count
 
         tool_iteration_count += 1
-        if max_tool_iterations is not None and tool_iteration_count > max_tool_iterations:
-            raise BoundedLoopExceeded(f"tool iteration cap exceeded: {max_tool_iterations}")
+        if (
+            max_tool_iterations is not None
+            and tool_iteration_count > max_tool_iterations
+        ):
+            raise BoundedLoopExceeded(
+                f"tool iteration cap exceeded: {max_tool_iterations}"
+            )
         tool_results: list[dict[str, Any]] = []
         for tool_use in tool_uses:
             if tool_use["name"] != "update_turn_plan":
@@ -358,8 +397,12 @@ def _explicit_partner_alert_requested(hot_context: Any) -> bool:
         content = str(message.get("content") or "").lower()
         if not content:
             continue
-        asks_to_alert = any(phrase in content for phrase in ("tell", "alert", "let", "message", "ask"))
-        names_partner = any(phrase in content for phrase in ("partner", "him", "her", "them"))
+        asks_to_alert = any(
+            phrase in content for phrase in ("tell", "alert", "let", "message", "ask")
+        )
+        names_partner = any(
+            phrase in content for phrase in ("partner", "him", "her", "them")
+        )
         if asks_to_alert and names_partner:
             return True
     return False
@@ -371,7 +414,11 @@ def _collect_reasoning(messages: list[dict[str, Any]], final_text: str = "") -> 
         if message.get("role") != "assistant":
             continue
         content = message.get("content", "")
-        blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
+        blocks = (
+            content
+            if isinstance(content, list)
+            else [{"type": "text", "text": content}]
+        )
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "text":
                 text = str(block.get("text", "")).strip()
@@ -383,7 +430,9 @@ def _collect_reasoning(messages: list[dict[str, Any]], final_text: str = "") -> 
 async def _append_reasoning(pool: Any, turn_id: UUID, note: str) -> None:
     if not note:
         return
-    existing = await pool.fetchval("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", turn_id)
+    existing = await pool.fetchval(
+        "SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", turn_id
+    )
     updated = f"{existing or ''}\n{note}"
     await pool.execute(
         "UPDATE bot_turns SET reasoning=$1, reasoning_encrypted=$2 WHERE id=$3",
@@ -405,9 +454,19 @@ def _extract_reaction_directive(text: str) -> tuple[str | None, str]:
     return emoji, "\n".join(kept_lines).strip()
 
 
-async def _react_to_triggering_message(pool: Any, user: User, triggering_message_ids: list[UUID], emoji: str, *, bot_id: str) -> bool:
+async def _react_to_triggering_message(
+    pool: Any,
+    user: User,
+    triggering_message_ids: list[UUID],
+    emoji: str,
+    *,
+    bot_id: str,
+) -> bool:
     settings = get_settings()
-    if settings.messaging_provider.strip().lower() != "discord" or not triggering_message_ids:
+    if (
+        settings.messaging_provider.strip().lower() != "discord"
+        or not triggering_message_ids
+    ):
         return False
     row = await pool.fetchrow(
         """
@@ -420,7 +479,9 @@ async def _react_to_triggering_message(pool: Any, user: User, triggering_message
     )
     if row is None or not row.get("whatsapp_message_id"):
         return False
-    await discord.add_reaction(user.phone, row["whatsapp_message_id"], emoji, bot_id=bot_id)
+    await discord.add_reaction(
+        user.phone, row["whatsapp_message_id"], emoji, bot_id=bot_id
+    )
     return True
 
 
@@ -434,7 +495,12 @@ async def _check_outbound_oob(
 ) -> dict[str, Any]:
     hook = hooks.check_oob
     if hook is None:
-        return {"verdict": "ok", "reason": "OOB hook disabled", "suggested_rewrite": None, "checker_failed": False}
+        return {
+            "verdict": "ok",
+            "reason": "OOB hook disabled",
+            "suggested_rewrite": None,
+            "checker_failed": False,
+        }
     try:
         verdict = await hook(
             pool,
@@ -446,7 +512,9 @@ async def _check_outbound_oob(
         )
     except TypeError:
         try:
-            verdict = await hook(pool, content, recipient_id, protected_owner_ids=protected_owner_ids)
+            verdict = await hook(
+                pool, content, recipient_id, protected_owner_ids=protected_owner_ids
+            )
         except TypeError:
             try:
                 verdict = await hook(pool, content, recipient_id)
@@ -469,19 +537,35 @@ async def _resolve_outbound_text(
     *,
     scope: InboundScope,
 ) -> str | None:
-    verdict = await _check_outbound_oob(pool, content, user.id, protected_owner_ids, scope=scope)
+    verdict = await _check_outbound_oob(
+        pool, content, user.id, protected_owner_ids, scope=scope
+    )
     if verdict["verdict"] == "ok":
         if verdict.get("checker_failed"):
-            await _append_reasoning(pool, turn_id, f"OOB checker failed open before send: {verdict['reason']}")
+            await _append_reasoning(
+                pool,
+                turn_id,
+                f"OOB checker failed open before send: {verdict['reason']}",
+            )
         return content
     if verdict["verdict"] == "block":
-        await _append_reasoning(pool, turn_id, f"Outbound blocked before send by OOB checker: {verdict['reason']}")
+        await _append_reasoning(
+            pool,
+            turn_id,
+            f"Outbound blocked before send by OOB checker: {verdict['reason']}",
+        )
         return None
     suggested = (verdict.get("suggested_rewrite") or "").strip()
     if not suggested:
-        await _append_reasoning(pool, turn_id, f"Outbound rewrite requested but no rewrite was supplied: {verdict['reason']}")
+        await _append_reasoning(
+            pool,
+            turn_id,
+            f"Outbound rewrite requested but no rewrite was supplied: {verdict['reason']}",
+        )
         return None
-    second = await _check_outbound_oob(pool, suggested, user.id, protected_owner_ids, scope=scope)
+    second = await _check_outbound_oob(
+        pool, suggested, user.id, protected_owner_ids, scope=scope
+    )
     if second["verdict"] != "ok":
         await _append_reasoning(
             pool,
@@ -489,7 +573,11 @@ async def _resolve_outbound_text(
             f"Outbound rewrite was not sendable: first={verdict['reason']} second={second['reason']}",
         )
         return None
-    await _append_reasoning(pool, turn_id, f"Outbound rewritten by OOB checker before send: {verdict['reason']}")
+    await _append_reasoning(
+        pool,
+        turn_id,
+        f"Outbound rewritten by OOB checker before send: {verdict['reason']}",
+    )
     return suggested
 
 
@@ -546,7 +634,9 @@ async def _complete_turn(
     reasoning: str,
 ) -> None:
     duration_ms = max(0, int((datetime.now(UTC) - started_at).total_seconds() * 1000))
-    existing = await pool.fetchval("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", turn_id)
+    existing = await pool.fetchval(
+        "SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", turn_id
+    )
     note = f"\n{reasoning}" if reasoning else ""
     updated_reasoning = f"{existing or ''}{note}"
     await pool.execute(
@@ -572,11 +662,16 @@ async def _complete_turn(
         turn_id,
         "turn.completed",
         duration_ms=duration_ms,
-        metadata={"final_output_message_id": final_output_message_id, "tool_call_count": tool_call_count},
+        metadata={
+            "final_output_message_id": final_output_message_id,
+            "tool_call_count": tool_call_count,
+        },
     )
 
 
-async def _record_turn_final_output(pool: Any, turn_id: UUID, final_output_message_id: UUID) -> None:
+async def _record_turn_final_output(
+    pool: Any, turn_id: UUID, final_output_message_id: UUID
+) -> None:
     await pool.execute(
         """
         UPDATE bot_turns
@@ -591,7 +686,9 @@ async def _record_turn_final_output(pool: Any, turn_id: UUID, final_output_messa
 async def _fail_turn(pool: Any, turn_id: UUID | None, failure_reason: str) -> None:
     if turn_id is None:
         return
-    await pool.execute("UPDATE bot_turns SET failure_reason=$1 WHERE id=$2", failure_reason, turn_id)
+    await pool.execute(
+        "UPDATE bot_turns SET failure_reason=$1 WHERE id=$2", failure_reason, turn_id
+    )
     await record_turn_event(
         pool,
         turn_id,
@@ -601,7 +698,14 @@ async def _fail_turn(pool: Any, turn_id: UUID | None, failure_reason: str) -> No
     )
 
 
-async def _defer_for_text_cap(pool: Any, user: User, message_ids: list[UUID], *, bot_id: str | None = None, topic_id: UUID | None = None) -> bool:
+async def _defer_for_text_cap(
+    pool: Any,
+    user: User,
+    message_ids: list[UUID],
+    *,
+    bot_id: str | None = None,
+    topic_id: UUID | None = None,
+) -> bool:
     if message_ids:
         await pool.execute(
             "UPDATE messages SET processing_state='deferred' WHERE id = ANY($1)",
@@ -684,18 +788,24 @@ STEP_ITERATION_CAPS = {
 
 
 def _allowed_tools_for_step(ctx: TurnContext) -> set[str]:
-    allowed = set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | {"update_turn_plan"}
+    allowed = set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | {
+        "update_turn_plan"
+    }
     if ctx.current_step == "respond" and not ctx.incremental_sending_enabled:
         allowed.discard("send_message_part")
     return allowed
 
 
-def _sent_summary(delivered_parts: list[str], assistant_text: str, reaction_emoji: str | None) -> str:
+def _sent_summary(
+    delivered_parts: list[str], assistant_text: str, reaction_emoji: str | None
+) -> str:
     if delivered_parts:
         return (
             f"You actually sent {len(delivered_parts)} message"
             f"{'' if len(delivered_parts) == 1 else 's'}:\n"
-            + "\n\n".join(f"{idx + 1}. {content}" for idx, content in enumerate(delivered_parts))
+            + "\n\n".join(
+                f"{idx + 1}. {content}" for idx, content in enumerate(delivered_parts)
+            )
         )
     return f"You sent: {f'[reaction {reaction_emoji}]' if reaction_emoji else (assistant_text or '[silence]')}"
 
@@ -703,7 +813,9 @@ def _sent_summary(delivered_parts: list[str], assistant_text: str, reaction_emoj
 def _build_hot_context_signals(hot_context: Any) -> dict[str, Any]:
     return {
         "recent_message_count": len(getattr(hot_context, "recent_messages", []) or []),
-        "open_watch_item_count": len(getattr(hot_context, "open_watch_items", []) or []),
+        "open_watch_item_count": len(
+            getattr(hot_context, "open_watch_items", []) or []
+        ),
         "active_oob_count": len(getattr(hot_context, "active_oob", []) or []),
     }
 
@@ -726,9 +838,13 @@ async def _run_agentic(
 
     settings = get_settings()
     bot_spec = get_bot_spec(scope.bot_id)
-    primary_topic_id = scope.topic_id or await primary_topic_id_for(active_pool, bot_spec)
+    primary_topic_id = scope.topic_id or await primary_topic_id_for(
+        active_pool, bot_spec
+    )
     selected_prompt_version = prompt_version or settings.system_prompt_version
-    send_typing_indicator = not bool(trigger_metadata and trigger_metadata.get("pacing"))
+    send_typing_indicator = not bool(
+        trigger_metadata and trigger_metadata.get("pacing")
+    )
     turn_id: UUID | None = None
     started_at = datetime.now(UTC)
     responded_to_user = False
@@ -736,25 +852,65 @@ async def _run_agentic(
         if bot_spec.participants_shape == "solo":
             partner = None
             hot_context = await build_hot_context_solo(
-                active_pool, user, triggering_message_ids, trigger_metadata,
-                primary_topic_id=primary_topic_id, bot_id=scope.bot_id,
-                allow_cross_topic_peek=getattr(bot_spec.read_scopes, 'allow_cross_topic_peek', False),
+                active_pool,
+                user,
+                triggering_message_ids,
+                trigger_metadata,
+                primary_topic_id=primary_topic_id,
+                bot_id=scope.bot_id,
+                allow_cross_topic_peek=getattr(
+                    bot_spec.read_scopes, "allow_cross_topic_peek", False
+                ),
             )
             rendered_hot_context = render_hot_context_solo(hot_context)
         else:
             partner = await partner_of(active_pool, user)
             hot_context = await build_hot_context(
-                active_pool, user, partner, triggering_message_ids, trigger_metadata,
+                active_pool,
+                user,
+                partner,
+                triggering_message_ids,
+                trigger_metadata,
                 primary_topic_id=primary_topic_id,
-                allow_cross_topic_peek=getattr(bot_spec.read_scopes, 'allow_cross_topic_peek', False),
-                allow_cross_topic_status_injection=getattr(bot_spec.read_scopes, 'allow_cross_topic_status_injection', False),
+                allow_cross_topic_peek=getattr(
+                    bot_spec.read_scopes, "allow_cross_topic_peek", False
+                ),
+                allow_cross_topic_status_injection=getattr(
+                    bot_spec.read_scopes, "allow_cross_topic_status_injection", False
+                ),
             )
             rendered_hot_context = render_hot_context(hot_context)
+        current_user_partner_share = await get_partner_share(
+            active_pool,
+            user_id=user.id,
+            bot_id=scope.bot_id,
+        )
+        partner_partner_share = (
+            await get_partner_share(
+                active_pool, user_id=partner.id, bot_id=scope.bot_id
+            )
+            if partner is not None
+            else None
+        )
+        hot_context_current_user = getattr(hot_context, "current_user", {}) or {}
+        hot_context_partner_user = getattr(hot_context, "partner_user", {}) or {}
+        current_user_partner_sharing_state = hot_context_current_user.get(
+            "partner_sharing_state"
+        )
+        partner_partner_sharing_state = (
+            hot_context_partner_user.get("partner_sharing_state")
+            if partner is not None
+            else None
+        )
         system_prompt = bot_spec.render_system_prompt(
             assistant_name=settings.assistant_name,
             user=user,
             partner=partner,
             prompt_version=selected_prompt_version,
+            current_user_partner_share=current_user_partner_share,
+            partner_partner_share=partner_partner_share,
+            current_user_partner_sharing_state=current_user_partner_sharing_state,
+            partner_partner_sharing_state=partner_partner_sharing_state,
         )
         prompt_snapshot = f"{system_prompt}\n\n{rendered_hot_context}"
         bot_spec_version = hashlib.sha1(repr(bot_spec).encode()).hexdigest()[:12]
@@ -776,7 +932,9 @@ async def _run_agentic(
             turn_id,
             "turn.opened",
             metadata={
-                "triggered_by_message_id": triggering_message_ids[0] if triggering_message_ids else None,
+                "triggered_by_message_id": (
+                    triggering_message_ids[0] if triggering_message_ids else None
+                ),
                 "triggering_message_count": len(triggering_message_ids),
                 "user_in_context": user.id,
                 "model_version": settings.conversational_model,
@@ -784,13 +942,17 @@ async def _run_agentic(
                 "bot_id": scope.bot_id,
                 "topic_id": str(primary_topic_id) if primary_topic_id else None,
                 "channel_id": scope.channel_id,
-                "binding_id": str(scope.binding_id) if scope.binding_id is not None else None,
+                "binding_id": (
+                    str(scope.binding_id) if scope.binding_id is not None else None
+                ),
                 "dyad_id": str(scope.dyad_id) if scope.dyad_id is not None else None,
                 "transport": scope.transport,
             },
         )
         charge = _trigger_charge(hot_context)
-        explicit_partner_alert_requested = _explicit_partner_alert_requested(hot_context)
+        explicit_partner_alert_requested = _explicit_partner_alert_requested(
+            hot_context
+        )
         hot_context_signals = _build_hot_context_signals(hot_context)
         skeleton_name = pick_default_skeleton(
             trigger_metadata=hot_context.trigger_metadata,
@@ -875,7 +1037,12 @@ async def _run_agentic(
                     "step.failed",
                     step=ctx.current_step,
                     severity="error",
-                    duration_ms=max(0, int((datetime.now(UTC) - step_started_at).total_seconds() * 1000)),
+                    duration_ms=max(
+                        0,
+                        int(
+                            (datetime.now(UTC) - step_started_at).total_seconds() * 1000
+                        ),
+                    ),
                     metadata={"exception_type": type(exc).__name__},
                 )
                 raise
@@ -884,8 +1051,13 @@ async def _run_agentic(
                 turn_id,
                 "step.completed",
                 step=ctx.current_step,
-                duration_ms=max(0, int((datetime.now(UTC) - step_started_at).total_seconds() * 1000)),
-                metadata={"tool_call_count": step_tool_count, "assistant_text_present": bool(step_text)},
+                duration_ms=max(
+                    0, int((datetime.now(UTC) - step_started_at).total_seconds() * 1000)
+                ),
+                metadata={
+                    "tool_call_count": step_tool_count,
+                    "assistant_text_present": bool(step_text),
+                },
             )
             tool_call_count += step_tool_count
 
@@ -898,7 +1070,11 @@ async def _run_agentic(
                     )
 
                 sent_parts = ctx.sent_message_parts or []
-                final_output_message_id = sent_parts[-1]["message_id"] if sent_parts else final_output_message_id
+                final_output_message_id = (
+                    sent_parts[-1]["message_id"]
+                    if sent_parts
+                    else final_output_message_id
+                )
                 responded_to_user = responded_to_user or bool(sent_parts)
                 if sent_parts and assistant_text:
                     await _append_reasoning(
@@ -909,10 +1085,22 @@ async def _run_agentic(
                     assistant_text = ""
                 elif assistant_text:
                     assistant_text = clean_user_facing_text(assistant_text)
-                    reaction_emoji, assistant_text = _extract_reaction_directive(assistant_text)
+                    reaction_emoji, assistant_text = _extract_reaction_directive(
+                        assistant_text
+                    )
                     if reaction_emoji is not None:
-                        if await _react_to_triggering_message(active_pool, user, triggering_message_ids, reaction_emoji, bot_id=scope.bot_id):
-                            await _append_reasoning(active_pool, turn_id, f"Reacted to triggering message with {reaction_emoji}.")
+                        if await _react_to_triggering_message(
+                            active_pool,
+                            user,
+                            triggering_message_ids,
+                            reaction_emoji,
+                            bot_id=scope.bot_id,
+                        ):
+                            await _append_reasoning(
+                                active_pool,
+                                turn_id,
+                                f"Reacted to triggering message with {reaction_emoji}.",
+                            )
                             await claim_onboarding_welcome(active_pool, user.id)
                             responded_to_user = True
                     if assistant_text:
@@ -963,9 +1151,16 @@ async def _run_agentic(
                                 assistant_text = ""
                             else:
 
-                                async def before_final_provider_send(text: str = sendable_text) -> None:
-                                    if before_paced_send is not None and not send_typing_indicator:
-                                        await before_paced_send(text, send_kind="final", part_index=None)
+                                async def before_final_provider_send(
+                                    text: str = sendable_text,
+                                ) -> None:
+                                    if (
+                                        before_paced_send is not None
+                                        and not send_typing_indicator
+                                    ):
+                                        await before_paced_send(
+                                            text, send_kind="final", part_index=None
+                                        )
                                     if await _newer_inbound_exists(
                                         active_pool,
                                         user,
@@ -986,7 +1181,8 @@ async def _run_agentic(
                                         scope=scope,
                                         before_provider_send=(
                                             before_final_provider_send
-                                            if before_paced_send is not None and not send_typing_indicator
+                                            if before_paced_send is not None
+                                            and not send_typing_indicator
                                             else None
                                         ),
                                     )
@@ -1004,18 +1200,25 @@ async def _run_agentic(
                                         severity="warning",
                                         actor="delivery",
                                         message="Final outbound skipped because a newer inbound arrived during paced send.",
-                                        metadata={"reason": "newer_inbound_during_send"},
+                                        metadata={
+                                            "reason": "newer_inbound_during_send"
+                                        },
                                     )
                                     assistant_text = ""
                                 else:
-                                    await _record_turn_final_output(active_pool, turn_id, final_output_message_id)
+                                    await _record_turn_final_output(
+                                        active_pool, turn_id, final_output_message_id
+                                    )
                                     await record_turn_event(
                                         active_pool,
                                         turn_id,
                                         "outbound.sent",
                                         step=ctx.current_step,
                                         actor="delivery",
-                                        metadata={"message_id": final_output_message_id, "send_kind": "final"},
+                                        metadata={
+                                            "message_id": final_output_message_id,
+                                            "send_kind": "final",
+                                        },
                                     )
                                     await claim_onboarding_welcome(active_pool, user.id)
                                     assistant_text = sendable_text
@@ -1023,18 +1226,33 @@ async def _run_agentic(
                         elif sendable_text:
                             assistant_text = sendable_text
                 elif charge in {"charged", "crisis"}:
-                    await _append_reasoning(active_pool, turn_id, "silence; charged trigger but no justification produced")
-                    logger.warning("charged/crisis trigger produced silence without model justification turn_id=%s", turn_id,
-                                   extra=obs_fields(ctx))
+                    await _append_reasoning(
+                        active_pool,
+                        turn_id,
+                        "silence; charged trigger but no justification produced",
+                    )
+                    logger.warning(
+                        "charged/crisis trigger produced silence without model justification turn_id=%s",
+                        turn_id,
+                        extra=obs_fields(ctx),
+                    )
 
                 respond_text = assistant_text
-                delivered_parts = [part["content"] for part in (ctx.sent_message_parts or [])]
+                delivered_parts = [
+                    part["content"] for part in (ctx.sent_message_parts or [])
+                ]
                 if not delivered_parts and turn_id is not None:
                     delivered_parts = await sent_contents_for_turn(active_pool, turn_id)
-                sent_summary_for_record = _sent_summary(delivered_parts, respond_text, reaction_emoji)
+                sent_summary_for_record = _sent_summary(
+                    delivered_parts, respond_text, reaction_emoji
+                )
 
             if step_text:
-                reasoning_parts.append(_collect_reasoning(messages, step_text if ctx.current_step == "respond" else ""))
+                reasoning_parts.append(
+                    _collect_reasoning(
+                        messages, step_text if ctx.current_step == "respond" else ""
+                    )
+                )
 
             previous_step = ctx.current_step
             next_step = turn_plan.advance()
@@ -1042,14 +1260,22 @@ async def _run_agentic(
                 messages.append(
                     bot_spec.build_step_transition_message(
                         plan=turn_plan,
-                        sent_summary=sent_summary_for_record if next_step in {"record", "schedule"} else None,
+                        sent_summary=(
+                            sent_summary_for_record
+                            if next_step in {"record", "schedule"}
+                            else None
+                        ),
                     )
                 )
             if previous_step == next_step:
-                raise BoundedLoopExceeded(f"turn plan did not advance from step {previous_step}")
+                raise BoundedLoopExceeded(
+                    f"turn plan did not advance from step {previous_step}"
+                )
 
         reasoning = "\n".join(part for part in reasoning_parts if part)
-        executed_plan = f"Executed turn plan ({turn_plan.skeleton_name}): {turn_plan.trace()}"
+        executed_plan = (
+            f"Executed turn plan ({turn_plan.skeleton_name}): {turn_plan.trace()}"
+        )
         reasoning = "\n".join(part for part in (reasoning, executed_plan) if part)
         await _complete_turn(
             active_pool,
@@ -1061,14 +1287,24 @@ async def _run_agentic(
         )
     except SpendCapExceeded:
         if turn_id is not None:
-            scheduled = await _defer_for_text_cap(active_pool, user, triggering_message_ids, bot_id=scope.bot_id, topic_id=primary_topic_id)
+            scheduled = await _defer_for_text_cap(
+                active_pool,
+                user,
+                triggering_message_ids,
+                bot_id=scope.bot_id,
+                topic_id=primary_topic_id,
+            )
             final_output_message_id = None
             if scheduled:
                 fallback_text = "I'm running into limits today, will catch up tomorrow."
 
-                async def before_fallback_provider_send(text: str = fallback_text) -> None:
+                async def before_fallback_provider_send(
+                    text: str = fallback_text,
+                ) -> None:
                     if before_paced_send is not None and not send_typing_indicator:
-                        await before_paced_send(text, send_kind="final", part_index=None)
+                        await before_paced_send(
+                            text, send_kind="final", part_index=None
+                        )
                     if await _newer_inbound_exists(
                         active_pool,
                         user,
@@ -1101,7 +1337,8 @@ async def _run_agentic(
                             scope=scope,
                             before_provider_send=(
                                 before_fallback_provider_send
-                                if before_paced_send is not None and not send_typing_indicator
+                                if before_paced_send is not None
+                                and not send_typing_indicator
                                 else None
                             ),
                         )
@@ -1125,14 +1362,24 @@ async def _run_agentic(
         failure_reason = getattr(exc, "failure_reason", "crashed")
         await _fail_turn(active_pool, turn_id, failure_reason)
         if responded_to_user:
-            logger.warning("agentic turn failed after outbound was sent: %s", exc, extra=obs_fields(ctx))
+            logger.warning(
+                "agentic turn failed after outbound was sent: %s",
+                exc,
+                extra=obs_fields(ctx),
+            )
             return
         raise
 
 
-async def run_agentic_turn(triggering_message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
+async def run_agentic_turn(
+    triggering_message_ids: list[UUID], user: User, *, scope: InboundScope
+) -> None:
     if not triggering_message_ids:
-        logger.warning("run_agentic_turn called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
+        logger.warning(
+            "run_agentic_turn called without triggering messages for user_id=%s",
+            user.id,
+            extra={"user_id": str(user.id)},
+        )
         return
     await _run_agentic(triggering_message_ids, user, scope=scope)
 
@@ -1147,18 +1394,26 @@ async def run_agentic_turn_with_metadata(
     scope: InboundScope,
 ) -> None:
     if not triggering_message_ids:
-        logger.warning("run_agentic_turn_with_metadata called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
+        logger.warning(
+            "run_agentic_turn_with_metadata called without triggering messages for user_id=%s",
+            user.id,
+            extra={"user_id": str(user.id)},
+        )
         return
     await _run_agentic(
         triggering_message_ids,
         user,
         scope=scope,
-        trigger_metadata=_trigger_metadata_with_pacing(trigger_metadata, pacing_context),
+        trigger_metadata=_trigger_metadata_with_pacing(
+            trigger_metadata, pacing_context
+        ),
         before_paced_send=before_paced_send,
     )
 
 
-async def run_agentic_job(user: User, trigger_metadata: dict[str, Any], *, scope: InboundScope) -> None:
+async def run_agentic_job(
+    user: User, trigger_metadata: dict[str, Any], *, scope: InboundScope
+) -> None:
     await _run_agentic([], user, scope=scope, trigger_metadata=trigger_metadata)
 
 
@@ -1171,9 +1426,19 @@ async def run_agentic_turn_with_pool(
     prompt_version: str,
 ) -> None:
     if not triggering_message_ids:
-        logger.warning("run_agentic_turn_with_pool called without triggering messages for user_id=%s", user.id, extra={"user_id": str(user.id)})
+        logger.warning(
+            "run_agentic_turn_with_pool called without triggering messages for user_id=%s",
+            user.id,
+            extra={"user_id": str(user.id)},
+        )
         return
-    await _run_agentic(triggering_message_ids, user, scope=scope, pool=pool, prompt_version=prompt_version)
+    await _run_agentic(
+        triggering_message_ids,
+        user,
+        scope=scope,
+        pool=pool,
+        prompt_version=prompt_version,
+    )
 
 
 async def run_agentic_job_with_pool(
@@ -1184,4 +1449,11 @@ async def run_agentic_job_with_pool(
     scope: InboundScope,
     prompt_version: str,
 ) -> None:
-    await _run_agentic([], user, scope=scope, trigger_metadata=trigger_metadata, pool=pool, prompt_version=prompt_version)
+    await _run_agentic(
+        [],
+        user,
+        scope=scope,
+        trigger_metadata=trigger_metadata,
+        pool=pool,
+        prompt_version=prompt_version,
+    )

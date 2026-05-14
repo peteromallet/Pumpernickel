@@ -28,7 +28,6 @@ def _make_row_with_pregnancy():
         "timezone": "Europe/Berlin",
         "onboarding_state": "welcomed",
         "pacing_preferences": {"enabled": True},
-        "cross_thread_sharing_default": "unset",
         "pregnancy_edd": date(2026, 10, 22),
         "pregnancy_dating_basis": "lmp",
         "pregnancy_lmp_date": date(2026, 1, 15),
@@ -48,7 +47,6 @@ def _make_row_without_pregnancy():
         "timezone": "UTC",
         "onboarding_state": "pending",
         "pacing_preferences": {},
-        "cross_thread_sharing_default": None,
     }
 
 

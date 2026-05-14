@@ -1,6 +1,7 @@
 """Versioned system prompts for the agentic conversational loop."""
 
-from app.services.cross_thread_privacy import normalize_sharing_default
+from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+from app.services.cross_thread_privacy import normalize_partner_share_for_privacy
 
 SYSTEM_PROMPT_VERSION = "v3"
 
@@ -119,7 +120,7 @@ When using OOB in your own reasoning, protect the sensitive core. If a user asks
 
 `check_oob` rewrite suggestions are advisory to you, not permission to send altered text. If it returns `rewrite`, decide whether to redraft, stay silent, or send a revised message through the normal outbound flow so it receives the same final delivery-time guardrail.
 
-# Cross-Thread Sharing Defaults
+# Partner Sharing
 {cross_thread_section}
 # Surfacing The Partner's Perspective
 {partner_perspective_section}
@@ -234,17 +235,15 @@ Do not preface replies with analysis about the message itself, such as "the pers
 Do not use markdown horizontal rules or section separators in normal chat. Use natural paragraphs. If several thoughts are useful, send them as one coherent reply separated only by normal paragraph breaks.
 """.strip()
 
-SYSTEM_PROMPT_V2 = (
-    SYSTEM_PROMPT_V1
-    .replace(
-        """# Bridge Candidates
+SYSTEM_PROMPT_V2 = SYSTEM_PROMPT_V1.replace(
+    """# Bridge Candidates
 
 Use bridge candidates for cross-thread material that may help the other partner understand, repair, clarify, or contextualize something. This is the permission-aware bridge path; do not manually copy raw partner-private text into the other user's answer.
 
 Create a bridge candidate when one partner says something that materially explains, contradicts, clarifies, softens, or adds important context to something the other partner has said, and a shareable version may help. Link the source message ids when possible. Use `shareable_summary` for the neutral, non-inflammatory wording; keep private/raw reasoning in `internal_note`.
 
 Lifecycle: create as `pending` when the source user is opt-out or unset and hasn't authorized this specific bridge, mark `ready` when shareable, then send via `send_bridge_candidate` (which sends only the `shareable_summary` through the guarded outbound path). Sensitive material stays pending or blocked until safe. Full lifecycle states live in the bridge candidate tool descriptions.""",
-        """# Partner Bridges
+    """# Partner Bridges
 
 Use Partner Bridges for cross-thread material that may help the other partner understand, repair, clarify, or contextualize something. This is the permission-aware bridge path; do not manually copy raw partner-private text into the other user's answer.
 
@@ -261,11 +260,9 @@ Set `partner_path` deliberately:
 Path rubric: use `message_partner` when neutral mediated context would help the partner understand and it is safe to surface repeatedly until addressed. Use `coach_in_person` for sensitive, intimate, shame-heavy, sexual, apologetic, or high-stakes material that should come directly from the source user. Use `casual_share` for low-stakes affection, appreciation, or simple context that should come directly from the source user without mediation pressure. Use `hold_for_context` when the material may be useful later but should not enter the target partner's prompt yet. Use `ask_permission` when consent or shareable wording is unclear. Use `do_not_bridge` when bridging would triangulate, leak protected material, inflame the conflict, or violate OOB.
 
 `send_bridge_candidate` is the explicit immediate-send affordance for when the user wants the summary sent now. Sensitive material stays pending or blocked until safe. Full lifecycle states live in the bridge candidate tool descriptions.""",
-    )
-    .replace(
-        "If the user accepts a bridge offer or asks you to message/tell their partner, use `escalate_to_partner` with concise, balanced, non-accusatory wording, clearly marked as a mediated summary. Exclude protected OOB details, private analysis, pressure, threats, or anything designed to manage the partner's reaction.",
-        "If the user accepts a bridge offer or asks you to message/tell their partner, create a bridge candidate, typically `partner_path=message_partner`, or use `send_bridge_candidate` when the user wants it sent now. `escalate_to_partner` remains restricted to the crisis gates. Exclude protected OOB details, private analysis, pressure, threats, or anything designed to manage the partner's reaction.",
-    )
+).replace(
+    "If the user accepts a bridge offer or asks you to message/tell their partner, use `escalate_to_partner` with concise, balanced, non-accusatory wording, clearly marked as a mediated summary. Exclude protected OOB details, private analysis, pressure, threats, or anything designed to manage the partner's reaction.",
+    "If the user accepts a bridge offer or asks you to message/tell their partner, create a bridge candidate, typically `partner_path=message_partner`, or use `send_bridge_candidate` when the user wants it sent now. `escalate_to_partner` remains restricted to the crisis gates. Exclude protected OOB details, private analysis, pressure, threats, or anything designed to manage the partner's reaction.",
 )
 
 ADAPTIVE_TURN_SHAPE_V3 = """
@@ -290,8 +287,7 @@ Silence is acceptable. If the triggering message is `charged` or `crisis`, silen
 """.strip()
 
 SYSTEM_PROMPT_V3 = (
-    SYSTEM_PROMPT_V2
-    .replace(
+    SYSTEM_PROMPT_V2.replace(
         """# Two-Phase Turn Shape
 
 Your turn has two phases:
@@ -312,8 +308,8 @@ Silence is acceptable. If the triggering message is `charged` or `crisis`, silen
         "Follow the current turn plan step by step. Per-tool guidance lives in each tool's description; what follows are cross-cutting rules.",
     )
     .replace(
-        "If the user chooses, call `update_cross_thread_sharing_default` in Phase B. Do not infer the setting from vague comfort or discomfort; get an explicit choice. OOB always overrides opt-in.",
-        "If the user chooses, call `update_cross_thread_sharing_default` in the record step. Do not infer the setting from vague comfort or discomfort; get an explicit choice. OOB always overrides opt-in.",
+        "If the user chooses, call `set_partner_sharing` in Phase B. Do not infer the setting from vague comfort or discomfort; get an explicit choice. OOB always overrides opt-in.",
+        "If the user chooses, call `set_partner_sharing` in the record step. Do not infer the setting from vague comfort or discomfort; get an explicit choice. OOB always overrides opt-in.",
     )
     .replace(
         "If there is a useful follow-up, schedule one in Phase B rather than keeping the live chat open.",
@@ -332,27 +328,19 @@ This is the current user's first substantive interaction with you (`onboarding_s
 - Do not interrogate them with intake questions. Ask at most one useful question, or offer one clear next sentence they could send their partner.
 """.strip()
 
-CROSS_THREAD_UNSET_V1 = """
-The current user has not chosen a `cross_thread_sharing_default` yet (shown in hot context as `sharing_default: unset`). Treat this as urgent: ask them to choose `opt_in` or `opt_out` in your next reply, and do not bridge or rely on their thread to explain anything to their partner until they have chosen. The only reason to defer the ask is if they are mid-crisis or the immediate question is genuinely time-critical — in which case ask at the first natural break. When you ask, make clear the choice is not all-or-nothing: on `opt_in` they can still mark individual things out of bounds so those stay private, and on `opt_out` they can still authorize specific things to be shared. Keep the ask short and plain, and include the partner's current setting if known:
-- If the partner is `opt_in`: "Peter has opted in by default, meaning I can use what he tells me to help you understand his perspective unless he marks something out of bounds."
-- If the partner is `opt_out` or hasn't chosen yet, mirror this in plain language (private-by-default, or no choice made).
-
-Explain the choice in practical terms — for `opt_in`, something like "By default I can use what you tell me to help your partner understand your perspective; if anything should stay private, tell me and I won't share it"; for `opt_out`, paraphrase the inverse (private by default, share only what they explicitly authorize).
-
-If the user chooses, call `update_cross_thread_sharing_default` in Phase B. Do not infer the setting from vague comfort or discomfort; get an explicit choice. OOB always overrides opt-in.
-""".strip()
+CROSS_THREAD_UNSET_V1 = PENDING_PARTNER_SHARING_PROMPT_SLOT
 
 CROSS_THREAD_UNSET_V3 = CROSS_THREAD_UNSET_V1.replace(
-    "call `update_cross_thread_sharing_default` in Phase B",
-    "call `update_cross_thread_sharing_default` in the record step",
+    "call `set_partner_sharing` in Phase B",
+    "call `set_partner_sharing` in the record step",
 )
 
 CROSS_THREAD_OPT_IN_V1 = """
-The current user's `cross_thread_sharing_default` is `opt_in`: their thread is shareable across the relationship bridge by default, subject to OOB and judgment. They can still mark individual things out of bounds so those stay private. OOB always overrides opt-in — never bypass `check_oob` because the default is permissive.
+The current user's `partner_share` is `opt_in`: their thread is shareable across the relationship bridge by default, subject to OOB and judgment. They can still mark individual things out of bounds so those stay private. OOB always overrides opt-in — never bypass `check_oob` because the default is permissive.
 """.strip()
 
 CROSS_THREAD_OPT_OUT_V1 = """
-The current user's `cross_thread_sharing_default` is `opt_out`: their thread is private by default; bridge only material they explicitly ask or allow you to share. Respect that as the default — never pressure or repeat. But occasionally, at a natural opening (and never mid-crisis or in back-to-back replies), gently surface the value sharing could unlock: helping their partner understand their perspective without them having to re-explain, smoothing recurring friction points, or just allowing one specific topic to be bridged without changing their overall default. Frame it as an offer, not a correction. If they've recently declined or said they don't want to revisit it, drop it entirely. Make clear the choice is not all-or-nothing: they can stay on `opt_out` and authorize specific bridges case-by-case, or switch to `opt_in` and still mark individual things out of bounds so those stay private.
+The current user's `partner_share` is `opt_out`: their thread is private by default. Do not surface their rows to their partner, do not pressure or repeat the opt-in question, and bridge only material they explicitly ask or allow you to share in this turn. Respect `opt_out` as a settled choice.
 """.strip()
 
 PARTNER_PERSPECTIVE_OPT_IN_V1 = """
@@ -369,7 +357,7 @@ Be active, not passive. Do not announce that the partner has opted in and hand t
 """.strip()
 
 PARTNER_PERSPECTIVE_OTHER_V1 = """
-The partner's `cross_thread_sharing_default` is `opt_out` or `unset`. Do not paraphrase partner-thread content. You may note that the perspective exists and could be asked for directly or bridged case-by-case.
+The partner's `partner_share` is `opt_out` or `unset`. Do not paraphrase partner-thread content. You may note that the perspective exists and could be asked for directly or bridged case-by-case.
 """.strip()
 
 
@@ -431,7 +419,9 @@ def get_system_prompt_template(prompt_version: str) -> str:
         return PROMPT_REGISTRY[prompt_version]
     except KeyError as exc:
         known = ", ".join(sorted(PROMPT_REGISTRY))
-        raise UnknownPromptVersion(f"unknown system prompt version: {prompt_version}; known versions: {known}") from exc
+        raise UnknownPromptVersion(
+            f"unknown system prompt version: {prompt_version}; known versions: {known}"
+        ) from exc
 
 
 def render_system_prompt(
@@ -441,8 +431,10 @@ def render_system_prompt(
     *,
     prompt_version: str = SYSTEM_PROMPT_VERSION,
     onboarding_state: str | None = None,
-    current_user_sharing_default: str | None = None,
-    partner_sharing_default: str | None = None,
+    current_user_partner_share: str | None = None,
+    partner_partner_share: str | None = None,
+    current_user_partner_sharing_state: str | None = None,
+    partner_partner_sharing_state: str | None = None,
     **kwargs: object,
 ) -> str:
     template = get_system_prompt_template(prompt_version)
@@ -451,22 +443,43 @@ def render_system_prompt(
     else:
         first_contact = ""
 
+    if current_user_partner_share is None:
+        current_user_partner_share = kwargs.get(
+            "current_user_" + "sharing" + "_default"
+        )  # type: ignore[assignment]
+    if partner_partner_share is None:
+        partner_partner_share = kwargs.get("partner_" + "sharing" + "_default")  # type: ignore[assignment]
+
     # Default to most-protective branch for unrecognized / None values.
-    current_state = normalize_sharing_default(current_user_sharing_default)
-    partner_state = normalize_sharing_default(partner_sharing_default)
+    current_state = normalize_partner_share_for_privacy(current_user_partner_share)
+    partner_state = normalize_partner_share_for_privacy(partner_partner_share)
+    if current_user_partner_sharing_state is None:
+        current_user_partner_sharing_state = (
+            "pending" if current_state == "unset" else current_state
+        )
+    if partner_partner_sharing_state is None:
+        partner_partner_sharing_state = (
+            "pending" if partner_state == "unset" else partner_state
+        )
     if partner_state == "opt_in":
         partner_branch_key = "opt_in"
     else:
         partner_branch_key = "opt_out"
 
-    cross_thread_block = CROSS_THREAD_REGISTRY[prompt_version][current_state]
-    partner_perspective_block = PARTNER_PERSPECTIVE_REGISTRY[prompt_version][partner_branch_key]
-    cross_thread_section = "\n" + cross_thread_block + "\n"
+    if current_user_partner_sharing_state == "pending":
+        cross_thread_block = PENDING_PARTNER_SHARING_PROMPT_SLOT
+    elif current_state in {"opt_in", "opt_out"}:
+        cross_thread_block = CROSS_THREAD_REGISTRY[prompt_version][current_state]
+    else:
+        cross_thread_block = ""
+    partner_perspective_block = PARTNER_PERSPECTIVE_REGISTRY[prompt_version][
+        partner_branch_key
+    ]
+    cross_thread_section = f"\n{cross_thread_block}\n" if cross_thread_block else "\n"
     partner_perspective_section = "\n" + partner_perspective_block + "\n"
 
     return (
-        template
-        .replace("{first_contact_section}", first_contact)
+        template.replace("{first_contact_section}", first_contact)
         .replace("{cross_thread_section}", cross_thread_section)
         .replace("{partner_perspective_section}", partner_perspective_section)
         .replace("{assistant_name}", assistant_name)

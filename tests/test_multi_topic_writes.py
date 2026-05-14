@@ -52,17 +52,23 @@ def _make_ctx(
     tid = uuid4()
 
     # Ensure topic exists in FakePool
-    pool.topics.setdefault(topic_slug, {"id": tid, "slug": topic_slug, "display_name": topic_slug.title()})
+    pool.topics.setdefault(
+        topic_slug, {"id": tid, "slug": topic_slug, "display_name": topic_slug.title()}
+    )
 
     user = User(
-        id=user_id, name="testuser", phone="+155****4567",
+        id=user_id,
+        name="testuser",
+        phone="+155****4567",
         timezone="America/New_York",
-        cross_thread_sharing_default="opt_in", onboarding_state="welcomed",
+        onboarding_state="welcomed",
     )
     partner = User(
-        id=uuid4(), name="partner", phone="+155****6543",
+        id=uuid4(),
+        name="partner",
+        phone="+155****6543",
         timezone="America/New_York",
-        cross_thread_sharing_default="opt_in", onboarding_state="welcomed",
+        onboarding_state="welcomed",
     )
 
     ctx = TurnContext(
@@ -100,12 +106,18 @@ async def test_default_single_topic_produces_one_row_reason_null() -> None:
     """add_memory with no topic_slugs → 1 artifact_topics row, reason NULL."""
     pool = FakePool()
     career_id = uuid4()
-    pool.topics["career"] = {"id": career_id, "slug": "career", "display_name": "Career"}
+    pool.topics["career"] = {
+        "id": career_id,
+        "slug": "career",
+        "display_name": "Career",
+    }
     ctx = _make_ctx(pool, bot_id="coach", topic_slug="career")
 
     from tool_schemas import AddMemoryInput
 
-    args = AddMemoryInput(about_user_id=ctx.user.id, content="Test default single-topic")
+    args = AddMemoryInput(
+        about_user_id=ctx.user.id, content="Test default single-topic"
+    )
     pool.artifact_topics_rows.clear()
 
     result = await add_memory(ctx, args)
@@ -131,11 +143,21 @@ async def test_out_of_scope_slug_raises_not_silent_drop() -> None:
     pool = FakePool()
     career_id = uuid4()
     relationship_id = uuid4()
-    pool.topics["career"] = {"id": career_id, "slug": "career", "display_name": "Career"}
-    pool.topics["relationship"] = {"id": relationship_id, "slug": "relationship", "display_name": "Relationship"}
+    pool.topics["career"] = {
+        "id": career_id,
+        "slug": "career",
+        "display_name": "Career",
+    }
+    pool.topics["relationship"] = {
+        "id": relationship_id,
+        "slug": "relationship",
+        "display_name": "Relationship",
+    }
 
     coach_scopes = WriteScopes(topics={"career"})
-    ctx = _make_ctx(pool, bot_id="coach", topic_slug="career", write_scopes=coach_scopes)
+    ctx = _make_ctx(
+        pool, bot_id="coach", topic_slug="career", write_scopes=coach_scopes
+    )
     # Fix ctx.bot_spec.write_scopes too, so _assert_solo_about_user consistency
     ctx.bot_spec = BotSpec(
         bot_id="coach",
@@ -160,8 +182,11 @@ async def test_out_of_scope_slug_raises_not_silent_drop() -> None:
         await add_memory(ctx, args)
 
     err = str(exc_info.value)
-    assert "scope_denied" in err.lower() or "write_scope_denied" in err.lower() or "not in" in err.lower(), \
-        f"expected scope-denied error, got: {err}"
+    assert (
+        "scope_denied" in err.lower()
+        or "write_scope_denied" in err.lower()
+        or "not in" in err.lower()
+    ), f"expected scope-denied error, got: {err}"
 
 
 # ── Test 3: Cross-topic without reason raises ─────────────────────────────
@@ -174,11 +199,21 @@ async def test_cross_topic_without_reason_raises() -> None:
     pool = FakePool()
     career_id = uuid4()
     relationship_id = uuid4()
-    pool.topics["career"] = {"id": career_id, "slug": "career", "display_name": "Career"}
-    pool.topics["relationship"] = {"id": relationship_id, "slug": "relationship", "display_name": "Relationship"}
+    pool.topics["career"] = {
+        "id": career_id,
+        "slug": "career",
+        "display_name": "Career",
+    }
+    pool.topics["relationship"] = {
+        "id": relationship_id,
+        "slug": "relationship",
+        "display_name": "Relationship",
+    }
 
     all_scopes = WriteScopes(topics={"all"})
-    ctx = _make_ctx(pool, bot_id="mediator", topic_slug="relationship", write_scopes=all_scopes)
+    ctx = _make_ctx(
+        pool, bot_id="mediator", topic_slug="relationship", write_scopes=all_scopes
+    )
     ctx.bot_spec = BotSpec(
         bot_id="mediator",
         prompt_renderer=_dummy_renderer,
@@ -203,8 +238,7 @@ async def test_cross_topic_without_reason_raises() -> None:
         await add_memory(ctx, args)
 
     err = str(exc_info.value)
-    assert "reason" in err.lower(), \
-        f"expected reason-required error, got: {err}"
+    assert "reason" in err.lower(), f"expected reason-required error, got: {err}"
 
 
 # ── Test 4: Synthetic cross-topic success ─────────────────────────────────
@@ -217,11 +251,21 @@ async def test_cross_topic_success_writes_two_rows_with_reason() -> None:
     pool = FakePool()
     career_id = uuid4()
     relationship_id = uuid4()
-    pool.topics["career"] = {"id": career_id, "slug": "career", "display_name": "Career"}
-    pool.topics["relationship"] = {"id": relationship_id, "slug": "relationship", "display_name": "Relationship"}
+    pool.topics["career"] = {
+        "id": career_id,
+        "slug": "career",
+        "display_name": "Career",
+    }
+    pool.topics["relationship"] = {
+        "id": relationship_id,
+        "slug": "relationship",
+        "display_name": "Relationship",
+    }
 
     all_scopes = WriteScopes(topics={"all"})
-    ctx = _make_ctx(pool, bot_id="mediator", topic_slug="relationship", write_scopes=all_scopes)
+    ctx = _make_ctx(
+        pool, bot_id="mediator", topic_slug="relationship", write_scopes=all_scopes
+    )
     ctx.bot_spec = BotSpec(
         bot_id="mediator",
         prompt_renderer=_dummy_renderer,
@@ -269,11 +313,21 @@ async def test_coach_cannot_escalate_via_topic_slugs() -> None:
     pool = FakePool()
     career_id = uuid4()
     relationship_id = uuid4()
-    pool.topics["career"] = {"id": career_id, "slug": "career", "display_name": "Career"}
-    pool.topics["relationship"] = {"id": relationship_id, "slug": "relationship", "display_name": "Relationship"}
+    pool.topics["career"] = {
+        "id": career_id,
+        "slug": "career",
+        "display_name": "Career",
+    }
+    pool.topics["relationship"] = {
+        "id": relationship_id,
+        "slug": "relationship",
+        "display_name": "Relationship",
+    }
 
     coach_scopes = WriteScopes(topics={"career"})
-    ctx = _make_ctx(pool, bot_id="coach", topic_slug="career", write_scopes=coach_scopes)
+    ctx = _make_ctx(
+        pool, bot_id="coach", topic_slug="career", write_scopes=coach_scopes
+    )
     ctx.bot_spec = BotSpec(
         bot_id="coach",
         prompt_renderer=_dummy_renderer,
@@ -298,8 +352,11 @@ async def test_coach_cannot_escalate_via_topic_slugs() -> None:
         await add_memory(ctx, args)
 
     err = str(exc_info.value)
-    assert "scope_denied" in err.lower() or "write_scope_denied" in err.lower() or "not in" in err.lower(), \
-        f"expected scope-denied error, got: {err}"
+    assert (
+        "scope_denied" in err.lower()
+        or "write_scope_denied" in err.lower()
+        or "not in" in err.lower()
+    ), f"expected scope-denied error, got: {err}"
 
 
 # ── Test 6: create_bridge_candidate unchanged ─────────────────────────────
@@ -312,10 +369,12 @@ def test_create_bridge_candidate_model_unchanged() -> None:
 
     # Verify the model fields
     fields = CreateBridgeCandidateInput.model_fields
-    assert "topic_slugs" not in fields, \
-        "CreateBridgeCandidateInput must not have topic_slugs (single topic_id UUID column)"
-    assert "reason" not in fields, \
-        "CreateBridgeCandidateInput must not have reason (no artifact_topics linkage)"
+    assert (
+        "topic_slugs" not in fields
+    ), "CreateBridgeCandidateInput must not have topic_slugs (single topic_id UUID column)"
+    assert (
+        "reason" not in fields
+    ), "CreateBridgeCandidateInput must not have reason (no artifact_topics linkage)"
 
     # Verify required fields still present
     assert "source_user_id" in fields

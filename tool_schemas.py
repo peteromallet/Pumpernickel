@@ -16,7 +16,7 @@ from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -31,8 +31,12 @@ class TemporalReference(BaseModel):
     local_date: str
     local_time: str
     local_weekday: str
-    local_day_label: str = Field(description="today, yesterday, tomorrow, N days ago, or an ISO date.")
-    relative_to_now: str = Field(description="Human-relative age such as about 2 hours ago or in 3 days.")
+    local_day_label: str = Field(
+        description="today, yesterday, tomorrow, N days ago, or an ISO date."
+    )
+    relative_to_now: str = Field(
+        description="Human-relative age such as about 2 hours ago or in 3 days."
+    )
     display: str = Field(description="Compact primary label, e.g. today 21:03 Berlin.")
 
 
@@ -126,6 +130,11 @@ class FeedbackSentiment(str, Enum):
 
 
 class CrossThreadSharingDefault(str, Enum):
+    opt_in = "opt_in"
+    opt_out = "opt_out"
+
+
+class PartnerShare(str, Enum):
     opt_in = "opt_in"
     opt_out = "opt_out"
 
@@ -388,6 +397,8 @@ class MemoryRow(BaseModel):
     about_user_id: UUID | None
     content: str
     status: MemoryStatus
+    visibility: DistillationVisibility = DistillationVisibility.private
+    shareable_summary: str | None = None
     related_theme_ids: list[UUID]
     created_at: datetime
     last_referenced_at: datetime | None
@@ -520,9 +531,16 @@ class DistillationRow(DistillationEvidenceMixin):
     @model_validator(mode="after")
     def validate_distillation_row(self) -> "DistillationRow":
         if not _has_supporting_links(self):
-            raise ValueError("distillations must link to at least one supporting memory, observation, theme, or message")
-        if self.visibility == DistillationVisibility.dyad_shareable and not _has_distillation_shareable_summary(self):
-            raise ValueError("dyad_shareable distillations require a non-empty shareable_summary")
+            raise ValueError(
+                "distillations must link to at least one supporting memory, observation, theme, or message"
+            )
+        if (
+            self.visibility == DistillationVisibility.dyad_shareable
+            and not _has_distillation_shareable_summary(self)
+        ):
+            raise ValueError(
+                "dyad_shareable distillations require a non-empty shareable_summary"
+            )
         return self
 
 
@@ -562,7 +580,9 @@ class GetOOBInput(BaseModel):
 class OOBRow(BaseModel):
     id: UUID
     owner_id: UUID
-    protected_summary: str = Field(description="Safe, non-sensitive display text; never the raw protected core.")
+    protected_summary: str = Field(
+        description="Safe, non-sensitive display text; never the raw protected core."
+    )
     shareable_context: str | None
     severity: OOBSeverity
     status: OOBStatus
@@ -583,7 +603,9 @@ class GetOOBOutput(BaseModel):
 
 class SummarizeOOBTopicsInput(BaseModel):
     scope: Literal["own", "all"] = "own"
-    owner_id: UUID = Field(description="The partner whose active OOB topic categories should be summarized.")
+    owner_id: UUID = Field(
+        description="The partner whose active OOB topic categories should be summarized."
+    )
 
 
 class OOBTopicCluster(BaseModel):
@@ -726,20 +748,25 @@ class UpdateUserStyleNotesOutput(BaseModel):
     updated_at: datetime
 
 
-# --- update_cross_thread_sharing_default ---
+# --- set_partner_sharing ---
 
 
-class UpdateCrossThreadSharingDefaultInput(BaseModel):
-    user_id: UUID
-    default: CrossThreadSharingDefault = Field(
-        description="Whether this user's thread is shareable across the relationship bridge by default."
+class SetPartnerSharingInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    opt_in: bool = Field(
+        description="Whether this bot may share this user's safe, bot-specific dyad_shareable rows with their partner."
     )
-    reason: str = Field(description="The user's stated preference or short rationale. Logged for audit.")
+    reason: str | None = Field(
+        default=None,
+        description="Optional explicit user rationale or short note for audit. Do not infer a choice from vague comfort or discomfort.",
+    )
 
 
-class UpdateCrossThreadSharingDefaultOutput(BaseModel):
+class SetPartnerSharingOutput(BaseModel):
     user_id: UUID
-    default: CrossThreadSharingDefault
+    bot_id: str
+    partner_share: PartnerShare
     updated_at: datetime
 
 
@@ -845,9 +872,22 @@ class SendBridgeCandidateOutput(BaseModel):
 class AddMemoryInput(BaseModel):
     about_user_id: UUID | None  # None = couple-level
     content: str
+    visibility: DistillationVisibility = DistillationVisibility.private
+    shareable_summary: str | None = None
     related_theme_ids: list[UUID] = []
     topic_slugs: list[str] | None = None
     reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_memory(self) -> "AddMemoryInput":
+        if (
+            self.visibility == DistillationVisibility.dyad_shareable
+            and not _has_distillation_shareable_summary(self)
+        ):
+            raise ValueError(
+                "dyad_shareable memories require a non-empty shareable_summary"
+            )
+        return self
 
 
 class AddMemoryOutput(WriteCreated):
@@ -1003,9 +1043,16 @@ class AddDistillationInput(DistillationEvidenceMixin):
     @model_validator(mode="after")
     def validate_distillation(self) -> "AddDistillationInput":
         if not _has_supporting_links(self):
-            raise ValueError("distillations must link to at least one supporting memory, observation, theme, or message")
-        if self.visibility == DistillationVisibility.dyad_shareable and not _has_distillation_shareable_summary(self):
-            raise ValueError("dyad_shareable distillations require a non-empty shareable_summary")
+            raise ValueError(
+                "distillations must link to at least one supporting memory, observation, theme, or message"
+            )
+        if (
+            self.visibility == DistillationVisibility.dyad_shareable
+            and not _has_distillation_shareable_summary(self)
+        ):
+            raise ValueError(
+                "dyad_shareable distillations require a non-empty shareable_summary"
+            )
         return self
 
 
@@ -1038,10 +1085,17 @@ class UpdateDistillationInput(BaseModel):
             self.related_theme_ids,
             self.supporting_message_ids,
         )
-        if any(field is not None for field in evidence_fields) and not any(evidence_fields):
+        if any(field is not None for field in evidence_fields) and not any(
+            evidence_fields
+        ):
             raise ValueError("distillation updates cannot clear all supporting links")
-        if self.visibility == DistillationVisibility.dyad_shareable and not _has_distillation_shareable_summary(self):
-            raise ValueError("dyad_shareable distillations require a non-empty shareable_summary")
+        if (
+            self.visibility == DistillationVisibility.dyad_shareable
+            and not _has_distillation_shareable_summary(self)
+        ):
+            raise ValueError(
+                "dyad_shareable distillations require a non-empty shareable_summary"
+            )
         return self
 
 
@@ -1063,9 +1117,16 @@ class ReviseDistillationInput(DistillationEvidenceMixin):
     @model_validator(mode="after")
     def validate_revision(self) -> "ReviseDistillationInput":
         if not _has_supporting_links(self):
-            raise ValueError("distillation revisions must link to at least one supporting memory, observation, theme, or message")
-        if self.visibility == DistillationVisibility.dyad_shareable and not _has_distillation_shareable_summary(self):
-            raise ValueError("dyad_shareable distillations require a non-empty shareable_summary")
+            raise ValueError(
+                "distillation revisions must link to at least one supporting memory, observation, theme, or message"
+            )
+        if (
+            self.visibility == DistillationVisibility.dyad_shareable
+            and not _has_distillation_shareable_summary(self)
+        ):
+            raise ValueError(
+                "dyad_shareable distillations require a non-empty shareable_summary"
+            )
         return self
 
 
@@ -1185,8 +1246,12 @@ class ScheduleDelay(BaseModel):
 
 
 class LocalScheduleTime(BaseModel):
-    date: dt_date = Field(description="Local calendar date for the user's intended wall-clock time.")
-    time: dt_time = Field(description="Local wall-clock time on that date, e.g. 21:00:00 for 9pm.")
+    date: dt_date = Field(
+        description="Local calendar date for the user's intended wall-clock time."
+    )
+    time: dt_time = Field(
+        description="Local wall-clock time on that date, e.g. 21:00:00 for 9pm."
+    )
     timezone: str | None = Field(
         default=None,
         description="IANA timezone for the local wall-clock time. Omit to use the current user's timezone.",
@@ -1225,7 +1290,10 @@ class ScheduleTaskInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_time(self) -> "ScheduleTaskInput":
-        if sum(value is not None for value in (self.when, self.delay, self.local_when)) != 1:
+        if (
+            sum(value is not None for value in (self.when, self.delay, self.local_when))
+            != 1
+        ):
             raise ValueError("provide exactly one of when, delay, or local_when")
         return self
 
@@ -1284,12 +1352,25 @@ class UpdateScheduledTaskInput(BaseModel):
     def validate_update_target_and_payload(self) -> "UpdateScheduledTaskInput":
         targets = [self.task_id is not None, self.job_id is not None, self.current_task]
         if sum(targets) != 1:
-            raise ValueError("provide exactly one of task_id, job_id, or current_task=true")
+            raise ValueError(
+                "provide exactly one of task_id, job_id, or current_task=true"
+            )
         has_recurrence_update = "recurrence" in self.model_fields_set
-        if sum(value is not None for value in (self.when, self.delay, self.local_when)) > 1:
+        if (
+            sum(value is not None for value in (self.when, self.delay, self.local_when))
+            > 1
+        ):
             raise ValueError("provide at most one of when, delay, or local_when")
-        if self.brief is None and self.when is None and self.delay is None and self.local_when is None and not has_recurrence_update:
-            raise ValueError("provide at least one update: brief, when, local_when, or recurrence")
+        if (
+            self.brief is None
+            and self.when is None
+            and self.delay is None
+            and self.local_when is None
+            and not has_recurrence_update
+        ):
+            raise ValueError(
+                "provide at least one update: brief, when, local_when, or recurrence"
+            )
         return self
 
 
@@ -1314,7 +1395,9 @@ class CancelScheduledTaskInput(BaseModel):
     def validate_cancel_target(self) -> "CancelScheduledTaskInput":
         targets = [self.task_id is not None, self.job_id is not None, self.current_task]
         if sum(targets) != 1:
-            raise ValueError("provide exactly one of task_id, job_id, or current_task=true")
+            raise ValueError(
+                "provide exactly one of task_id, job_id, or current_task=true"
+            )
         return self
 
 
@@ -1339,7 +1422,9 @@ class ScheduleCheckinInput(BaseModel):
         description="Absolute exact instant. Do not use for user-local clock phrases; use local_when instead. If the current user is not in UTC, UTC/Z datetimes may be rejected so local-time mistakes can be corrected.",
     )
     about_what: str
-    reason: str = Field(description="Why the bot decided this check-in is worth scheduling. Logged for audit.")
+    reason: str = Field(
+        description="Why the bot decided this check-in is worth scheduling. Logged for audit."
+    )
 
     @field_validator("when")
     @classmethod
@@ -1350,7 +1435,10 @@ class ScheduleCheckinInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule_time(self) -> "ScheduleCheckinInput":
-        if sum(value is not None for value in (self.when, self.delay, self.local_when)) != 1:
+        if (
+            sum(value is not None for value in (self.when, self.delay, self.local_when))
+            != 1
+        ):
             raise ValueError("provide exactly one of when, delay, or local_when")
         return self
 
@@ -1395,13 +1483,17 @@ class EscalateToPartnerOutput(BaseModel):
 
 
 class EditOutboundMessageInput(BaseModel):
-    message_id: UUID = Field(description="Internal id of an outbound bot message to edit.")
+    message_id: UUID = Field(
+        description="Internal id of an outbound bot message to edit."
+    )
     content: str = Field(
         min_length=1,
         max_length=2000,
         description="Replacement user-visible text. Must be safe to show to the original recipient.",
     )
-    reason: str = Field(description="Why editing the already-sent message is better than sending a follow-up.")
+    reason: str = Field(
+        description="Why editing the already-sent message is better than sending a follow-up."
+    )
 
 
 class EditOutboundMessageOutput(BaseModel):
@@ -1413,8 +1505,12 @@ class EditOutboundMessageOutput(BaseModel):
 
 
 class DeleteOutboundMessageInput(BaseModel):
-    message_id: UUID = Field(description="Internal id of an outbound bot message to delete.")
-    reason: str = Field(description="Why deleting the already-sent message is appropriate.")
+    message_id: UUID = Field(
+        description="Internal id of an outbound bot message to delete."
+    )
+    reason: str = Field(
+        description="Why deleting the already-sent message is appropriate."
+    )
 
 
 class DeleteOutboundMessageOutput(BaseModel):
@@ -1431,7 +1527,9 @@ class ReactToMessageInput(BaseModel):
         max_length=32,
         description="A single Unicode emoji reaction. Prefer precise, emotionally apt, non-obvious choices over generic defaults.",
     )
-    reason: str = Field(description="Why this emoji precisely fits the meaning of the message.")
+    reason: str = Field(
+        description="Why this emoji precisely fits the meaning of the message."
+    )
 
 
 class ReactToMessageOutput(BaseModel):
@@ -1446,7 +1544,9 @@ class ReactToMessageOutput(BaseModel):
 
 
 class ExplainMediaItemInput(BaseModel):
-    message_id: UUID = Field(description="Internal id of an image message to explain and persist.")
+    message_id: UUID = Field(
+        description="Internal id of an image message to explain and persist."
+    )
     reason: str | None = Field(
         default=None,
         description="Why this media item needs a fresh durable explanation now.",
@@ -1579,7 +1679,11 @@ class UpdateTurnPlanInput(BaseModel):
         default=None,
         description="Steps that should be marked complete in the visible turn checklist.",
     )
-    note: str | None = Field(default=None, max_length=500, description="A compact private note explaining the change.")
+    note: str | None = Field(
+        default=None,
+        max_length=500,
+        description="A compact private note explaining the change.",
+    )
 
 
 class UpdateTurnPlanOutput(BaseModel):
@@ -1596,15 +1700,19 @@ class UpdateTurnPlanOutput(BaseModel):
 
 
 class SetPregnancyEddInput(BaseModel):
-    edd: str = Field(description="Estimated due date as ISO date string, e.g. '2026-10-22'.")
+    edd: str = Field(
+        description="Estimated due date as ISO date string, e.g. '2026-10-22'."
+    )
     dating_basis: Literal["lmp", "scan"] = Field(
         description="How the EDD was determined: 'lmp' (last menstrual period) or 'scan' (dating ultrasound)."
     )
     lmp_date: str | None = Field(
-        default=None, description="First day of last menstrual period as ISO date, e.g. '2026-01-15'."
+        default=None,
+        description="First day of last menstrual period as ISO date, e.g. '2026-01-15'.",
     )
     scan_date: str | None = Field(
-        default=None, description="Date of the dating scan as ISO date, e.g. '2026-03-01'."
+        default=None,
+        description="Date of the dating scan as ISO date, e.g. '2026-03-01'.",
     )
     started_at: str | None = Field(
         default=None,
@@ -1624,7 +1732,8 @@ class CorrectPregnancyEddInput(BaseModel):
         description="How the revised EDD was determined."
     )
     scan_date: str | None = Field(
-        default=None, description="Date of the corrective scan as ISO date, e.g. '2026-04-15'."
+        default=None,
+        description="Date of the corrective scan as ISO date, e.g. '2026-04-15'.",
     )
 
 
@@ -1702,9 +1811,15 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "list_scheduled_tasks": (ListScheduledTasksInput, ListScheduledTasksOutput),
     # write
     "update_user_style_notes": (UpdateUserStyleNotesInput, UpdateUserStyleNotesOutput),
-    "update_cross_thread_sharing_default": (UpdateCrossThreadSharingDefaultInput, UpdateCrossThreadSharingDefaultOutput),
-    "create_bridge_candidate": (CreateBridgeCandidateInput, CreateBridgeCandidateOutput),
-    "update_bridge_candidate": (UpdateBridgeCandidateInput, UpdateBridgeCandidateOutput),
+    "set_partner_sharing": (SetPartnerSharingInput, SetPartnerSharingOutput),
+    "create_bridge_candidate": (
+        CreateBridgeCandidateInput,
+        CreateBridgeCandidateOutput,
+    ),
+    "update_bridge_candidate": (
+        UpdateBridgeCandidateInput,
+        UpdateBridgeCandidateOutput,
+    ),
     "send_bridge_candidate": (SendBridgeCandidateInput, SendBridgeCandidateOutput),
     "add_memory": (AddMemoryInput, AddMemoryOutput),
     "update_memory": (UpdateMemoryInput, UpdateMemoryOutput),
@@ -1723,13 +1838,19 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "update_oob": (UpdateOOBInput, UpdateOOBOutput),
     "lift_oob": (LiftOOBInput, LiftOOBOutput),
     "schedule_checkin": (ScheduleCheckinInput, ScheduleCheckinOutput),
-    "cancel_scheduled_checkin": (CancelScheduledCheckinInput, CancelScheduledCheckinOutput),
+    "cancel_scheduled_checkin": (
+        CancelScheduledCheckinInput,
+        CancelScheduledCheckinOutput,
+    ),
     "schedule_task": (ScheduleTaskInput, ScheduleTaskOutput),
     "update_scheduled_task": (UpdateScheduledTaskInput, UpdateScheduledTaskOutput),
     "cancel_scheduled_task": (CancelScheduledTaskInput, CancelScheduledTaskOutput),
     "escalate_to_partner": (EscalateToPartnerInput, EscalateToPartnerOutput),
     "edit_outbound_message": (EditOutboundMessageInput, EditOutboundMessageOutput),
-    "delete_outbound_message": (DeleteOutboundMessageInput, DeleteOutboundMessageOutput),
+    "delete_outbound_message": (
+        DeleteOutboundMessageInput,
+        DeleteOutboundMessageOutput,
+    ),
     "react_to_message": (ReactToMessageInput, ReactToMessageOutput),
     "explain_media_item": (ExplainMediaItemInput, ExplainMediaItemOutput),
     "log_feedback": (LogFeedbackInput, LogFeedbackOutput),
