@@ -1566,18 +1566,53 @@ class FakePool:
             and "'scheduled_task'" in compact
         ):
             user_id, scheduled_for, context_json = args[:3]
+            bot_id = args[3] if len(args) > 3 else None
+            topic_id = args[4] if len(args) > 4 else None
+            context = _coerce_jsonb(context_json) or {}
+            # Partner-nudge: emulate unique partial index
+            # (user_id, bot_id, context->>'originating_user_id') WHERE
+            # status='pending' AND kind='partner_nudge'.
+            if context.get("kind") == "partner_nudge":
+                originating_user_id = context.get("originating_user_id")
+                for existing in self.scheduled_jobs.values():
+                    if (
+                        existing.get("status") == "pending"
+                        and existing.get("job_type") == "scheduled_task"
+                        and existing.get("user_id") == user_id
+                        and existing.get("bot_id") == bot_id
+                        and (existing.get("context") or {}).get("kind") == "partner_nudge"
+                        and str(
+                            (existing.get("context") or {}).get(
+                                "originating_user_id"
+                            )
+                        )
+                        == str(originating_user_id)
+                    ):
+                        # Simulate asyncpg UniqueViolationError on the
+                        # idx_scheduled_jobs_one_pending_partner_nudge index.
+                        UniqueViolationError = type(
+                            "UniqueViolationError", (Exception,), {}
+                        )
+                        err = UniqueViolationError(
+                            "duplicate key value violates unique constraint"
+                        )
+                        err.sqlstate = "23505"
+                        err.pgcode = "23505"
+                        raise err
             row = {
                 "id": uuid4(),
                 "user_id": user_id,
                 "job_type": "scheduled_task",
                 "scheduled_for": scheduled_for,
-                "context": _coerce_jsonb(context_json),
+                "context": context,
                 "status": "pending",
                 "attempt_count": 0,
                 "max_attempts": 2,
                 "delayed": False,
                 "claimed_at": None,
                 "claimed_by": None,
+                "bot_id": bot_id,
+                "topic_id": topic_id,
                 "created_at": datetime.now(UTC),
                 "updated_at": datetime.now(UTC),
             }
@@ -1587,6 +1622,33 @@ class FakePool:
                 "scheduled_for": scheduled_for,
                 "context": row["context"],
             }
+        if compact.startswith(
+            "SELECT id, status, context FROM scheduled_jobs WHERE id"
+        ):
+            row = self.scheduled_jobs.get(args[0])
+            if row is None or row.get("job_type") != "scheduled_task":
+                return None
+            return {
+                "id": row["id"],
+                "status": row["status"],
+                "context": row.get("context") or {},
+            }
+        if compact.startswith(
+            "UPDATE scheduled_jobs SET status='cancelled' WHERE id=$1 AND status='pending' AND context->>'originating_user_id'=$2 AND context->>'kind'='partner_nudge'"
+        ):
+            job_id, originating_user_id = args
+            row = self.scheduled_jobs.get(job_id)
+            if (
+                row is None
+                or row.get("status") != "pending"
+                or (row.get("context") or {}).get("kind") != "partner_nudge"
+                or str((row.get("context") or {}).get("originating_user_id"))
+                != str(originating_user_id)
+            ):
+                return None
+            row["status"] = "cancelled"
+            row["updated_at"] = datetime.now(UTC)
+            return {"id": row["id"]}
         if compact.startswith(
             "SELECT id, user_id, scheduled_for, context, status FROM scheduled_jobs WHERE id"
         ):
@@ -1648,6 +1710,8 @@ class FakePool:
             return {"id": row["id"], "scheduled_for": scheduled_for}
         if compact.startswith("INSERT INTO scheduled_jobs"):
             user_id, scheduled_for, context_json = args[:3]
+            bot_id = args[3] if len(args) > 3 else None
+            topic_id = args[4] if len(args) > 4 else None
             row = {
                 "id": uuid4(),
                 "user_id": user_id,
@@ -1660,6 +1724,9 @@ class FakePool:
                 "delayed": False,
                 "claimed_at": None,
                 "claimed_by": None,
+                "bot_id": bot_id,
+                "topic_id": topic_id,
+                "created_at": datetime.now(UTC),
             }
             self.scheduled_jobs[row["id"]] = row
             return {"job_id": row["id"], "scheduled_for": scheduled_for}
@@ -1924,6 +1991,15 @@ class FakePool:
             if partner_user_id is None:
                 return None
             return {"dyad_id": uuid4(), "partner_user_id": partner_user_id}
+        if compact.startswith("SELECT id, name, timezone FROM users WHERE id"):
+            row = self.users.get(args[0])
+            if row is None:
+                return None
+            return {
+                "id": row["id"],
+                "name": row.get("name"),
+                "timezone": row.get("timezone"),
+            }
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):
@@ -2071,6 +2147,24 @@ class FakePool:
         if compact.startswith("SELECT partner_share FROM user_bot_state WHERE user_id"):
             row = self.user_bot_state.get((args[0], args[1]), {})
             return row.get("partner_share")
+        if compact.startswith(
+            "SELECT count(*) FROM scheduled_jobs WHERE bot_id=$1 AND job_type='scheduled_task' AND context->>'kind'='partner_nudge' AND context->>'originating_user_id'=$2 AND created_at > now() - interval '24 hours'"
+        ):
+            bot_id, originating_user_id = args
+            cutoff = datetime.now(UTC) - timedelta(hours=24)
+            count = 0
+            for row in self.scheduled_jobs.values():
+                if (
+                    row.get("job_type") == "scheduled_task"
+                    and row.get("bot_id") == bot_id
+                    and (row.get("context") or {}).get("kind") == "partner_nudge"
+                    and str((row.get("context") or {}).get("originating_user_id"))
+                    == str(originating_user_id)
+                ):
+                    created_at = row.get("created_at")
+                    if created_at is None or created_at > cutoff:
+                        count += 1
+            return count
         if compact.startswith("SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id"):
             return self.bot_turns[args[0]].get("reasoning") or ""
         if compact.startswith("SELECT 1 FROM distillations d JOIN artifact_topics"):
@@ -2888,6 +2982,27 @@ class FakePool:
             ]
             rows.sort(key=lambda row: row["scenario_name"])
             return rows
+        if compact.startswith(
+            "SELECT id AS job_id, bot_id, topic_id, scheduled_for, context, created_at FROM scheduled_jobs WHERE user_id=$1 AND bot_id=$2 AND job_type='checkin' AND status='pending'"
+        ):
+            user_id, bot_id, limit = args
+            matches = [
+                {
+                    "job_id": row["id"],
+                    "bot_id": row.get("bot_id"),
+                    "topic_id": row.get("topic_id"),
+                    "scheduled_for": row["scheduled_for"],
+                    "context": row.get("context") or {},
+                    "created_at": row.get("created_at"),
+                }
+                for row in self.scheduled_jobs.values()
+                if row.get("user_id") == user_id
+                and row.get("bot_id") == bot_id
+                and row.get("job_type") == "checkin"
+                and row.get("status") == "pending"
+            ]
+            matches.sort(key=lambda r: r["scheduled_for"])
+            return matches[: int(limit)]
         if "FROM scheduled_jobs" in compact:
             return sorted(
                 self.scheduled_jobs.values(),

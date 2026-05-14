@@ -55,6 +55,8 @@ from tool_schemas import (
     GetThemeOutput,
     ListBridgeCandidatesInput,
     ListBridgeCandidatesOutput,
+    ListScheduledCheckinsInput,
+    ListScheduledCheckinsOutput,
     ListThemesInput,
     ListThemesOutput,
     ListWatchItemsInput,
@@ -66,6 +68,7 @@ from tool_schemas import (
     SearchMessagesOutput,
     SearchEmojisInput,
     SearchEmojisOutput,
+    ScheduledCheckinRow,
     SelfModel,
     SendMessagePartInput,
     SendMessagePartOutput,
@@ -1147,3 +1150,73 @@ async def get_bot_actions(
             for row in rows
         ]
     )
+
+
+# NOTE (Critique flag 6): the symmetric write-tool `list_scheduled_tasks`
+# lives in app/services/tools/write_tools.py:1840 by historical accident —
+# it is a pure read but was placed in write_tools. We register
+# `list_scheduled_checkins` here in read_tools.py (correct grouping) and
+# leave a TODO to move list_scheduled_tasks in a follow-up PR.
+# TODO(scheduling-cleanup): relocate list_scheduled_tasks from
+# write_tools.py to this file for consistency.
+async def list_scheduled_checkins(
+    ctx: TurnContext, args: ListScheduledCheckinsInput
+) -> ListScheduledCheckinsOutput:
+    """Return this user's pending check-ins for the current bot.
+
+    Scoped to ``ctx.user.id × ctx.bot_id`` (SD-014). A user with both
+    mediator and Tante Rosi check-ins sees only the current bot's.
+    """
+    rows = await ctx.pool.fetch(
+        """
+        SELECT id AS job_id, bot_id, topic_id, scheduled_for, context, created_at
+        FROM scheduled_jobs
+        WHERE user_id=$1
+          AND bot_id=$2
+          AND job_type='checkin'
+          AND status='pending'
+        ORDER BY scheduled_for ASC
+        LIMIT $3
+        """,
+        ctx.user.id,
+        ctx.bot_id,
+        args.limit,
+    )
+    timezone = ctx.user.timezone or "UTC"
+    now = ctx.turn_started_at or datetime.now(UTC)
+    checkins: list[ScheduledCheckinRow] = []
+    for row in rows:
+        context = row.get("context") if isinstance(row, dict) else row["context"]
+        context = context or {}
+        checkins.append(
+            ScheduledCheckinRow(
+                job_id=row["job_id"],
+                bot_id=row.get("bot_id") if isinstance(row, dict) else row["bot_id"],
+                topic_id=row.get("topic_id") if isinstance(row, dict) else row["topic_id"],
+                scheduled_for=row["scheduled_for"],
+                scheduled_for_time=temporal_reference(
+                    row["scheduled_for"], timezone, now=now
+                ),
+                about_what=context.get("about_what"),
+                reason=context.get("reason"),
+                created_at=(
+                    row.get("created_at")
+                    if isinstance(row, dict)
+                    else row["created_at"]
+                    if "created_at" in row
+                    else None
+                ),
+                created_at_time=temporal_reference(
+                    (
+                        row.get("created_at")
+                        if isinstance(row, dict)
+                        else row["created_at"]
+                        if "created_at" in row
+                        else None
+                    ),
+                    timezone,
+                    now=now,
+                ),
+            )
+        )
+    return ListScheduledCheckinsOutput(checkins=checkins)

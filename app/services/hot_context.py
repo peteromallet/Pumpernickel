@@ -1273,12 +1273,40 @@ def _render_with_counts(
         f"- triggering_message_ids: {_clip(', '.join(str(mid) for mid in hc.trigger_metadata['triggering_message_ids']), clip_limit)}",
         f"- time_since_last_message: {_clip(hc.time_since_last_message, clip_limit)}",
     ]
-    if hc.trigger_metadata.get("context") is not None:
-        lines.append(f"- context: {_clip(hc.trigger_metadata['context'], clip_limit)}")
+    trigger_context = hc.trigger_metadata.get("context")
+    is_partner_nudge = (
+        hc.trigger_metadata.get("kind") == "scheduled_task"
+        and isinstance(trigger_context, dict)
+        and trigger_context.get("kind") == "partner_nudge"
+    )
+    # Suppress raw context dump for partner_nudge so the audit-only
+    # `reason` field never leaks into the rendered prompt (invariant 4).
+    # The curated `## Incoming nudge from your partner` block below
+    # replaces it.
+    if trigger_context is not None and not is_partner_nudge:
+        lines.append(f"- context: {_clip(trigger_context, clip_limit)}")
     lines.extend(
         f"- trigger_message id={msg['id']} charge={msg['charge']} sent_at={_time_label(msg, 'sent_at') or msg['sent_at']}{_message_content(msg, clip_limit)}"
         for msg in hc.trigger_metadata["messages"]
     )
+    if is_partner_nudge:
+        originator_name = (
+            (hc.partner_user or {}).get("name")
+            or trigger_context.get("originating_user_name")
+            or "your partner"
+        )
+        nudge_note = trigger_context.get("nudge_note")
+        if not nudge_note:
+            nudge_note = f"{originator_name} asked me to check in with you"
+        scheduled_for_iso = trigger_context.get("scheduled_for")
+        lines += [
+            "",
+            "## Incoming nudge from your partner",
+            f"- from: {_clip(originator_name, clip_limit)}",
+            f"- note: {_clip(nudge_note, clip_limit)}",
+        ]
+        if scheduled_for_iso:
+            lines.append(f"- scheduled_for: {_clip(scheduled_for_iso, clip_limit)}")
     return "\n".join(lines).strip()
 
 

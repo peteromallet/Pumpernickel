@@ -104,6 +104,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "schedule_task": "Schedule an internal agent-managed future task brief for the current user, including recurring/non-message work. Do not use for user-facing 'message/remind/check in with me' requests; use `schedule_checkin` for those. Prefer `delay` by default for simple relative durations like 'in two hours', 'in 10 hours', or 'in two days'. Use `local_when` for local clock phrases like '9pm tonight' or 'Monday at 8'. Use `when` only when you already have an exact timezone-aware instant. Use `recurrence` for durable hourly, daily, or weekly repeats.",
     "update_scheduled_task": "Update a pending agent-managed scheduled task by task_id, job_id, or current_task=true during a scheduled_task turn. Use for changing the brief, next fire time, or recurrence. Prefer `delay` by default for simple relative durations; use `local_when` for local clock phrases; use `when` only for exact timezone-aware instants.",
     "cancel_scheduled_task": "Cancel a pending agent-managed scheduled task by task_id, job_id, or current_task=true during a scheduled_task turn.",
+    "list_scheduled_checkins": "List this user's pending user-facing check-ins for the current bot. Use BEFORE booking another check-in to avoid duplicating a follow-up, and to answer the user's 'what reminders do I have set up?' question. Symmetric to list_scheduled_tasks but for one-off user-facing reminders.",
+    "schedule_partner_checkin": "Schedule a future check-in turn on the current user's dyad partner's side, on the same bot. Use ONLY for explicit user requests like 'can you check in on Hannah?' or 'see how my partner is doing.' The partner is resolved server-side from the dyad — you do NOT pass any user id. `nudge_note` is a short neutral note shown to the recipient (never quote the originator). `reason` is audit-only. Rejects when the recipient has not opted in for this bot (`recipient_state` will be `opt_out` or `pending`), when no dyad partner exists, when a recent nudge already happened in the last 24h, or when a pending nudge with the same originator/recipient/bot is still open. Tell the user what was scheduled — and what you'll say to the partner — in the same reply.",
+    "cancel_partner_nudge": "Cancel a pending partner-nudge you previously scheduled. Only the original scheduling user can cancel; non-pending statuses cannot be cancelled.",
     "escalate_to_partner": "Send partner escalation only when one of two named gates is true: the triggering message meets the `crisis` charge definition, or the user explicitly asks you to alert their partner. The reason must name which gate fired. Do not use for ordinary friction, even intense friction. Use concise, balanced, non-accusatory wording; do not include protected OOB details, private analysis, pressure, or anything designed to manage the partner's reaction.",
     "edit_outbound_message": "Edit one already-sent bot outbound message when the original wording was materially wrong, unsafe, confusing, too sharp, or likely to land badly and an edit is cleaner than a follow-up. Do not edit to hide accountability; if the correction matters, acknowledge it in conversation when appropriate.",
     "delete_outbound_message": "Delete one already-sent bot outbound message only when it should not remain visible — accidental protected detail, wrong recipient, serious factual mistake, or a message that would predictably worsen the situation. Prefer editing when the message can be safely corrected.",
@@ -163,6 +166,9 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "schedule_task": write_tools.schedule_task,
     "update_scheduled_task": write_tools.update_scheduled_task,
     "cancel_scheduled_task": write_tools.cancel_scheduled_task,
+    "schedule_partner_checkin": write_tools.schedule_partner_checkin,
+    "cancel_partner_nudge": write_tools.cancel_partner_nudge,
+    "list_scheduled_checkins": read_tools.list_scheduled_checkins,
     "escalate_to_partner": write_tools.escalate_to_partner,
     "edit_outbound_message": write_tools.edit_outbound_message,
     "delete_outbound_message": write_tools.delete_outbound_message,
@@ -194,6 +200,7 @@ READ_PHASE_TOOLS = {
     "consult_perspective",
     "list_bridge_candidates",
     "list_scheduled_tasks",
+    "list_scheduled_checkins",
 }
 
 WRITE_PHASE_TOOLS = {
@@ -223,6 +230,8 @@ WRITE_PHASE_TOOLS = {
     "schedule_task",
     "update_scheduled_task",
     "cancel_scheduled_task",
+    "schedule_partner_checkin",
+    "cancel_partner_nudge",
     "escalate_to_partner",
     "edit_outbound_message",
     "delete_outbound_message",
@@ -236,11 +245,14 @@ CONSULT_PHASE_TOOLS = READ_PHASE_TOOLS - {"send_message_part", "consult_perspect
 RECORD_READ_TOOLS = READ_PHASE_TOOLS - {"send_message_part", "consult_perspective"}
 SCHEDULE_TOOLS = {
     "list_scheduled_tasks",
+    "list_scheduled_checkins",
     "schedule_checkin",
     "cancel_scheduled_checkin",
     "schedule_task",
     "update_scheduled_task",
     "cancel_scheduled_task",
+    "schedule_partner_checkin",
+    "cancel_partner_nudge",
 }
 RECORD_WRITE_TOOLS = WRITE_PHASE_TOOLS - SCHEDULE_TOOLS | {
     "set_pregnancy_edd",

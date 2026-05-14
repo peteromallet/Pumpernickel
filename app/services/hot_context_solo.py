@@ -24,7 +24,11 @@ from app.services.time_context import (
 )
 from app.services.tools.common import media_analysis_text
 from app.services.hot_context import peek_other_topics
-from app.services.partner_sharing import get_partner_share, has_dyad_partner
+from app.services.partner_sharing import (
+    get_partner_share,
+    has_dyad_partner,
+    resolve_dyad_partner,
+)
 from app.services.topic_filter import join_artifact_topics
 
 
@@ -254,13 +258,50 @@ async def build_hot_context_solo(
         pool, topic_id=primary_topic_id, user_id=user.id
     )
     current_user = await _user_profile_solo(pool, user)
+    # Resolve dyad partner identity ONCE for both partner_sharing_state and
+    # the `## Your Partner` block. Identity-only — name/id/timezone plus
+    # the partner's per-bot partner_share for THIS bot. NO content (no
+    # memories, themes, observations, distillations, messages, pregnancy
+    # facts). Invariant 1.
     partner_share = await get_partner_share(pool, user_id=user.id, bot_id=bot_id)
+    dyad_partner = await resolve_dyad_partner(pool, user.id)
     current_user["partner_share"] = partner_share
     current_user["partner_sharing_state"] = _partner_sharing_state(
         partner_share,
-        has_partner=await has_dyad_partner(pool, user.id),
+        has_partner=dyad_partner is not None,
     )
     partner_user: dict[str, Any] = {}
+    if dyad_partner is not None:
+        partner_row = await pool.fetchrow(
+            "SELECT id, name, timezone FROM users WHERE id = $1",
+            dyad_partner.partner_user_id,
+        )
+        partner_recipient_share = await get_partner_share(
+            pool, user_id=dyad_partner.partner_user_id, bot_id=bot_id
+        )
+        if partner_row is not None:
+            partner_user = {
+                "id": partner_row["id"],
+                "name": partner_row["name"],
+                "timezone": partner_row.get("timezone")
+                if isinstance(partner_row, dict)
+                else partner_row["timezone"],
+                # Recipient-side per-bot sharing state, normalized to one of
+                # {opt_in, opt_out, pending}. Used by the partner-nudge tool
+                # to decide whether scheduling is allowed.
+                "partner_sharing_state_recipient_side": (
+                    partner_recipient_share or "pending"
+                ),
+            }
+        else:
+            partner_user = {
+                "id": dyad_partner.partner_user_id,
+                "name": None,
+                "timezone": None,
+                "partner_sharing_state_recipient_side": (
+                    partner_recipient_share or "pending"
+                ),
+            }
     now_utc = datetime.now(UTC)
     user_timezone = timezone_or_utc(current_user.get("timezone") or user.timezone).key
 
@@ -693,6 +734,19 @@ def _render_solo_with_counts(
         f"- partner_sharing_state: {_clip(hc.current_user.get('partner_sharing_state', 'unavailable'), clip_limit)}",
         f"- style_notes: {_clip(hc.current_user.get('style_notes', ''), clip_limit)}",
     ]
+    # ── Partner identity block (S1) ────────────────────────────────────
+    # Identity-only by invariant 1: name, id, timezone, plus the
+    # recipient-side per-bot partner_share. No memories, themes,
+    # observations, distillations, messages, or pregnancy facts.
+    if hc.partner_user:
+        lines += [
+            "",
+            "## Your Partner",
+            f"- name: {_clip(hc.partner_user.get('name'), clip_limit)}",
+            f"- id: {_clip(hc.partner_user.get('id'), clip_limit)}",
+            f"- timezone: {_clip(hc.partner_user.get('timezone'), clip_limit)}",
+            f"- partner_sharing_state_for_this_bot: {_clip(hc.partner_user.get('partner_sharing_state_recipient_side', 'pending'), clip_limit)}",
+        ]
     if hc.temporal_context:
         lines += [
             "",
@@ -831,12 +885,44 @@ def _render_solo_with_counts(
         f"- triggering_message_ids: {_clip(', '.join(str(mid) for mid in hc.trigger_metadata['triggering_message_ids']), clip_limit)}",
         f"- time_since_last_message: {_clip(hc.time_since_last_message, clip_limit)}",
     ]
-    if hc.trigger_metadata.get("context") is not None:
-        lines.append(f"- context: {_clip(hc.trigger_metadata['context'], clip_limit)}")
+    trigger_context = hc.trigger_metadata.get("context")
+    is_partner_nudge = (
+        hc.trigger_metadata.get("kind") == "scheduled_task"
+        and isinstance(trigger_context, dict)
+        and trigger_context.get("kind") == "partner_nudge"
+    )
+    # Suppress the raw `- context: ...` dump for partner_nudge triggers
+    # so the audit-only `reason` field cannot leak into the prompt
+    # (invariant 4). The curated `## Incoming nudge from your partner`
+    # block below replaces it. This branch is narrow on purpose.
+    if trigger_context is not None and not is_partner_nudge:
+        lines.append(f"- context: {_clip(trigger_context, clip_limit)}")
     lines.extend(
         f"- trigger_message id={msg['id']} charge={msg['charge']} sent_at={_time_label(msg, 'sent_at') or msg['sent_at']}{_message_content(msg, clip_limit)}"
         for msg in hc.trigger_metadata["messages"]
     )
+    if is_partner_nudge:
+        # Curated render: originator name + nudge_note ONLY. `reason` is
+        # audit-only and must never appear in the rendered prompt.
+        originator_name = (
+            (hc.partner_user or {}).get("name")
+            or trigger_context.get("originating_user_name")
+            or "your partner"
+        )
+        nudge_note = trigger_context.get("nudge_note")
+        if not nudge_note:
+            nudge_note = (
+                f"{originator_name} asked me to check in with you"
+            )
+        scheduled_for_iso = trigger_context.get("scheduled_for")
+        lines += [
+            "",
+            "## Incoming nudge from your partner",
+            f"- from: {_clip(originator_name, clip_limit)}",
+            f"- note: {_clip(nudge_note, clip_limit)}",
+        ]
+        if scheduled_for_iso:
+            lines.append(f"- scheduled_for: {_clip(scheduled_for_iso, clip_limit)}")
     return "\n".join(lines).strip()
 
 

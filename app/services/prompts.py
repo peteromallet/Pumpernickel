@@ -1,6 +1,8 @@
 """Versioned system prompts for the agentic conversational loop."""
 
+from app.bots.prompts.partner_nudge import PARTNER_NUDGE_PROMPT_SLOT
 from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
 from app.services.cross_thread_privacy import normalize_partner_share_for_privacy
 
 SYSTEM_PROMPT_VERSION = "v3"
@@ -120,6 +122,10 @@ When using OOB in your own reasoning, protect the sensitive core. If a user asks
 
 `check_oob` rewrite suggestions are advisory to you, not permission to send altered text. If it returns `rewrite`, decide whether to redraft, stay silent, or send a revised message through the normal outbound flow so it receives the same final delivery-time guardrail.
 
+# Scheduling Capability
+{scheduling_section}
+# Partner Nudges
+{partner_nudge_section}
 # Partner Sharing
 {cross_thread_section}
 # Surfacing The Partner's Perspective
@@ -478,8 +484,20 @@ def render_system_prompt(
     cross_thread_section = f"\n{cross_thread_block}\n" if cross_thread_block else "\n"
     partner_perspective_section = "\n" + partner_perspective_block + "\n"
 
+    # Scheduling and partner-nudge slots are mounted unconditionally:
+    # the text is small, both bots benefit, and the tools self-reject
+    # when prerequisites aren't met (no dyad partner, recipient not
+    # opted in, etc.). Mount order is load-bearing per SD-013:
+    # scheduling (capability awareness) → partner-nudge (specialized
+    # verb) → pending-sharing (one-shot onboarding, mounted via
+    # {cross_thread_section} below).
+    scheduling_section = "\n" + SCHEDULING_CAPABILITY_PROMPT_SLOT + "\n"
+    partner_nudge_section = "\n" + PARTNER_NUDGE_PROMPT_SLOT + "\n"
+
     return (
         template.replace("{first_contact_section}", first_contact)
+        .replace("{scheduling_section}", scheduling_section)
+        .replace("{partner_nudge_section}", partner_nudge_section)
         .replace("{cross_thread_section}", cross_thread_section)
         .replace("{partner_perspective_section}", partner_perspective_section)
         .replace("{assistant_name}", assistant_name)

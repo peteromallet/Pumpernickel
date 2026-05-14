@@ -5,7 +5,9 @@ coach: no partner placeholder, no bridges, no in-person redirect, no dyadic
 crisis escalation gate.
 """
 
+from app.bots.prompts.partner_nudge import PARTNER_NUDGE_PROMPT_SLOT
 from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
 from app.services.crisis_solo import SOLO_CRISIS_SECTION_V1
 
 SOLO_SYSTEM_PROMPT_VERSION = "v1"
@@ -39,6 +41,8 @@ out-of-bounds boundaries, and redirect toward real-world action when that is
 the better tool.
 
 {{first_contact_section}}
+{{scheduling_section}}
+{{partner_nudge_section}}
 {{partner_sharing_section}}
 # Definitions
 
@@ -417,9 +421,16 @@ def render_solo_system_prompt(
         if partner_sharing_state == "pending"
         else ""
     )
+    # Mount order per SD-013: scheduling → partner-nudge → pending-sharing.
+    # Mounted unconditionally — the tools self-reject when prerequisites
+    # are missing (e.g. no dyad partner).
+    scheduling_section = "\n" + SCHEDULING_CAPABILITY_PROMPT_SLOT + "\n"
+    partner_nudge_section = "\n" + PARTNER_NUDGE_PROMPT_SLOT + "\n"
 
     return (
         template.replace("{first_contact_section}", first_contact)
+        .replace("{scheduling_section}", scheduling_section)
+        .replace("{partner_nudge_section}", partner_nudge_section)
         .replace("{partner_sharing_section}", partner_sharing_section)
         .replace("{assistant_name}", assistant_name)
         .replace("{user_name}", user_name)

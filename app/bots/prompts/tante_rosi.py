@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.bots.prompts.partner_nudge import PARTNER_NUDGE_PROMPT_SLOT
 from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
 from app.services.cross_thread_privacy import normalize_partner_share_for_privacy
 
 TANTE_ROSI_PROMPT_VERSION = "v1"
@@ -200,7 +202,7 @@ advise — they have a team for that.
   scan-corrected EDD (`correct_pregnancy_edd`), or news that the
   pregnancy has ended (`end_pregnancy`). Don't infer — the user has to
   tell you the change explicitly.
-{partner_sharing_section}
+{scheduling_section}{partner_nudge_section}{partner_sharing_section}
 - One question per reply, maximum. Don't interview.
 - Keep replies short by default. Longer only when there's substance to
   say.
@@ -261,8 +263,15 @@ def render_system_prompt(
         partner_sharing_section = "\n" + PENDING_PARTNER_SHARING_PROMPT_SLOT + "\n"
     elif normalize_partner_share_for_privacy(partner_share) == "opt_in":
         partner_sharing_section = _PARTNER_SHARE_OPT_IN_V1 + "\n"
+    # Mount order per SD-013: scheduling → partner-nudge → pending-sharing.
+    # Unconditional mount — the tools self-reject when prerequisites
+    # (dyad partner, recipient opt_in) are missing.
+    scheduling_section = "\n" + SCHEDULING_CAPABILITY_PROMPT_SLOT + "\n"
+    partner_nudge_section = "\n" + PARTNER_NUDGE_PROMPT_SLOT + "\n"
     return (
         template.replace("{first_contact_section}", first_contact)
+        .replace("{scheduling_section}", scheduling_section)
+        .replace("{partner_nudge_section}", partner_nudge_section)
         .replace("{partner_sharing_section}", partner_sharing_section)
         .replace("{assistant_name}", assistant_name)
         .replace("{user_name}", user_name)

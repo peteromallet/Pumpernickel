@@ -17,7 +17,11 @@ from app.services.cross_thread_privacy import (
 )
 from app.services.crypto import encrypt_value
 from app.config import get_settings
-from app.services.partner_sharing import get_partner_share, set_partner_share
+from app.services.partner_sharing import (
+    get_partner_share,
+    resolve_dyad_partner,
+    set_partner_share,
+)
 from app.services.vision import explain_stored_image
 from app.services.messaging import send_outbound, _append_turn_reasoning, _call_oob_hook
 from app.services import discord, scoring
@@ -50,6 +54,8 @@ from tool_schemas import (
     BridgeCandidatePartnerPath,
     BridgeCandidateSensitivity,
     BridgeCandidateStatus,
+    CancelPartnerNudgeInput,
+    CancelPartnerNudgeOutput,
     CancelScheduledCheckinInput,
     CancelScheduledCheckinOutput,
     CancelScheduledTaskInput,
@@ -86,6 +92,8 @@ from tool_schemas import (
     ScheduleCheckinInput,
     ScheduleCheckinOutput,
     ScheduleDelay,
+    SchedulePartnerCheckinInput,
+    SchedulePartnerCheckinOutput,
     ScheduleTaskInput,
     ScheduleTaskOutput,
     ScheduledTaskRow,
@@ -1690,6 +1698,178 @@ async def cancel_scheduled_checkin(
         cancelled_job_id=row["id"] if row is not None else None,
     )
     await _log_tool_call(ctx, "cancel_scheduled_checkin", args, started, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# PARTNER WRITE EXCEPTION (SD-009)
+# ---------------------------------------------------------------------------
+# `schedule_partner_checkin` is the only WRITE_PHASE_TOOLS verb that inserts a
+# scheduled_jobs row whose ``user_id`` is NOT ``ctx.user.id``. Safety derives
+# from four belts-and-braces:
+#
+#   1. The Pydantic schema has NO ``user_id`` / ``target_user_id`` field
+#      (invariant 2). A hallucinated id cannot redirect the write.
+#   2. The partner is resolved server-side via ``resolve_dyad_partner``
+#      from the canonical dyads/dyad_members tables.
+#   3. The recipient's per-bot ``partner_share`` MUST be ``opt_in``;
+#      ``opt_out`` and ``pending`` (None) hard-block (invariant 3, SD-003).
+#   4. ``bot_id`` and ``topic_id`` on the new row stay tied to the
+#      originator's ``ctx``; the recipient's bot+topic remain untouched.
+#
+# ``reason`` is audit-only (invariant 4) — never rendered in any prompt
+# or hot context. ``nudge_note`` is recipient-visible and capped at 300
+# chars by the Input schema.
+# ---------------------------------------------------------------------------
+
+
+def _is_unique_violation(exc: Exception) -> bool:
+    return (
+        exc.__class__.__name__ == "UniqueViolationError"
+        or getattr(exc, "sqlstate", None) == "23505"
+        or getattr(exc, "pgcode", None) == "23505"
+    )
+
+
+async def schedule_partner_checkin(
+    ctx: TurnContext, args: SchedulePartnerCheckinInput
+) -> SchedulePartnerCheckinOutput:
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+    started = _start()
+
+    # 1. Resolve the dyad partner — backend-only, never from input.
+    partner = await resolve_dyad_partner(ctx.pool, ctx.user.id)
+    if partner is None:
+        raise ToolCallRejected({"error": "no_dyad_partner"})
+
+    # 2. Recipient gating. opt_out AND pending (None) both hard-block.
+    if ctx.bot_id is None:
+        raise ToolCallRejected({"error": "missing_bot_id"})
+    recipient_share = await get_partner_share(
+        ctx.pool, user_id=partner.partner_user_id, bot_id=ctx.bot_id
+    )
+    if recipient_share != "opt_in":
+        raise ToolCallRejected(
+            {
+                "error": "recipient_not_opted_in",
+                "recipient_state": recipient_share or "pending",
+            }
+        )
+
+    # 3. 24h code rate limit (SD-007). Counts ANY status (pending,
+    # completed, cancelled, superseded) so fire-and-replace abuse is
+    # blocked. Stricter than the unique-pending DB index, which only
+    # guards against simultaneous-pending stacking.
+    nudge_count = await ctx.pool.fetchval(
+        """
+        SELECT count(*) FROM scheduled_jobs
+        WHERE bot_id=$1
+          AND job_type='scheduled_task'
+          AND context->>'kind'='partner_nudge'
+          AND context->>'originating_user_id'=$2
+          AND created_at > now() - interval '24 hours'
+        """,
+        ctx.bot_id,
+        str(ctx.user.id),
+    )
+    if nudge_count and int(nudge_count) >= 1:
+        raise ToolCallRejected(
+            {"error": "rate_limited", "window_hours": 24}
+        )
+
+    # 4. Resolve concrete fire time and insert.
+    scheduled_for = _scheduled_for_from_schedule_fields(
+        ctx, args.when, args.delay, args.local_when
+    )
+    context_jsonb: dict[str, Any] = {
+        "kind": "partner_nudge",
+        "originating_user_id": str(ctx.user.id),
+        "nudge_note": args.nudge_note,
+        # reason is audit-only — stored but never rendered.
+        "reason": args.reason,
+        "source": args.source,
+    }
+    try:
+        row = await ctx.pool.fetchrow(
+            """
+            INSERT INTO scheduled_jobs (user_id, job_type, scheduled_for, context, status, bot_id, topic_id)
+            VALUES ($1, 'scheduled_task', $2, $3::jsonb, 'pending', $4, $5)
+            RETURNING id AS job_id, scheduled_for, context
+            """,
+            partner.partner_user_id,
+            scheduled_for,
+            context_jsonb,
+            ctx.bot_id,
+            ctx.primary_topic_id,
+        )
+    except Exception as exc:
+        if _is_unique_violation(exc):
+            raise ToolCallRejected(
+                {"error": "duplicate_pending_nudge"}
+            ) from exc
+        raise
+
+    result = SchedulePartnerCheckinOutput(
+        job_id=row["job_id"],
+        scheduled_for=row["scheduled_for"],
+        recipient_user_id=partner.partner_user_id,
+    )
+    await _log_tool_call(ctx, "schedule_partner_checkin", args, started, result)
+    return result
+
+
+async def cancel_partner_nudge(
+    ctx: TurnContext, args: CancelPartnerNudgeInput
+) -> CancelPartnerNudgeOutput:
+    """Originator-only cancellation (SD-010).
+
+    Only the user who scheduled the nudge can cancel it, and only while
+    it is still pending. The row is matched by job_id; the WHERE clause
+    enforces ``context.originating_user_id == ctx.user.id`` so a
+    different user cannot cancel someone else's nudge even with a
+    leaked id.
+    """
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+    started = _start()
+    existing = await ctx.pool.fetchrow(
+        """
+        SELECT id, status, context
+        FROM scheduled_jobs
+        WHERE id=$1 AND job_type='scheduled_task'
+        """,
+        args.job_id,
+    )
+    if existing is None:
+        raise ToolCallRejected({"error": "not_found"})
+    context = existing.get("context") or {}
+    if str(context.get("originating_user_id")) != str(ctx.user.id):
+        raise ToolCallRejected({"error": "not_owner"})
+    if existing.get("status") != "pending":
+        raise ToolCallRejected(
+            {"error": "not_pending", "status": existing.get("status")}
+        )
+    row = await ctx.pool.fetchrow(
+        """
+        UPDATE scheduled_jobs
+        SET status='cancelled'
+        WHERE id=$1
+          AND status='pending'
+          AND context->>'originating_user_id'=$2
+          AND context->>'kind'='partner_nudge'
+        RETURNING id
+        """,
+        args.job_id,
+        str(ctx.user.id),
+    )
+    result = CancelPartnerNudgeOutput(
+        action="cancelled" if row is not None else "noop",
+        cancelled_job_id=row["id"] if row is not None else None,
+    )
+    await _log_tool_call(ctx, "cancel_partner_nudge", args, started, result)
     return result
 
 

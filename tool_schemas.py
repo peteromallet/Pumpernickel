@@ -1459,6 +1459,106 @@ class CancelScheduledCheckinOutput(BaseModel):
     cancelled_job_id: UUID | None
 
 
+# --- partner-nudge (SD-001..SD-014) ---
+#
+# Cross-partner check-in nudge primitive. Schema invariants (load-bearing):
+#   * NO ``user_id`` / ``target_user_id`` field on the Input. Backend
+#     resolves the partner via ``resolve_dyad_partner`` so a hallucinated
+#     id cannot redirect a write at a stranger.
+#   * ``nudge_note`` is recipient-visible (rendered in the partner's hot
+#     context). ``reason`` is audit-only and is NEVER rendered.
+#   * ``source`` is telemetry — bot-judgment autonomous nudges ship inert
+#     in this release.
+
+
+class SchedulePartnerCheckinInput(BaseModel):
+    delay: ScheduleDelay | None = Field(
+        default=None,
+        description="Preferred/default for simple relative duration requests like 'in two hours', 'in 10 hours', or 'in two days'. Relative offset from the current server time. Provide exactly one of delay, local_when, or when.",
+    )
+    local_when: LocalScheduleTime | None = Field(
+        default=None,
+        description="Use for concrete local clock phrases like '9pm tonight', 'Monday at 8', or 'tomorrow morning'. The server converts this wall-clock time from the provided timezone, or the current user's timezone if omitted, to UTC.",
+    )
+    when: datetime | None = Field(
+        default=None,
+        description="Absolute exact instant. Do not use for user-local clock phrases; use local_when instead. If the current user is not in UTC, UTC/Z datetimes may be rejected so local-time mistakes can be corrected.",
+    )
+    nudge_note: str | None = Field(
+        default=None,
+        max_length=300,
+        description="Optional recipient-visible note. Keep neutral and short ('Pom asked me to see how you're doing today.'); never quote the originator's private words or summarize private content.",
+    )
+    reason: str = Field(
+        description="Why the originator decided this nudge is worth scheduling. Logged for audit only — NEVER rendered into any prompt or hot context.",
+    )
+    source: Literal["explicit_user_request", "bot_judgment"] = Field(
+        default="explicit_user_request",
+        description="Set to 'explicit_user_request' for direct user words like 'check in on Hannah'. 'bot_judgment' is reserved for autonomous nudges (not enabled in this release).",
+    )
+
+    @field_validator("when")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return _require_timezone_aware(value, "when")
+
+    @model_validator(mode="after")
+    def validate_schedule_time(self) -> "SchedulePartnerCheckinInput":
+        if (
+            sum(value is not None for value in (self.when, self.delay, self.local_when))
+            != 1
+        ):
+            raise ValueError("provide exactly one of when, delay, or local_when")
+        return self
+
+
+class SchedulePartnerCheckinOutput(BaseModel):
+    action: Literal["scheduled"] = "scheduled"
+    job_id: UUID
+    scheduled_for: datetime
+    recipient_user_id: UUID
+
+
+class CancelPartnerNudgeInput(BaseModel):
+    job_id: UUID
+
+
+class CancelPartnerNudgeOutput(BaseModel):
+    action: Literal["cancelled", "noop"]
+    cancelled_job_id: UUID | None
+
+
+# --- list_scheduled_checkins (SD-014) ---
+#
+# Symmetric to list_scheduled_tasks but for user-facing check-ins.
+# Returns ONLY pending checkin rows scoped to ctx.user.id × ctx.bot_id
+# (so a user with both mediator and Tante Rosi check-ins sees only the
+# current bot's). Mirrors ScheduledTaskRow minus recurrence fields —
+# check-ins are one-off by design.
+
+
+class ScheduledCheckinRow(BaseModel):
+    job_id: UUID
+    bot_id: str | None = None
+    topic_id: UUID | None = None
+    scheduled_for: datetime
+    scheduled_for_time: TemporalReference | None = None
+    about_what: str | None = None
+    reason: str | None = None
+    created_at: datetime | None = None
+    created_at_time: TemporalReference | None = None
+
+
+class ListScheduledCheckinsInput(BaseModel):
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ListScheduledCheckinsOutput(BaseModel):
+    checkins: list[ScheduledCheckinRow]
+
+
 # --- escalation ---
 
 
@@ -1845,6 +1945,15 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "schedule_task": (ScheduleTaskInput, ScheduleTaskOutput),
     "update_scheduled_task": (UpdateScheduledTaskInput, UpdateScheduledTaskOutput),
     "cancel_scheduled_task": (CancelScheduledTaskInput, CancelScheduledTaskOutput),
+    "schedule_partner_checkin": (
+        SchedulePartnerCheckinInput,
+        SchedulePartnerCheckinOutput,
+    ),
+    "cancel_partner_nudge": (CancelPartnerNudgeInput, CancelPartnerNudgeOutput),
+    "list_scheduled_checkins": (
+        ListScheduledCheckinsInput,
+        ListScheduledCheckinsOutput,
+    ),
     "escalate_to_partner": (EscalateToPartnerInput, EscalateToPartnerOutput),
     "edit_outbound_message": (EditOutboundMessageInput, EditOutboundMessageOutput),
     "delete_outbound_message": (
