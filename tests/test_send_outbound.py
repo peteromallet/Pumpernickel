@@ -265,6 +265,32 @@ async def test_discord_provider_can_suppress_low_level_typing(fake_pool, monkeyp
     get_settings.cache_clear()
 
 
+async def test_discord_final_outbound_splits_on_paragraph_boundaries(fake_pool, monkeypatch) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    user = _user(fake_pool)
+    sent = []
+
+    async def send_text(to, body, *, send_typing_indicator=True, bot_id="mediator"):
+        sent.append((to, body, send_typing_indicator))
+        return {"messages": [{"id": f"discord-message-{len(sent)}"}]}
+
+    monkeypatch.setattr("app.services.discord.send_text", send_text)
+
+    paragraphs = ["A" * 600, "B" * 600, "C" * 600]
+    row_id = await send_outbound(fake_pool, user, "\n\n".join(paragraphs), scope=_scope(user))
+
+    assert [body for _, body, _ in sent] == paragraphs
+    assert [typing for _, _, typing in sent] == [True, False, False]
+    assert all(len(body) < 1900 for _, body, _ in sent)
+    assert fake_pool.messages[row_id]["content"] == paragraphs[-1]
+    assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message-3"
+    assert fake_pool.messages[row_id]["processing_state"] == "processed"
+    get_settings.cache_clear()
+
+
 async def test_null_window_uses_template_no_none_arithmetic(fake_pool, monkeypatch) -> None:
     user = _user(fake_pool)
     sent = []
