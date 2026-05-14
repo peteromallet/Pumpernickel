@@ -15,9 +15,9 @@ from __future__ import annotations
 from typing import Any
 
 from app.bots.prompts.partner_nudge import PARTNER_NUDGE_PROMPT_SLOT
-from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
 from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
 from app.services.cross_thread_privacy import normalize_partner_share_for_privacy
+from app.services.open_asks import OpenAsk
 
 TANTE_ROSI_PROMPT_VERSION = "v1"
 
@@ -157,21 +157,6 @@ user. Postpartum is its own season — exhaustion, identity shift,
 recovery, sometimes anxiety. You listen for what's actually present,
 not for the picture-book version.
 
-# Onboarding — wenn der ET noch fehlt
-
-If the user mentions pregnancy and `pregnancy_edd` is null (you'll see
-this in hot context), your first job is to capture the EDD. Once,
-plainly:
-
-- "Glückwunsch. Damit ich dich gut begleiten kann — weißt du schon
-  deinen Entbindungstermin, oder wann deine letzte Periode war?"
-
-When they answer, call `set_pregnancy_edd` with the right
-`dating_basis` ("lmp" if they gave you their last period, "scan" if
-they gave you a scan-derived due date or said "der ET vom Ultraschall").
-
-Don't interrogate. One ask, then move on with the actual conversation.
-
 # Komplikationen / High-Risk
 
 If the user mentions a high-risk situation (prior miscarriage,
@@ -202,25 +187,15 @@ advise — they have a team for that.
   scan-corrected EDD (`correct_pregnancy_edd`), or news that the
   pregnancy has ended (`end_pregnancy`). Don't infer — the user has to
   tell you the change explicitly.
+- If the hot context has an `## Open asks` section, those are things you
+  need to find out from the user. Work one in when there's a place to.
+  One per turn. Don't push if they deflect.
 {scheduling_section}{partner_nudge_section}{partner_sharing_section}
 - One question per reply, maximum. Don't interview.
 - Keep replies short by default. Longer only when there's substance to
   say.
-{first_contact_section}
 """.rstrip()
 
-
-_FIRST_CONTACT_V1 = """\
-
-# First Contact
-
-This is the user's first substantive turn with you. Greet briefly in
-German, say who you are in one sentence, and ask the EDD/LMP onboarding
-question if `pregnancy_edd` is still null. If they opened with
-something substantive, address that first and weave the onboarding ask
-in naturally. Don't pile on disclaimers — your role becomes clear
-through how you talk, not through framing announcements.
-""".rstrip()
 
 _PARTNER_SHARE_OPT_IN_V1 = """\
 
@@ -257,22 +232,44 @@ def render_system_prompt(
     is solo-shape.
     """
     template = _TANTE_ROSI_V1  # only one version today
-    first_contact = _FIRST_CONTACT_V1 if onboarding_state == "pending" else ""
+    del onboarding_state
     partner_sharing_section = ""
-    if partner_sharing_state == "pending":
-        partner_sharing_section = "\n" + PENDING_PARTNER_SHARING_PROMPT_SLOT + "\n"
-    elif normalize_partner_share_for_privacy(partner_share) == "opt_in":
+    del partner_sharing_state
+    if normalize_partner_share_for_privacy(partner_share) == "opt_in":
         partner_sharing_section = _PARTNER_SHARE_OPT_IN_V1 + "\n"
-    # Mount order per SD-013: scheduling → partner-nudge → pending-sharing.
+    # Mount order per SD-013: scheduling → partner-nudge → partner-sharing.
     # Unconditional mount — the tools self-reject when prerequisites
     # (dyad partner, recipient opt_in) are missing.
     scheduling_section = "\n" + SCHEDULING_CAPABILITY_PROMPT_SLOT + "\n"
     partner_nudge_section = "\n" + PARTNER_NUDGE_PROMPT_SLOT + "\n"
     return (
-        template.replace("{first_contact_section}", first_contact)
-        .replace("{scheduling_section}", scheduling_section)
+        template.replace("{scheduling_section}", scheduling_section)
         .replace("{partner_nudge_section}", partner_nudge_section)
         .replace("{partner_sharing_section}", partner_sharing_section)
         .replace("{assistant_name}", assistant_name)
         .replace("{user_name}", user_name)
     )
+
+
+ASKS = [
+    OpenAsk(
+        key="pregnancy_edd",
+        open_if=lambda state: state.get("pregnancy_edd") is None,
+        example=(
+            "Glückwunsch. Damit ich dich gut begleiten kann — weißt du "
+            "schon deinen Entbindungstermin, oder wann deine letzte "
+            "Periode war?"
+        ),
+        resolves_with="set_pregnancy_edd",
+    ),
+    OpenAsk(
+        key="partner_share",
+        open_if=lambda state: bool(state.get("has_partner"))
+        and state.get("partner_share") is None,
+        example=(
+            "Willst du, dass ich {partner_name} ab und zu sage, wie's "
+            "dir geht, oder lieber nicht?"
+        ),
+        resolves_with="set_partner_sharing",
+    ),
+]

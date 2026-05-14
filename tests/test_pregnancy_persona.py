@@ -240,18 +240,19 @@ class TestTanteRosiPersonaContent:
         # Sternenkind or Engelskind should appear as a 'don't use unless user does first'.
         assert "Sternenkind" in result or "Engelskind" in result
 
-    def test_onboarding_capture_script_present(self):
-        """When EDD is null, persona must instruct capture of due date or LMP."""
+    def test_open_asks_operating_principle_present(self):
+        """Open asks now carry EDD capture instead of an onboarding stanza."""
         result = self._render()
-        assert "Entbindungstermin" in result
-        assert "set_pregnancy_edd" in result
-        assert "dating_basis" in result
+        assert "## Open asks" in result
+        assert "things you" in result
+        assert "need to find out from the user" in result
+        assert "One per turn" in result
 
-    def test_onboarding_first_contact_appears_when_pending(self):
-        """When onboarding_state is pending, the first-contact block appears."""
+    def test_onboarding_first_contact_no_longer_mounts(self):
+        """onboarding_state no longer mounts a separate first-contact block."""
         result_pending = self._render(onboarding_state="pending")
         result_complete = self._render(onboarding_state="complete")
-        assert "First Contact" in result_pending
+        assert "First Contact" not in result_pending
         assert "First Contact" not in result_complete
 
     def test_boundary_redirect_relationship_to_veas(self):

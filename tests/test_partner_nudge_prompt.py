@@ -97,11 +97,8 @@ def test_tante_rosi_botspec_render_contains_partner_nudge_slot() -> None:
     assert PARTNER_NUDGE_PROMPT_SLOT in rendered
 
 
-def test_mount_order_scheduling_then_partner_nudge_then_pending_sharing() -> None:
-    """SD-013: rendered order must be scheduling → partner-nudge →
-    pending-sharing.
-    """
-    from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+def test_mount_order_scheduling_then_partner_nudge() -> None:
+    """SD-013: rendered order must be scheduling → partner-nudge."""
     from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
     from app.services.prompts import render_system_prompt
 
@@ -114,14 +111,12 @@ def test_mount_order_scheduling_then_partner_nudge_then_pending_sharing() -> Non
     )
     scheduling_index = rendered.find(SCHEDULING_CAPABILITY_PROMPT_SLOT)
     partner_nudge_index = rendered.find(PARTNER_NUDGE_PROMPT_SLOT)
-    pending_sharing_index = rendered.find(PENDING_PARTNER_SHARING_PROMPT_SLOT)
     assert scheduling_index >= 0
     assert partner_nudge_index > scheduling_index
-    assert pending_sharing_index > partner_nudge_index
+    assert "Partner sharing is undecided" not in rendered
 
 
-def test_solo_mount_order_scheduling_then_partner_nudge_then_pending_sharing() -> None:
-    from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
+def test_solo_mount_order_scheduling_then_partner_nudge() -> None:
     from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
     from app.services.prompts_solo import render_solo_system_prompt
 
@@ -130,7 +125,6 @@ def test_solo_mount_order_scheduling_then_partner_nudge_then_pending_sharing() -
     )
     scheduling_index = rendered.find(SCHEDULING_CAPABILITY_PROMPT_SLOT)
     partner_nudge_index = rendered.find(PARTNER_NUDGE_PROMPT_SLOT)
-    pending_sharing_index = rendered.find(PENDING_PARTNER_SHARING_PROMPT_SLOT)
     assert scheduling_index >= 0
     assert partner_nudge_index > scheduling_index
-    assert pending_sharing_index > partner_nudge_index
+    assert "Partner sharing is undecided" not in rendered

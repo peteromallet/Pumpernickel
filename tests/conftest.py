@@ -2532,7 +2532,10 @@ class FakePool:
             ]
         # JOIN artifact_topics filter is honored at the FakePool level via self.artifact_topics; matchers below ignore the JOIN clause.
         if "FROM observations" in compact:
-            if "SELECT id, content" in compact and "scoring_prompt_version" in compact:
+            if (
+                ("SELECT id, content" in compact or "SELECT o.id, o.content" in compact)
+                and "scoring_prompt_version" in compact
+            ):
                 threshold = args[0]
                 return [
                     {"id": row["id"], "content": row.get("content", "")}
@@ -2540,6 +2543,7 @@ class FakePool:
                     if row.get("scoring_prompt_version") is None
                     or row.get("scoring_prompt_version") < threshold
                     or str(row.get("scoring_prompt_version", "")).endswith("failed")
+                    or row.get("needs_rescoring") is True
                 ]
             return [
                 {
@@ -3504,6 +3508,17 @@ class FakePool:
                     observation["confidence"] = (
                         "medium" if observation["confidence"] == "high" else "low"
                     )
+            return "UPDATE 1"
+        if compact.startswith("UPDATE observations SET significance = $1"):
+            significance, scoring_prompt_version, observation_id = args
+            observation = self.observations[observation_id]
+            observation["significance"] = significance
+            observation["scoring_prompt_version"] = scoring_prompt_version
+            observation["last_reinforced_at"] = observation.get(
+                "last_reinforced_at"
+            ) or datetime.now(UTC)
+            if significance is not None:
+                observation["needs_rescoring"] = False
             return "UPDATE 1"
         if compact.startswith("UPDATE watch_items SET status = 'expired'"):
             now = args[0]

@@ -1,9 +1,9 @@
 """Versioned system prompts for the agentic conversational loop."""
 
 from app.bots.prompts.partner_nudge import PARTNER_NUDGE_PROMPT_SLOT
-from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
 from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
 from app.services.cross_thread_privacy import normalize_partner_share_for_privacy
+from app.services.open_asks import OpenAsk
 
 SYSTEM_PROMPT_VERSION = "v3"
 
@@ -26,7 +26,7 @@ You are not a therapist. You help each partner reflect, translate charged conten
 - Do not present guesses as facts.
 - Do not help a user weaponize the assistant against their partner.
 - When refusing or redirecting, keep it short and offer a constructive next move.
-{first_contact_section}
+- If the hot context has an `## Open asks` section, those are things you need to find out from the user. Work one in when there's a place to. One per turn. Don't push if they deflect.
 # Definitions
 
 **Crisis** — used to determine when the bot drops the mediator role:
@@ -323,24 +323,6 @@ Silence is acceptable. If the triggering message is `charged` or `crisis`, silen
     )
 )
 
-FIRST_CONTACT_SECTION_V1 = """
-# First Contact
-
-This is the current user's first substantive interaction with you (`onboarding_state` is `pending`). Write the first message yourself using judgment, not a canned script.
-
-- If they only greet you, briefly introduce what you are here for and invite them to start naturally.
-- If they opened with something substantive, answer the thing they actually said first, and weave in a brief role/scope note only as much as needed.
-- Mention once that you are not a therapist if it fits naturally, but do not make the whole reply a disclaimer.
-- Do not interrogate them with intake questions. Ask at most one useful question, or offer one clear next sentence they could send their partner.
-""".strip()
-
-CROSS_THREAD_UNSET_V1 = PENDING_PARTNER_SHARING_PROMPT_SLOT
-
-CROSS_THREAD_UNSET_V3 = CROSS_THREAD_UNSET_V1.replace(
-    "call `set_partner_sharing` in Phase B",
-    "call `set_partner_sharing` in the record step",
-)
-
 CROSS_THREAD_OPT_IN_V1 = """
 The current user's `partner_share` is `opt_in`: their thread is shareable across the relationship bridge by default, subject to OOB and judgment. They can still mark individual things out of bounds so those stay private. OOB always overrides opt-in — never bypass `check_oob` because the default is permissive.
 """.strip()
@@ -373,25 +355,16 @@ PROMPT_REGISTRY: dict[str, str] = {
     SYSTEM_PROMPT_VERSION: SYSTEM_PROMPT_V3,
 }
 
-FIRST_CONTACT_REGISTRY: dict[str, str] = {
-    "v1": FIRST_CONTACT_SECTION_V1,
-    "v2": FIRST_CONTACT_SECTION_V1,
-    SYSTEM_PROMPT_VERSION: FIRST_CONTACT_SECTION_V1,
-}
-
 CROSS_THREAD_REGISTRY: dict[str, dict[str, str]] = {
     "v1": {
-        "unset": CROSS_THREAD_UNSET_V1,
         "opt_in": CROSS_THREAD_OPT_IN_V1,
         "opt_out": CROSS_THREAD_OPT_OUT_V1,
     },
     "v2": {
-        "unset": CROSS_THREAD_UNSET_V1,
         "opt_in": CROSS_THREAD_OPT_IN_V1,
         "opt_out": CROSS_THREAD_OPT_OUT_V1,
     },
     SYSTEM_PROMPT_VERSION: {
-        "unset": CROSS_THREAD_UNSET_V3,
         "opt_in": CROSS_THREAD_OPT_IN_V1,
         "opt_out": CROSS_THREAD_OPT_OUT_V1,
     },
@@ -444,10 +417,7 @@ def render_system_prompt(
     **kwargs: object,
 ) -> str:
     template = get_system_prompt_template(prompt_version)
-    if onboarding_state == "pending":
-        first_contact = "\n\n" + FIRST_CONTACT_REGISTRY[prompt_version] + "\n"
-    else:
-        first_contact = ""
+    del onboarding_state
 
     if current_user_partner_share is None:
         current_user_partner_share = kwargs.get(
@@ -472,9 +442,9 @@ def render_system_prompt(
     else:
         partner_branch_key = "opt_out"
 
-    if current_user_partner_sharing_state == "pending":
-        cross_thread_block = PENDING_PARTNER_SHARING_PROMPT_SLOT
-    elif current_state in {"opt_in", "opt_out"}:
+    del current_user_partner_sharing_state
+    del partner_partner_sharing_state
+    if current_state in {"opt_in", "opt_out"}:
         cross_thread_block = CROSS_THREAD_REGISTRY[prompt_version][current_state]
     else:
         cross_thread_block = ""
@@ -489,14 +459,12 @@ def render_system_prompt(
     # when prerequisites aren't met (no dyad partner, recipient not
     # opted in, etc.). Mount order is load-bearing per SD-013:
     # scheduling (capability awareness) → partner-nudge (specialized
-    # verb) → pending-sharing (one-shot onboarding, mounted via
-    # {cross_thread_section} below).
+    # verb) → cross-thread state guidance.
     scheduling_section = "\n" + SCHEDULING_CAPABILITY_PROMPT_SLOT + "\n"
     partner_nudge_section = "\n" + PARTNER_NUDGE_PROMPT_SLOT + "\n"
 
     return (
-        template.replace("{first_contact_section}", first_contact)
-        .replace("{scheduling_section}", scheduling_section)
+        template.replace("{scheduling_section}", scheduling_section)
         .replace("{partner_nudge_section}", partner_nudge_section)
         .replace("{cross_thread_section}", cross_thread_section)
         .replace("{partner_perspective_section}", partner_perspective_section)
@@ -504,3 +472,18 @@ def render_system_prompt(
         .replace("{partner_a_name}", partner_a)
         .replace("{partner_b_name}", partner_b)
     )
+
+
+VEAS_ASKS = [
+    OpenAsk(
+        key="partner_share",
+        open_if=lambda state: bool(state.get("has_partner"))
+        and state.get("partner_share") is None,
+        example=(
+            "Before we go further — can I share carefully chosen, "
+            "non-sensitive context from your side with {partner_name}, "
+            "or would you rather I kept this thread fully private?"
+        ),
+        resolves_with="set_partner_sharing",
+    ),
+]

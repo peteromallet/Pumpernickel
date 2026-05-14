@@ -95,15 +95,15 @@ def test_prompt_includes_scheduling_judgment_and_relative_time_guidance() -> Non
     assert "Never schedule in the past" in rendered
 
 
-def test_prompt_tells_agent_to_handle_first_contact() -> None:
+def test_prompt_no_longer_mounts_first_contact_section() -> None:
     rendered = render_system_prompt(
         "Mediator", "Maya", "Ben", prompt_version="v1", onboarding_state="pending"
     )
 
-    assert "# First Contact" in rendered
-    assert "onboarding_state" in rendered
-    assert "Write the first message yourself using judgment" in rendered
-    assert "not a canned script" in rendered
+    assert "# First Contact" not in rendered
+    assert "onboarding_state" not in rendered
+    assert "Write the first message yourself using judgment" not in rendered
+    assert "not a canned script" not in rendered
 
 
 def test_prompt_omits_first_contact_when_onboarding_complete() -> None:
@@ -173,13 +173,11 @@ def test_v3_prompt_uses_adaptive_step_language() -> None:
     )
 
     assert "# Adaptive Turn Shape" in rendered
-    assert "record step" in rendered
+    assert "`record`: maintain durable state after the reply" in rendered
     assert "Phase B" not in rendered
 
 
-def test_cross_thread_unset_branch_present_when_current_user_unset() -> None:
-    from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
-
+def test_cross_thread_unset_branch_is_not_mounted_when_current_user_unset() -> None:
     rendered = render_system_prompt(
         "Mediator",
         "Maya",
@@ -190,9 +188,8 @@ def test_cross_thread_unset_branch_present_when_current_user_unset() -> None:
         current_user_partner_sharing_state="pending",
     )
 
-    assert PENDING_PARTNER_SHARING_PROMPT_SLOT in rendered
-    assert "raise the choice naturally this turn" in rendered
-    assert "`set_partner_sharing(opt_in=true)`" in rendered
+    assert "Partner sharing is undecided" not in rendered
+    assert "`set_partner_sharing(opt_in=true)`" not in rendered
     # opt-out soft-nudge content should not appear when user is unset
     assert "never pressure or repeat" not in rendered
 

@@ -24,6 +24,7 @@ from app.services.time_context import (
 )
 from app.services.tools.common import media_analysis_text
 from app.services.hot_context import peek_other_topics
+from app.services.open_asks import _get_bot_asks, render_open_asks
 from app.services.partner_sharing import (
     get_partner_share,
     has_dyad_partner,
@@ -52,6 +53,7 @@ class HotContextSolo:
     topic_status: dict[str, Any] | None = None
     cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
     pregnancy_state: str | None = None
+    bot_id: str = "coach"
 
 
 def _partner_sharing_state(partner_share: str | None, *, has_partner: bool) -> str:
@@ -687,6 +689,7 @@ async def build_hot_context_solo(
         topic_status=topic_status,
         cross_topic_peek=cross_topic_peek,
         pregnancy_state=pregnancy_state,
+        bot_id=bot_id,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
             **(trigger_metadata or {}),
@@ -734,6 +737,17 @@ def _render_solo_with_counts(
         f"- partner_sharing_state: {_clip(hc.current_user.get('partner_sharing_state', 'unavailable'), clip_limit)}",
         f"- style_notes: {_clip(hc.current_user.get('style_notes', ''), clip_limit)}",
     ]
+    open_asks = render_open_asks(
+        _get_bot_asks(hc.bot_id),
+        {
+            "pregnancy_edd": hc.current_user.get("pregnancy_edd"),
+            "partner_share": hc.current_user.get("partner_share"),
+            "has_partner": bool(hc.partner_user),
+            "partner_name": hc.partner_user.get("name") if hc.partner_user else None,
+        },
+    )
+    if open_asks:
+        lines += ["", open_asks]
     # ── Partner identity block (S1) ────────────────────────────────────
     # Identity-only by invariant 1: name, id, timezone, plus the
     # recipient-side per-bot partner_share. No memories, themes,
@@ -954,6 +968,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         topic_status=hc.topic_status,
         cross_topic_peek=list(hc.cross_topic_peek),
         pregnancy_state=hc.pregnancy_state,
+        bot_id=hc.bot_id,
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
     )

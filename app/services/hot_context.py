@@ -16,6 +16,7 @@ from app.services.cross_thread_privacy import (
     raw_message_visibility,
 )
 from app.services.partner_sharing import get_partner_share, provenance_prefix
+from app.services.open_asks import _get_bot_asks, render_open_asks
 from app.services.text_safety import (
     clean_user_facing_text,
     looks_like_internal_process_text,
@@ -54,6 +55,7 @@ class HotContext:
     cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
     cross_topic_status: list[dict[str, Any]] = field(default_factory=list)
     partner_shareable_summaries: list[dict[str, Any]] = field(default_factory=list)
+    bot_id: str = MEDIATOR_BOT_ID
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -954,6 +956,7 @@ async def build_hot_context(
         cross_topic_peek=cross_topic_peek,
         cross_topic_status=cross_topic_status,
         partner_shareable_summaries=partner_shareable_summaries,
+        bot_id=bot_id,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
             **(trigger_metadata or {}),
@@ -1091,6 +1094,19 @@ def _render_with_counts(
         f"- partner_share: {_clip(current_partner_share or 'unset', clip_limit)}",
         f"- partner_sharing_state: {_clip(hc.current_user.get('partner_sharing_state', 'unavailable'), clip_limit)}",
         f"- style_notes: {_clip(hc.current_user.get('style_notes', ''), clip_limit)}",
+    ]
+    open_asks = render_open_asks(
+        _get_bot_asks(hc.bot_id),
+        {
+            "pregnancy_edd": hc.current_user.get("pregnancy_edd"),
+            "partner_share": current_partner_share,
+            "has_partner": bool(hc.partner_user),
+            "partner_name": hc.partner_user.get("name") if hc.partner_user else None,
+        },
+    )
+    if open_asks:
+        lines += ["", open_asks]
+    lines += [
         "",
         "## Your Partner",
         f"- id: {_clip(hc.partner_user['id'], clip_limit)}",
@@ -1336,6 +1352,7 @@ def render_hot_context(hc: HotContext) -> str:
         cross_topic_status=list(hc.cross_topic_status),
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
+        bot_id=hc.bot_id,
     )
     truncations = {
         "distillations": 0,

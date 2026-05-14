@@ -6,28 +6,11 @@ crisis escalation gate.
 """
 
 from app.bots.prompts.partner_nudge import PARTNER_NUDGE_PROMPT_SLOT
-from app.bots.prompts.partner_sharing import PENDING_PARTNER_SHARING_PROMPT_SLOT
 from app.bots.prompts.scheduling import SCHEDULING_CAPABILITY_PROMPT_SLOT
 from app.services.crisis_solo import SOLO_CRISIS_SECTION_V1
+from app.services.open_asks import OpenAsk
 
 SOLO_SYSTEM_PROMPT_VERSION = "v1"
-
-SOLO_FIRST_CONTACT_V1 = """\
-# First Contact
-
-This is the user's first substantive interaction with you (`onboarding_state`
-is `pending`). Write the first message yourself using judgment, not a canned
-script.
-
-- If they only greet you, briefly introduce what you are here for and invite
-  them to start naturally.
-- If they opened with something substantive, answer the thing they actually
-  said first, and weave in a brief role/scope note only as much as needed.
-- Mention once that you are not a therapist if it fits naturally, but do not
-  make the whole reply a disclaimer.
-- Do not interrogate them with intake questions. Ask at most one useful
-  question, or offer one clear next step they could take.
-""".rstrip()
 
 SOLO_SYSTEM_PROMPT_V1 = f"""\
 # Role And Identity
@@ -40,7 +23,6 @@ life, notice grounded patterns, surface useful questions, protect explicit
 out-of-bounds boundaries, and redirect toward real-world action when that is
 the better tool.
 
-{{first_contact_section}}
 {{scheduling_section}}
 {{partner_nudge_section}}
 {{partner_sharing_section}}
@@ -76,6 +58,9 @@ description):
 - Do not present guesses as facts.
 - When refusing or redirecting, keep it short and offer a constructive next
   move.
+- If the hot context has an `## Open asks` section, those are things you need
+  to find out from the user. Work one in when there's a place to. One per
+  turn. Don't push if they deflect.
 
 # Relational Voice
 
@@ -385,10 +370,6 @@ SOLO_PROMPT_REGISTRY: dict[str, str] = {
     "v1": SOLO_SYSTEM_PROMPT_V1,
 }
 
-SOLO_FIRST_CONTACT_REGISTRY: dict[str, str] = {
-    "v1": SOLO_FIRST_CONTACT_V1,
-}
-
 
 def render_solo_system_prompt(
     assistant_name: str,
@@ -408,31 +389,36 @@ def render_solo_system_prompt(
     the caller level).
     """
     template = SOLO_PROMPT_REGISTRY.get(prompt_version, SOLO_SYSTEM_PROMPT_V1)
-    if onboarding_state == "pending":
-        first_contact = (
-            "\n\n"
-            + SOLO_FIRST_CONTACT_REGISTRY.get(prompt_version, SOLO_FIRST_CONTACT_V1)
-            + "\n"
-        )
-    else:
-        first_contact = ""
-    partner_sharing_section = (
-        f"\n{PENDING_PARTNER_SHARING_PROMPT_SLOT}\n"
-        if partner_sharing_state == "pending"
-        else ""
-    )
-    # Mount order per SD-013: scheduling → partner-nudge → pending-sharing.
+    del onboarding_state
+    del partner_share
+    del partner_sharing_state
+    partner_sharing_section = ""
+    # Mount order per SD-013: scheduling → partner-nudge.
     # Mounted unconditionally — the tools self-reject when prerequisites
     # are missing (e.g. no dyad partner).
     scheduling_section = "\n" + SCHEDULING_CAPABILITY_PROMPT_SLOT + "\n"
     partner_nudge_section = "\n" + PARTNER_NUDGE_PROMPT_SLOT + "\n"
 
     return (
-        template.replace("{first_contact_section}", first_contact)
-        .replace("{scheduling_section}", scheduling_section)
+        template.replace("{scheduling_section}", scheduling_section)
         .replace("{partner_nudge_section}", partner_nudge_section)
         .replace("{partner_sharing_section}", partner_sharing_section)
         .replace("{assistant_name}", assistant_name)
         .replace("{user_name}", user_name)
         .replace("{topic_display_name}", topic_display_name)
     )
+
+
+ASKS = [
+    OpenAsk(
+        key="partner_share",
+        open_if=lambda state: bool(state.get("has_partner"))
+        and state.get("partner_share") is None,
+        example=(
+            "Before we go further, would you like me to share small, "
+            "carefully chosen context from this thread with {partner_name}, "
+            "or keep this fully private?"
+        ),
+        resolves_with="set_partner_sharing",
+    ),
+]
