@@ -129,7 +129,8 @@ def format_pregnancy_state(user: User, today: date | None = None) -> str | None:
     Render branches
     ---------------
     1. ``pregnancy_edd IS NULL`` → None
-    2. Active pregnancy → ``"17w2d (second trimester, EDD 2026-10-22, basis: lmp)"``
+    2. Active pregnancy → prompt-ready lines with computed gestational age,
+       current pregnancy week, trimester, EDD, and dating basis.
     3. Recent loss (< 90 days since ``pregnancy_ended_at``) →
        ``"Recent loss (12 days ago). Handle with care."``
     4. Recent birth (< 90 days since ``pregnancy_ended_at``) →
@@ -196,7 +197,17 @@ def format_pregnancy_state(user: User, today: date | None = None) -> str | None:
     if weeks >= LATE_OVERDUE_WEEKS:
         return f"42w (overdue, EDD was {edd_str})"
 
-    return f"{weeks}w{days}d ({tri} trimester, EDD {edd_str}, basis: {basis})"
+    pregnancy_week = weeks + 1
+    return "\n".join(
+        [
+            f"- gestational_age_today: {weeks}w{days}d",
+            f"- pregnancy_week: week {pregnancy_week}",
+            f"- trimester: {tri}",
+            f"- estimated_due_date: {edd_str}",
+            f"- dating_basis: {basis}",
+            "- calculation_note: Gestational age is computed from the stored EDD and today's local date; use these values directly and do not recalculate or infer the week from the EDD.",
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------

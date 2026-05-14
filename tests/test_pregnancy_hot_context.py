@@ -303,6 +303,39 @@ class TestPregnancyHotContextSolo:
         assert "partner safe summary" not in rendered
         assert "partner raw message" not in rendered
 
+    @pytest.mark.asyncio
+    async def test_partner_pregnancy_state_renders_for_non_pregnant_user(
+        self, fake_pool
+    ):
+        user = _make_user(user_id=str(uuid4()), name="Peter")
+        partner = _make_user(
+            user_id=str(uuid4()),
+            name="Hannah",
+            pregnancy_edd=date(2027, 1, 12),
+            pregnancy_dating_basis="lmp",
+        )
+        fake_pool.users[user.id] = user.__dict__.copy()
+        fake_pool.users[partner.id] = partner.__dict__.copy()
+        fake_pool.dyad_partners[user.id] = partner.id
+
+        hc = await build_hot_context_solo(
+            fake_pool,
+            user,
+            [],
+            {"kind": "test"},
+            primary_topic_id=_TOPIC_ID,
+            bot_id="tante_rosi",
+        )
+        assert hc.pregnancy_state is None
+        assert hc.partner_pregnancy_state is not None
+        assert "- subject: Hannah" in hc.partner_pregnancy_state
+        assert "- estimated_due_date: 2027-01-12" in hc.partner_pregnancy_state
+
+        rendered = render_hot_context_solo(hc)
+        assert "## Partner pregnancy" in rendered
+        assert "- estimated_due_date: 2027-01-12" in rendered
+        assert "`pregnancy_edd` is not set." not in rendered
+
 
 class TestPregnancyHelperIntegration:
     """Integration tests: format_pregnancy_state called from hot_context_solo."""
@@ -319,9 +352,11 @@ class TestPregnancyHelperIntegration:
         # Use an explicit today to get deterministic output
         result = format_pregnancy_state(user, today=date(2026, 5, 12))
         assert result is not None
-        assert "second trimester" in result
-        assert "EDD 2026-10-22" in result
-        assert "basis: lmp" in result
+        assert "- gestational_age_today: 16w5d" in result
+        assert "- pregnancy_week: week 17" in result
+        assert "- trimester: second" in result
+        assert "- estimated_due_date: 2026-10-22" in result
+        assert "- dating_basis: lmp" in result
 
     def test_format_pregnancy_state_recent_loss(self):
         """format_pregnancy_state returns loss message for recent loss."""

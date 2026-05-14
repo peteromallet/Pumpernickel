@@ -53,6 +53,7 @@ class HotContextSolo:
     topic_status: dict[str, Any] | None = None
     cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
     pregnancy_state: str | None = None
+    partner_pregnancy_state: str | None = None
     bot_id: str = "coach"
 
 
@@ -180,6 +181,38 @@ def _clip_id(value: Any, clip_limit: int) -> str:
     return _clip(value, 14 if clip_limit < 60 else clip_limit)
 
 
+def _format_partner_pregnancy_state(
+    partner_user: dict[str, Any],
+    *,
+    partner_name: str | None,
+    today: Any,
+) -> str | None:
+    from app.services.pregnancy import format_pregnancy_state
+
+    pregnancy_edd = partner_user.get("pregnancy_edd")
+    if pregnancy_edd is None:
+        return None
+    user = User(
+        id=partner_user.get("id"),
+        name=partner_name or partner_user.get("name") or "Partner",
+        phone="",
+        timezone=partner_user.get("timezone") or "UTC",
+        pregnancy_edd=pregnancy_edd,
+        pregnancy_dating_basis=partner_user.get("pregnancy_dating_basis"),
+        pregnancy_lmp_date=partner_user.get("pregnancy_lmp_date"),
+        pregnancy_scan_date=partner_user.get("pregnancy_scan_date"),
+        pregnancy_scan_corrected_at=partner_user.get("pregnancy_scan_corrected_at"),
+        pregnancy_started_at=partner_user.get("pregnancy_started_at"),
+        pregnancy_ended_at=partner_user.get("pregnancy_ended_at"),
+        pregnancy_outcome=partner_user.get("pregnancy_outcome"),
+    )
+    state = format_pregnancy_state(user, today=today)
+    if state is None:
+        return None
+    label = partner_name or partner_user.get("name") or "partner"
+    return f"- subject: {label}\n{state}"
+
+
 async def _user_profile_solo(pool: Any, user: User) -> dict[str, Any]:
     row = await pool.fetchrow(
         """\
@@ -275,7 +308,13 @@ async def build_hot_context_solo(
     partner_user: dict[str, Any] = {}
     if dyad_partner is not None:
         partner_row = await pool.fetchrow(
-            "SELECT id, name, timezone FROM users WHERE id = $1",
+            """\
+            SELECT id, name, phone, timezone, onboarding_state, pacing_preferences,
+                   pregnancy_edd, pregnancy_dating_basis, pregnancy_lmp_date, pregnancy_scan_date,
+                   pregnancy_scan_corrected_at, pregnancy_started_at, pregnancy_ended_at, pregnancy_outcome
+            FROM users
+            WHERE id = $1
+            """,
             dyad_partner.partner_user_id,
         )
         partner_recipient_share = await get_partner_share(
@@ -288,6 +327,16 @@ async def build_hot_context_solo(
                 "timezone": partner_row.get("timezone")
                 if isinstance(partner_row, dict)
                 else partner_row["timezone"],
+                "pregnancy_edd": partner_row["pregnancy_edd"],
+                "pregnancy_dating_basis": partner_row["pregnancy_dating_basis"],
+                "pregnancy_lmp_date": partner_row["pregnancy_lmp_date"],
+                "pregnancy_scan_date": partner_row["pregnancy_scan_date"],
+                "pregnancy_scan_corrected_at": partner_row[
+                    "pregnancy_scan_corrected_at"
+                ],
+                "pregnancy_started_at": partner_row["pregnancy_started_at"],
+                "pregnancy_ended_at": partner_row["pregnancy_ended_at"],
+                "pregnancy_outcome": partner_row["pregnancy_outcome"],
                 # Recipient-side per-bot sharing state, normalized to one of
                 # {opt_in, opt_out, pending}. Used by the partner-nudge tool
                 # to decide whether scheduling is allowed.
@@ -667,10 +716,18 @@ async def build_hot_context_solo(
 
     # ── Pregnancy state (Tante Rosi only) ──────────────────────────────
     pregnancy_state: str | None = None
+    partner_pregnancy_state: str | None = None
     if bot_id == "tante_rosi":
         from app.services.pregnancy import format_pregnancy_state
 
-        pregnancy_state = format_pregnancy_state(user)
+        pregnancy_today = now_utc.astimezone(timezone_or_utc(user_timezone)).date()
+        pregnancy_state = format_pregnancy_state(user, today=pregnancy_today)
+        if pregnancy_state is None and partner_user:
+            partner_pregnancy_state = _format_partner_pregnancy_state(
+                partner_user,
+                partner_name=partner_user.get("name"),
+                today=pregnancy_today,
+            )
 
     return HotContextSolo(
         current_user=current_user,
@@ -689,6 +746,7 @@ async def build_hot_context_solo(
         topic_status=topic_status,
         cross_topic_peek=cross_topic_peek,
         pregnancy_state=pregnancy_state,
+        partner_pregnancy_state=partner_pregnancy_state,
         bot_id=bot_id,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
@@ -740,7 +798,8 @@ def _render_solo_with_counts(
     open_asks = render_open_asks(
         _get_bot_asks(hc.bot_id),
         {
-            "pregnancy_edd": hc.current_user.get("pregnancy_edd"),
+            "pregnancy_edd": hc.current_user.get("pregnancy_edd")
+            or (hc.partner_user or {}).get("pregnancy_edd"),
             "partner_share": hc.current_user.get("partner_share"),
             "has_partner": bool(hc.partner_user),
             "partner_name": hc.partner_user.get("name") if hc.partner_user else None,
@@ -805,6 +864,8 @@ def _render_solo_with_counts(
     # ── Pregnancy state (Tante Rosi only) ──────────────────────────
     if hc.pregnancy_state is not None:
         lines += ["", "## Pregnancy", hc.pregnancy_state]
+    elif hc.partner_pregnancy_state is not None:
+        lines += ["", "## Partner pregnancy", hc.partner_pregnancy_state]
 
     # Cross-topic peek for solo
     if hc.cross_topic_peek:
@@ -968,6 +1029,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         topic_status=hc.topic_status,
         cross_topic_peek=list(hc.cross_topic_peek),
         pregnancy_state=hc.pregnancy_state,
+        partner_pregnancy_state=hc.partner_pregnancy_state,
         bot_id=hc.bot_id,
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,

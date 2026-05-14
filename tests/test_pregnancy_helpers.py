@@ -292,7 +292,13 @@ class TestFormatPregnancyState:
             pregnancy_started_at=datetime(2026, 5, 12, tzinfo=timezone.utc),
         )
         result = format_pregnancy_state(user, today=FROZEN)
-        assert result == "0w0d (first trimester, EDD 2027-02-16, basis: lmp)"
+        assert result is not None
+        assert "- gestational_age_today: 0w0d" in result
+        assert "- pregnancy_week: week 1" in result
+        assert "- trimester: first" in result
+        assert "- estimated_due_date: 2027-02-16" in result
+        assert "- dating_basis: lmp" in result
+        assert "do not recalculate" in result
 
     def test_active_mid_second_trimester(self):
         """Active pregnancy at 16w5d, second trimester."""
@@ -304,10 +310,11 @@ class TestFormatPregnancyState:
         )
         result = format_pregnancy_state(user, today=FROZEN)
         assert result is not None
-        assert "16w5d" in result
-        assert "second trimester" in result
-        assert "EDD 2026-10-22" in result
-        assert "basis: lmp" in result
+        assert "- gestational_age_today: 16w5d" in result
+        assert "- pregnancy_week: week 17" in result
+        assert "- trimester: second" in result
+        assert "- estimated_due_date: 2026-10-22" in result
+        assert "- dating_basis: lmp" in result
 
     def test_active_third_trimester(self):
         """Active pregnancy in third trimester at 32w5d."""
@@ -315,8 +322,8 @@ class TestFormatPregnancyState:
         user = _make_user(pregnancy_edd=edd, pregnancy_dating_basis="scan")
         result = format_pregnancy_state(user, today=date(2026, 9, 1))
         assert result is not None
-        assert "third trimester" in result
-        assert "basis: scan" in result
+        assert "- trimester: third" in result
+        assert "- dating_basis: scan" in result
 
     def test_active_overdue(self):
         """Active pregnancy past 42 weeks → overdue rendering."""
@@ -411,5 +418,5 @@ class TestFormatPregnancyState:
         user = _make_user(pregnancy_edd=edd, pregnancy_dating_basis="scan")
         result = format_pregnancy_state(user, today=FROZEN)
         assert result is not None
-        assert result.startswith("0w")  # clamped
-        assert "first trimester" in result
+        assert "- gestational_age_today: 0w0d" in result  # clamped
+        assert "- trimester: first" in result
