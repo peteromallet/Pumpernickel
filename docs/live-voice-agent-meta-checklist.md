@@ -185,7 +185,17 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] App flow: persona pick → start form → agenda card → live screen, all verified via Chrome extension against the local stack (postgres@54322 + uvicorn@8766)
   - [ ] Streamed phase descriptors over WSS (`Catching up…` → `Thinking about focus…` → `Getting ready…`) — currently a single ready-stub phase fires on socket open
   - [ ] Real Anthropic Opus producer (swap from `StubAgendaProducer` once the prompt template is iterated)
-- [ ] **Sprint 2 — Transcript-only live + consent** (mic capture, OpenAI streaming STT, transcript_turns persistence, consent flow; not started)
+- [~] **Sprint 2 — Transcript-only live + consent** (UI + transport done; STT integration pending)
+  - [x] WSS now streams phase descriptors on connect (`Catching up…` → `Thinking…` → `Getting ready…` → `ready`)
+  - [x] `ConsentGate.tsx` pre-mic screen ("Just me" / "Me and a partner" + partner label + acknowledgement). Mic does not open until consent is given.
+  - [x] `web/live-voice/src/mic.ts` — Web Audio mic capture: getUserMedia → resample → 16 kHz mono Int16 PCM frames → binary WS send
+  - [x] WS protocol: binary frames acked with `{type: frame_ack, frames, bytes}`; control text frames (`{type: end_session}`, `{type: advance}`) routed
+  - [x] LiveScreen control footer: Pause / Advance / Stop-for-everyone wired
+  - [x] Browser-verified: consent → phase stream → status=live → mic-open attempt all rendered correctly (headless chrome doesn't produce real audio frames — `frames sent: 0` expected). Activity log shows all phase events arriving over WSS.
+  - [ ] OpenAI `gpt-4o-mini-transcribe` integration on the backend (replace `frame_ack` stub with real partial / final transcripts)
+  - [ ] Persist final transcripts to `mediator.transcript_turns`
+  - [ ] `conversation_consent_events` row writes from `/api/live/sessions/{id}/consent`
+  - [ ] `tests/test_no_audio_persistence.py` — assert frames never survive request scope
 - [ ] **Sprint 3 — Haiku bot turns + TTS + review screen** (`emit_live_turn` schema, ElevenLabs Flash TTS, controls footer, non-skippable review; not started)
 - [ ] **Sprint 4 — VAD + barge-in + latency polish** (not started)
 - [ ] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring + smoke test pending)

@@ -362,25 +362,88 @@ async def get_session(session_id: UUID, pool: Any = Depends(get_pool)) -> dict[s
 
 @router.websocket("/ws/live/{session_id}")
 async def live_socket(websocket: WebSocket, session_id: str) -> None:
-    """Sprint-0 stub: accept, send a ready phase, then echo.
+    """Sprint 1+2 WS handler.
 
-    Real audio framing + Haiku tool calls land in a later sprint.
+    Sends streaming phase descriptors when the socket opens
+    (``catching_up`` → ``thinking`` → ``ready``), then accepts:
+
+    * **text frames** as control JSON (``end_session``, ``advance``, etc.)
+    * **binary frames** as PCM audio (16 kHz mono int16 in v1). Each frame
+      is acknowledged with a ``frame_ack`` event including the running
+      byte count. Sprint 2b swaps the ack stub for the OpenAI
+      ``gpt-4o-mini-transcribe`` streamer; the wire protocol is stable.
+
+    No frames are persisted to disk (asserted via the no-persistence test
+    landing in Sprint 2b).
     """
+    import asyncio
+    import json
+
     await websocket.accept()
     try:
+        # Streaming phase descriptors so the user sees motion while the
+        # backend is "waking up" (Sprint 1 §UI).
+        for label in (
+            "Catching up on where you are…",
+            "Thinking about what to focus on…",
+            "Getting ready for our chat…",
+        ):
+            await websocket.send_json(
+                {"type": "phase", "label": label, "session_id": session_id}
+            )
+            await asyncio.sleep(0.6)
         await websocket.send_json(
-            {
-                "type": "phase",
-                "label": "Live voice agent backend ready (sprint-0 stub)",
-                "session_id": session_id,
-            }
+            {"type": "ready", "label": "Ready when you are.", "session_id": session_id}
         )
+
+        total_frames = 0
+        total_bytes = 0
+
         while True:
             try:
-                message = await websocket.receive_text()
+                event = await websocket.receive()
             except WebSocketDisconnect:
                 return
-            await websocket.send_json({"type": "echo", "payload": message})
+
+            if event["type"] == "websocket.disconnect":
+                return
+
+            data_text = event.get("text")
+            data_bytes = event.get("bytes")
+            if data_bytes is not None:
+                total_frames += 1
+                total_bytes += len(data_bytes)
+                # Ack at a coarse cadence to keep the wire quiet.
+                if total_frames % 8 == 0:
+                    await websocket.send_json({
+                        "type": "frame_ack",
+                        "frames": total_frames,
+                        "bytes": total_bytes,
+                    })
+                continue
+            if not data_text:
+                continue
+            try:
+                payload = json.loads(data_text)
+            except Exception:
+                await websocket.send_json({"type": "echo", "payload": data_text})
+                continue
+
+            kind = payload.get("type") if isinstance(payload, dict) else None
+            if kind == "end_session":
+                await websocket.send_json({"type": "session_ended"})
+                await websocket.close(code=1000)
+                return
+            if kind == "advance":
+                # Sprint 2 stub: just echo the advance request; real
+                # current_item_id handling lands in Sprint 2b.
+                await websocket.send_json({
+                    "type": "phase",
+                    "label": "Moving to the next focus area…",
+                    "session_id": session_id,
+                })
+                continue
+            await websocket.send_json({"type": "echo", "payload": payload})
     except WebSocketDisconnect:
         return
     except Exception:
