@@ -333,6 +333,29 @@ async def _create_message_with_retry(
                     extra=obs_fields(ctx),
                 )
                 continue
+            if provider == "deepseek":
+                logger.warning(
+                    "deepseek failed twice; falling back to anthropic for this step: %s",
+                    exc,
+                    extra=obs_fields(ctx),
+                )
+                fallback_client = anthropic.AsyncAnthropic(
+                    api_key=settings.anthropic_api_key.get_secret_value()
+                )
+                response = await fallback_client.messages.create(
+                    model=settings.conversational_model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                )
+                await _record_response_cost(
+                    ctx.pool,
+                    _attr(response, "usage", {}),
+                    input_price=settings.anthropic_input_usd_per_mtok,
+                    output_price=settings.anthropic_output_usd_per_mtok,
+                )
+                return response
             raise LLMPhaseError(str(exc)) from exc
         if provider == "deepseek":
             input_price = settings.deepseek_input_usd_per_mtok

@@ -54,6 +54,20 @@ class FakeClient:
         self.messages = FakeMessages(responses, requests, events)
 
 
+class FailingMessages:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    async def create(self, **kwargs):
+        self.events.append("deepseek_call")
+        raise RuntimeError("deepseek 400")
+
+
+class FailingClient:
+    def __init__(self, events: list[str]) -> None:
+        self.messages = FailingMessages(events)
+
+
 def _usage(input_tokens: int, cache_create: int, cache_read: int, output_tokens: int) -> dict:
     return {
         "input_tokens": input_tokens,
@@ -255,6 +269,35 @@ async def test_run_step_can_record_deepseek_priced_usage(app_env, monkeypatch):
     assert tool_count == 0
     assert pool.llm_spend_log["text"] == Decimal("0.000380")
     get_settings.cache_clear()
+
+
+async def test_deepseek_failure_falls_back_to_anthropic(app_env, monkeypatch):
+    events: list[str] = []
+    requests: list[dict] = []
+    pool = TrackingPool(events)
+    ctx = _ctx(pool)
+    fallback = FakeClient(
+        [_response([{"type": "text", "text": "fallback reply"}], _usage(100, 0, 0, 20))],
+        requests,
+        events,
+    )
+    monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", lambda api_key: fallback)
+
+    assistant_text, _, tool_count = await run_step(
+        FailingClient(events),
+        ctx,
+        "system",
+        "context",
+        READ_PHASE_TOOLS,
+        [{"role": "user", "content": "Phase A"}],
+        model="deepseek-chat",
+        provider="deepseek",
+    )
+
+    assert assistant_text == "fallback reply"
+    assert tool_count == 0
+    assert events.count("deepseek_call") == 2
+    assert events.count("client_call") == 1
 
 
 def test_peter_uses_deepseek_and_hannah_stays_anthropic(app_env, monkeypatch):
