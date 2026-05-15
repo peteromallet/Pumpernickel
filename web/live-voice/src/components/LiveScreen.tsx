@@ -60,6 +60,15 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
           kind = "phase";
           text = parsed.label ?? "(phase)";
           if (parsed.type === "ready") setStatus("live");
+        } else if (parsed?.type === "transcript_partial") {
+          kind = "info";
+          text = `… ${parsed.text}`;
+        } else if (parsed?.type === "transcript_final") {
+          kind = "phase";
+          text = `you: ${parsed.text}`;
+        } else if (parsed?.type === "transcript_error") {
+          kind = "error";
+          text = `STT error: ${parsed.message ?? "unknown"}`;
         } else {
           text = parsed.label ?? parsed.phase ?? parsed.text ?? JSON.stringify(parsed);
         }

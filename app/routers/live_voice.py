@@ -28,6 +28,7 @@ from app.config import get_settings
 from app.db import get_pool
 from app.services.live.prep import StubAgendaProducer, produce_agenda
 from app.services.live.schemas import PrepRequest
+from app.services.live.stt import select_transcriber
 
 logger = logging.getLogger(__name__)
 
@@ -364,17 +365,18 @@ async def get_session(session_id: UUID, pool: Any = Depends(get_pool)) -> dict[s
 async def live_socket(websocket: WebSocket, session_id: str) -> None:
     """Sprint 1+2 WS handler.
 
-    Sends streaming phase descriptors when the socket opens
-    (``catching_up`` → ``thinking`` → ``ready``), then accepts:
+    On connect: stream phase descriptors (``Catching up…`` → ``Thinking…``
+    → ``Getting ready…`` → ``ready``), then open a
+    :class:`~app.services.live.stt.StreamingTranscriber` (real or stub
+    based on env). Binary frames are pushed through to the transcriber;
+    its events (partial / final / error) are forwarded to the client AND
+    every ``final`` is persisted to ``mediator.transcript_turns``.
 
-    * **text frames** as control JSON (``end_session``, ``advance``, etc.)
-    * **binary frames** as PCM audio (16 kHz mono int16 in v1). Each frame
-      is acknowledged with a ``frame_ack`` event including the running
-      byte count. Sprint 2b swaps the ack stub for the OpenAI
-      ``gpt-4o-mini-transcribe`` streamer; the wire protocol is stable.
+    Text control frames:
 
-    No frames are persisted to disk (asserted via the no-persistence test
-    landing in Sprint 2b).
+    * ``{"type": "end_session"}`` — clean close.
+    * ``{"type": "advance"}`` — push the agenda forward (full
+      ``current_item_id`` advance lands with Haiku turns).
     """
     import asyncio
     import json
@@ -382,7 +384,7 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     try:
         # Streaming phase descriptors so the user sees motion while the
-        # backend is "waking up" (Sprint 1 §UI).
+        # backend is "waking up".
         for label in (
             "Catching up on where you are…",
             "Thinking about what to focus on…",
@@ -396,54 +398,91 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
             {"type": "ready", "label": "Ready when you are.", "session_id": session_id}
         )
 
+        # Open the transcriber.  Stub or real chosen at module level.
+        transcriber = select_transcriber()
+        await transcriber.start()
+
+        pool = websocket.app.state.pool
+
+        async def forward_events() -> None:
+            while True:
+                event = await transcriber.events.get()
+                etype = event.get("type")
+                if etype == "final":
+                    text = (event.get("text") or "").strip()
+                    if text:
+                        try:
+                            await pool.execute(
+                                """
+                                INSERT INTO mediator.transcript_turns
+                                    (conversation_id, speaker_label, speaker_role, text)
+                                VALUES ($1::uuid, $2, 'primary', $3)
+                                """,
+                                session_id,
+                                "speaker_0",
+                                text,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "live_voice: failed to persist transcript_turn", exc_info=True
+                            )
+                # Forward to client regardless.
+                await websocket.send_json({"type": f"transcript_{etype}", **{
+                    k: v for k, v in event.items() if k != "type"
+                }})
+
+        forwarder_task = asyncio.create_task(forward_events())
+
         total_frames = 0
         total_bytes = 0
 
-        while True:
-            try:
-                event = await websocket.receive()
-            except WebSocketDisconnect:
-                return
+        try:
+            while True:
+                try:
+                    event = await websocket.receive()
+                except WebSocketDisconnect:
+                    return
 
-            if event["type"] == "websocket.disconnect":
-                return
+                if event["type"] == "websocket.disconnect":
+                    return
 
-            data_text = event.get("text")
-            data_bytes = event.get("bytes")
-            if data_bytes is not None:
-                total_frames += 1
-                total_bytes += len(data_bytes)
-                # Ack at a coarse cadence to keep the wire quiet.
-                if total_frames % 8 == 0:
+                data_text = event.get("text")
+                data_bytes = event.get("bytes")
+                if data_bytes is not None:
+                    total_frames += 1
+                    total_bytes += len(data_bytes)
+                    await transcriber.push(data_bytes)
+                    if total_frames % 8 == 0:
+                        await websocket.send_json({
+                            "type": "frame_ack",
+                            "frames": total_frames,
+                            "bytes": total_bytes,
+                        })
+                    continue
+                if not data_text:
+                    continue
+                try:
+                    payload = json.loads(data_text)
+                except Exception:
+                    await websocket.send_json({"type": "echo", "payload": data_text})
+                    continue
+
+                kind = payload.get("type") if isinstance(payload, dict) else None
+                if kind == "end_session":
+                    await websocket.send_json({"type": "session_ended"})
+                    await websocket.close(code=1000)
+                    return
+                if kind == "advance":
                     await websocket.send_json({
-                        "type": "frame_ack",
-                        "frames": total_frames,
-                        "bytes": total_bytes,
+                        "type": "phase",
+                        "label": "Moving to the next focus area…",
+                        "session_id": session_id,
                     })
-                continue
-            if not data_text:
-                continue
-            try:
-                payload = json.loads(data_text)
-            except Exception:
-                await websocket.send_json({"type": "echo", "payload": data_text})
-                continue
-
-            kind = payload.get("type") if isinstance(payload, dict) else None
-            if kind == "end_session":
-                await websocket.send_json({"type": "session_ended"})
-                await websocket.close(code=1000)
-                return
-            if kind == "advance":
-                # Sprint 2 stub: just echo the advance request; real
-                # current_item_id handling lands in Sprint 2b.
-                await websocket.send_json({
-                    "type": "phase",
-                    "label": "Moving to the next focus area…",
-                    "session_id": session_id,
-                })
-                continue
-            await websocket.send_json({"type": "echo", "payload": payload})
+                    continue
+                await websocket.send_json({"type": "echo", "payload": payload})
+        finally:
+            forwarder_task.cancel()
+            await transcriber.aclose()
     except WebSocketDisconnect:
         return
     except Exception:

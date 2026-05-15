@@ -192,9 +192,10 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] WS protocol: binary frames acked with `{type: frame_ack, frames, bytes}`; control text frames (`{type: end_session}`, `{type: advance}`) routed
   - [x] LiveScreen control footer: Pause / Advance / Stop-for-everyone wired
   - [x] Browser-verified: consent → phase stream → status=live → mic-open attempt all rendered correctly (headless chrome doesn't produce real audio frames — `frames sent: 0` expected). Activity log shows all phase events arriving over WSS.
-  - [ ] OpenAI `gpt-4o-mini-transcribe` integration on the backend (replace `frame_ack` stub with real partial / final transcripts)
-  - [ ] Persist final transcripts to `mediator.transcript_turns`
-  - [ ] `conversation_consent_events` row writes from `/api/live/sessions/{id}/consent`
+  - [x] `app/services/live/stt.py` — `StreamingTranscriber` protocol + `StubTranscriber` (deterministic line every ~2s of audio) + `OpenAIRealtimeTranscriber` (gpt-4o-mini-transcribe via Realtime WSS, server-VAD). `select_transcriber()` picks based on `LIVE_VOICE_STT_PROVIDER` env / API-key presence — defaults to stub when key is missing or is the local stub.
+  - [x] WS handler forwards transcriber events to the client (`transcript_partial`, `transcript_final`, `transcript_error`); persists every `final` to `mediator.transcript_turns` (`speaker_label='speaker_0'`, `speaker_role='primary'`).
+  - [x] Backend smoke test verified end-to-end (Python websockets client → 80 frames of silence → 2 stub finals persisted to DB).
+  - [ ] `conversation_consent_events` row writes from `/api/live/sessions/{id}/consent` (frontend collects consent but the row insert is pending)
   - [ ] `tests/test_no_audio_persistence.py` — assert frames never survive request scope
 - [ ] **Sprint 3 — Haiku bot turns + TTS + review screen** (`emit_live_turn` schema, ElevenLabs Flash TTS, controls footer, non-skippable review; not started)
 - [ ] **Sprint 4 — VAD + barge-in + latency polish** (not started)
