@@ -158,18 +158,29 @@ async def save_review(
     *,
     keep_items: list[dict[str, Any]],
     keep_notes: list[dict[str, Any]],
-) -> None:
-    """Mark the session synthesized.
+) -> dict[str, int]:
+    """Persist review edits + write kept notes through to ``observations``.
 
-    Sprint 3b intentionally writes ONLY through the existing
-    `conversation_*` tables — it does NOT write to `observations`,
-    `distillations`, or `themes` yet.  That write-through lands in
-    Sprint 3c once we have a real Opus synthesizer.  The frontend's
-    Save still has user value (it locks the review) and any user-edited
-    text gets persisted back to the source rows.
+    Each kept (non-empty) note becomes an `observations` row attributed to
+    the session's user, with `recorded_by_bot_id` set to the bot. That's
+    the v1 write-through; distillations + themes follow once we have a
+    real Opus synthesizer to bucket them.
+
+    Returns a dict with the row counts written so the endpoint can echo
+    them back to the client.
     """
+    counts = {"items_updated": 0, "notes_updated": 0, "notes_deleted": 0, "observations_written": 0}
     async with pool.acquire() as conn:
         async with conn.transaction():
+            conv = await conn.fetchrow(
+                "SELECT user_id, bot_id FROM mediator.conversations WHERE id = $1",
+                session_id,
+            )
+            if conv is None:
+                raise RuntimeError(f"conversation {session_id} not found")
+            user_id: UUID = conv["user_id"]
+            bot_id: str | None = conv["bot_id"]
+
             for item in keep_items:
                 if not item.get("item_id"):
                     continue
@@ -187,6 +198,8 @@ async def save_review(
                     item_id,
                     summary,
                 )
+                counts["items_updated"] += 1
+
             for note in keep_notes:
                 if not note.get("note_id"):
                     continue
@@ -200,12 +213,37 @@ async def save_review(
                         "DELETE FROM mediator.conversation_notes WHERE id = $1",
                         note_id,
                     )
-                else:
+                    counts["notes_deleted"] += 1
+                    continue
+                await conn.execute(
+                    "UPDATE mediator.conversation_notes SET text = $2 WHERE id = $1",
+                    note_id,
+                    text,
+                )
+                counts["notes_updated"] += 1
+                # Write-through: every kept note becomes an observation row.
+                # The note text already includes the [kind] prefix, so it
+                # stays grep-able in the observations stream.
+                try:
                     await conn.execute(
-                        "UPDATE mediator.conversation_notes SET text = $2 WHERE id = $1",
-                        note_id,
+                        """
+                        INSERT INTO mediator.observations
+                            (content, about_user_id, confidence, status,
+                             recorded_by_bot_id)
+                        VALUES ($1, $2, 'medium', 'active', $3)
+                        """,
                         text,
+                        user_id,
+                        bot_id,
                     )
+                    counts["observations_written"] += 1
+                except Exception:
+                    logger.warning(
+                        "save_review: failed to write observation for note %s",
+                        note_id,
+                        exc_info=True,
+                    )
+
             await conn.execute(
                 """
                 UPDATE mediator.conversations
@@ -214,3 +252,4 @@ async def save_review(
                 """,
                 session_id,
             )
+    return counts

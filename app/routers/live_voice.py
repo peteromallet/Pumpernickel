@@ -437,13 +437,13 @@ async def save_review_endpoint(
 ) -> dict[str, Any]:
     if not await _conversations_table_exists(pool):
         raise HTTPException(status_code=503, detail="live conversations not yet migrated")
-    await save_review(
+    counts = await save_review(
         pool,
         session_id,
         keep_items=body.keep_items,
         keep_notes=body.keep_notes,
     )
-    return {"ok": True, "status": "synthesized"}
+    return {"ok": True, "status": "synthesized", "counts": counts}
 
 
 @router.get("/api/live/sessions/{session_id}")
