@@ -274,7 +274,7 @@ async def test_rosi_inbound_scope_reaches_agentic_and_outbound(fake_pool, app_en
             "bot_id": scope.bot_id,
             "topic_id": scope.topic_id,
         }
-        return out_id
+        return {"status": "sent", "message_id": out_id, "visible_to_user": True, "provider_message_id": None}
 
     class AgenticCoalescer:
         async def add(self, user_id, message_id, user: User, *, source: str = "live", scope) -> None:

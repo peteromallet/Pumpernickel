@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -18,6 +19,8 @@ from app.services.withheld_reviews import record_withheld_outbound_review
 logger = logging.getLogger(__name__)
 
 _RETRY_BACKOFF_SECONDS = [1, 2, 4]
+_DISCORD_SPLIT_TARGET_CHARS = 1000
+_DISCORD_HARD_MAX_CHARS = 1900
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -25,6 +28,62 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
         return row[key]
     except (KeyError, TypeError):
         return row.get(key, default) if hasattr(row, "get") else default
+
+
+def _split_discord_text(content: str) -> list[str]:
+    text = content.strip()
+    if len(text) <= _DISCORD_SPLIT_TARGET_CHARS:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+    for paragraph in paragraphs:
+        paragraph_chunks = _split_discord_paragraph(paragraph)
+        for paragraph_chunk in paragraph_chunks:
+            candidate = f"{current}\n\n{paragraph_chunk}" if current else paragraph_chunk
+            if current and len(candidate) > _DISCORD_SPLIT_TARGET_CHARS:
+                chunks.append(current)
+                current = paragraph_chunk
+            else:
+                current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _split_discord_paragraph(paragraph: str) -> list[str]:
+    if len(paragraph) <= _DISCORD_SPLIT_TARGET_CHARS:
+        return [paragraph]
+
+    chunks: list[str] = []
+    remaining = paragraph.strip()
+    split_limit = min(_DISCORD_SPLIT_TARGET_CHARS, _DISCORD_HARD_MAX_CHARS)
+    while len(remaining) > split_limit:
+        split_at = _discord_split_index(remaining, split_limit)
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _discord_split_index(text: str, limit: int) -> int:
+    window = text[:limit]
+    floor = max(limit // 2, 1)
+    sentence_breaks = [
+        window.rfind(". "),
+        window.rfind("? "),
+        window.rfind("! "),
+    ]
+    sentence_at = max(sentence_breaks)
+    if sentence_at >= floor:
+        return sentence_at + 1
+
+    word_at = window.rfind(" ")
+    if word_at >= floor:
+        return word_at
+    return limit
 
 
 async def _append_turn_reasoning(pool: Any, bot_turn_id: UUID | None, note: str) -> None:
@@ -371,11 +430,20 @@ async def send_outbound(
     send_typing_indicator: bool = True,
     before_provider_send: Callable[[], Awaitable[None]] | None = None,
     scope: InboundScope,
-) -> UUID:
+) -> dict[str, Any]:
+    """Deliver an outbound message and return a structured result.
+
+    Returns a dict with keys:
+        status          'sent' | 'provider_failed' | 'withheld' | 'blocked'
+        message_id      UUID of the outbound messages row
+        visible_to_user bool — True when a provider delivery succeeded
+        provider_message_id  str | None — provider-side message id
+    """
     bot_id = scope.bot_id
     topic_id = scope.topic_id
     if not ignore_pause and (await system_state.is_paused(pool) or await hooks.paused_for_user(user.id, bot_id=bot_id) or await system_state.user_bot_paused(pool, user.id, bot_id)):
-        return await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id, bot_id=bot_id, topic_id=topic_id)
+        row_id = await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id, bot_id=bot_id, topic_id=topic_id)
+        return {"status": "withheld", "message_id": row_id, "visible_to_user": False, "provider_message_id": None}
 
     verdict = await _call_oob_hook(
         pool,
@@ -400,7 +468,7 @@ async def send_outbound(
             bot_id=bot_id,
             topic_id=topic_id,
         )
-        return row_id
+        return {"status": "blocked", "message_id": row_id, "visible_to_user": False, "provider_message_id": None}
     if verdict["verdict"] == "rewrite":
         await _append_turn_reasoning(pool, bot_turn_id, f"Outbound withheld for OOB rewrite review: {verdict['reason']}")
         row_id = await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id, bot_id=bot_id, topic_id=topic_id)
@@ -416,7 +484,7 @@ async def send_outbound(
             bot_id=bot_id,
             topic_id=topic_id,
         )
-        return row_id
+        return {"status": "withheld", "message_id": row_id, "visible_to_user": False, "provider_message_id": None}
     if verdict.get("checker_failed"):
         logger.warning("OOB checker failed open for recipient_id=%s: %s", user.id, verdict.get("reason"),
                        extra={"bot_id": bot_id, "topic_id": str(topic_id)})
@@ -433,38 +501,61 @@ async def send_outbound(
 
     if not within_window and template_fallback is None:
         await _append_turn_reasoning(pool, bot_turn_id, "Outbound deferred: outside WhatsApp 24h window with no template")
-        return await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id, bot_id=bot_id, topic_id=topic_id)
+        row_id = await _insert_outbound(pool, user, content, "withheld", bot_turn_id=bot_turn_id, bot_id=bot_id, topic_id=topic_id)
+        return {"status": "withheld", "message_id": row_id, "visible_to_user": False, "provider_message_id": None}
 
     template_payload = None
     if not within_window:
         template_payload = render_template(template_fallback)
 
+    outbound_chunks = _split_discord_text(content) if provider == "discord" else [content]
+
     if before_provider_send is not None:
         await before_provider_send()
 
-    row_id = await _insert_outbound(pool, user, content, bot_turn_id=bot_turn_id, bot_id=bot_id, topic_id=topic_id)
+    final_row_id: UUID | None = None
+    for index, outbound_content in enumerate(outbound_chunks):
+        row_id = await _insert_outbound(
+            pool,
+            user,
+            outbound_content,
+            bot_turn_id=bot_turn_id,
+            bot_id=bot_id,
+            topic_id=topic_id,
+        )
 
-    async def send_call() -> dict[str, Any]:
-        if provider == "discord":
-            return await discord.send_text(user.phone, content, send_typing_indicator=send_typing_indicator, bot_id=bot_id)
-        if within_window:
-            return await whatsapp.send_text(user.phone, content)
-        return await whatsapp.send_template(user.phone, template_payload)
+        async def send_call(text: str = outbound_content, chunk_index: int = index) -> dict[str, Any]:
+            if provider == "discord":
+                return await discord.send_text(
+                    user.phone,
+                    text,
+                    send_typing_indicator=send_typing_indicator and chunk_index == 0,
+                    bot_id=bot_id,
+                )
+            if within_window:
+                return await whatsapp.send_text(user.phone, text)
+            return await whatsapp.send_template(user.phone, template_payload)
 
-    try:
-        response = await _send_with_retry(send_call)
-    except Exception as exc:
-        logger.warning("outbound send failed after retries: %s", exc,
-                       extra={"bot_id": bot_id, "topic_id": str(topic_id)})
-        await pool.execute("UPDATE messages SET processing_state='expired' WHERE id=$1", row_id)
-        await _append_turn_reasoning(pool, bot_turn_id, f"Outbound send failed: {exc}")
-        return row_id
+        try:
+            response = await _send_with_retry(send_call)
+        except Exception as exc:
+            logger.warning("outbound send failed after retries: %s", exc,
+                           extra={"bot_id": bot_id, "topic_id": str(topic_id)})
+            await pool.execute("UPDATE messages SET processing_state='expired' WHERE id=$1", row_id)
+            await _append_turn_reasoning(pool, bot_turn_id, f"Outbound send failed: {exc}")
+            failed_msg_id = final_row_id or row_id
+            visible = final_row_id is not None  # True if at least one chunk was delivered
+            return {"status": "provider_failed", "message_id": failed_msg_id, "visible_to_user": visible, "provider_message_id": None}
 
-    wa_id = response["messages"][0]["id"]
-    await pool.execute(
-        "UPDATE messages SET whatsapp_message_id=$1, processing_state='processed' WHERE id=$2",
-        wa_id,
-        row_id,
-    )
+        wa_id = response["messages"][0]["id"]
+        await pool.execute(
+            "UPDATE messages SET whatsapp_message_id=$1, processing_state='processed' WHERE id=$2",
+            wa_id,
+            row_id,
+        )
+        final_row_id = row_id
+
     await claim_onboarding_welcome(pool, user.id)
-    return row_id
+    if final_row_id is None:
+        raise RuntimeError("outbound send produced no message rows")
+    return {"status": "sent", "message_id": final_row_id, "visible_to_user": True, "provider_message_id": wa_id}

@@ -104,6 +104,12 @@ class TrackingPool(FakePool):
         if "FROM watch_items" in compact:
             self.mark("read:list_watch_items")
             return []
+        if (
+            "FROM bot_turns bt" in compact
+            and "final_output_message_id IS NULL" in compact
+        ):
+            # Silent-turns hot-context block. No silent turns in fake state.
+            return []
         if "FROM bot_turns bt" in compact and "LEFT JOIN tool_calls" in compact:
             self.mark("read:get_bot_actions")
             return [
@@ -131,6 +137,10 @@ class TrackingPool(FakePool):
         if compact.startswith(
             "UPDATE messages SET processing_state='processed' WHERE id = ANY"
         ):
+            self.mark("messages:processed")
+        if ("UPDATE messages SET processing_state" in compact
+                and "'processed'" in compact
+                and "WHERE id = ANY" in compact):
             self.mark("messages:processed")
         if compact.startswith("INSERT INTO llm_spend_log"):
             self.spend_records.append(Decimal(str(args[1])))
@@ -214,6 +224,7 @@ def _seed_pair(
         "phone": partner.phone,
         "timezone": partner.timezone,
     }
+    topic_id = get_relationship_topic_id()
     message_id = uuid4()
     pool.messages[message_id] = {
         "id": message_id,
@@ -232,6 +243,8 @@ def _seed_pair(
         "media_analysis": None,
         "edit_history": None,
         "edited_at": None,
+        "bot_id": "mediator",
+        "topic_id": topic_id,
     }
     return user, partner, message_id
 
@@ -280,6 +293,8 @@ def _seed_context_rows(pool: TrackingPool, user: User) -> tuple[UUID, UUID]:
             "media_analysis": None,
             "edit_history": None,
             "edited_at": None,
+            "bot_id": "mediator",
+            "topic_id": get_relationship_topic_id(),
         }
     return observation_id, theme_id
 
@@ -414,7 +429,14 @@ async def test_agentic_e2e_ordering_cache_spend_and_oob(app_env, monkeypatch):
     assert turn["system_prompt_version"] == "v3"
     assert "## Recent messages" in turn["prompt_snapshot"]
     assert turn["tool_call_count"] == 7
-    assert [row["tool_name"] for row in pool.tool_calls] == [
+    # Reads are also persisted to tool_calls now (kind='read'). Filter to
+    # write-side rows to assert the write trail; the full sequence is
+    # checked indirectly via tool_call_count above.
+    assert [
+        row["tool_name"]
+        for row in pool.tool_calls
+        if row.get("kind", "write") == "write"
+    ] == [
         "update_observation",
         "add_watch_item",
         "schedule_checkin",

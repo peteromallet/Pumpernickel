@@ -13,6 +13,7 @@ from app.services.turn_audit import record_turn_event
 from app.services.turn_plan import TurnStep
 from app.services.turn_context import TurnContext
 from app.services.tools import read_tools, write_tools
+from app.services.tools.audit import log_tool_call as _log_tool_call_audit
 from app.services.tools.write_tools import ToolCallRejected
 from tool_schemas import (
     TOOL_REGISTRY,
@@ -73,7 +74,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "summarize_oob_topics": "Return safe counts and broad topic clusters for a partner's active OOB entries when a user asks what their partner has marked out of bounds. Never quote, paraphrase, or reveal entries; if there is only one entry on a niche topic, stay vague enough that the topic itself is not revealed.",
     "check_oob": "Check proposed outbound text when drafting around sensitive cross-thread or OOB material, or when you need a rewrite decision before choosing what to say. Normal final replies and `send_message_part` go through the delivery path's final OOB check.",
     "get_self_model": "Read the assistant's compact model of one user when the user asks what you know about them or you need a compact model; do not treat it as the full audit trail. Example: answer 'what do you think I tend to do?'",
-    "get_bot_actions": "Audit what the assistant did or why for questions about your own past actions; do not reconstruct from memory. Example: answer 'why did you tell her that?'",
+    "get_bot_actions": "Audit what the assistant did or why for questions about your own past actions; do not reconstruct from memory. Use this when the user asks 'did you do X this morning?', 'what have you been up to?', 'why did you tell her that?' — silent turns (scheduled tasks that fired but sent no message) only exist here, not in the message timeline. Each returned turn carries its tool_calls; drill into one with `get_tool_call(tool_call_id)` for full arguments and result.",
+    "get_tool_call": "Fetch full arguments + result for one past tool_call by id. Surfaced from the silent-turns hot-context block and from get_bot_actions tool_calls listings. Use when the highlight summary in context isn't specific enough to answer the question — for example to inspect exactly which messages a prior `search_messages` returned, or what brief a prior `schedule_task` set.",
     "list_scheduled_tasks": "List this user's pending agent-managed scheduled tasks, including the stable task_id, concrete job_id, next fire time, brief, and recurrence.",
     "send_message_part": "Send one coherent user-visible Discord message part now when that is conversationally useful — a short acknowledgement before a deeper thought, or when the user explicitly asks for separate messages. Use for natural conversational moves, not process updates or paragraph splitting. The result is the authority for what actually reached the user; if it reports `interrupted`, stop sending user-visible text in that turn.",
     "consult_perspective": "Use only in the consult step, and only when the user explicitly asks for a second opinion, critique, review, or another perspective. It cannot write, send, escalate, or call itself. Treat its output as advice, not authority.",
@@ -117,6 +119,14 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "set_pregnancy_edd": "Capture a pregnancy's estimated due date the first time a user mentions they are pregnant. You MUST call this before any other pregnancy tool. Provide `edd` as an ISO date (e.g. '2026-10-22') and `dating_basis` as 'lmp' (last menstrual period) or 'scan' (dating ultrasound). If you know the LMP or scan date, include those as well; `started_at` defaults to now. This will error if there is already an active pregnancy — use correct_pregnancy_edd to revise instead.",
     "correct_pregnancy_edd": "Revise the EDD mid-pregnancy — for example when a dating scan gives a more precise date. Requires an active pregnancy (set_pregnancy_edd must have been called first). If the dating basis flips to 'scan', the correction timestamp is recorded automatically. This will error with 'no_active_pregnancy' if there is no pregnancy to correct — use set_pregnancy_edd first.",
     "end_pregnancy": "Close the active pregnancy with its outcome: 'birth', 'loss', or 'termination'. Call this when the user tells you the pregnancy has ended. Requires an active pregnancy. If the pregnancy is already ended this will error with 'pregnancy already ended on <date>' — do not retry; the state is already recorded.",
+    # hector (commitments/events)
+    "list_commitments": "List active or recently active fitness commitments for the current user and topic. Use before creating, updating, or closing a commitment to avoid duplicates and to answer questions about what is currently tracked.",
+    "create_commitment": "Create a new fitness commitment for the current user. Only create a commitment from a concrete plan the user has explicitly described (e.g., 'I'm working out Mon/Wed/Fri'). For vague goals ('I want to get healthier'), ask a clarifying question first — do not create a commitment. Set pressure_style to 'very_gentle', 'low_key' (default), or 'firm'. cadence must be one of 'daily', 'weekdays', 'weekly_count', 'custom', or 'custom_days'.",
+    "update_commitment": "Update an existing fitness commitment's fields (label, kind, cadence, target_count, days_of_week, schedule_rule, pressure_style, start_date, end_date). Only fields you provide are changed. Call list_commitments first to get the commitment_id.",
+    "close_commitment": "Close an active commitment by setting its status to 'paused', 'completed', or 'dropped'. Call this when the user says they are stopping, pausing, or have finished a commitment. Once closed, the commitment is no longer active but remains auditable.",
+    "log_event": "Log a fitness event against a commitment (or standalone with a metric_key). Provide at least one of adherence_status ('done', 'missed', 'excused'), value_numeric, or value_text. Use adherence_status to mark whether a scheduled slot was completed, missed, or excused. Events are scoped to the current user, fitness topic, and Hector bot.",
+    "list_events": "List recent fitness events for the current user and topic, optionally filtered by commitment_id. Use before logging a corrective event to avoid duplicates, and to answer questions about recent activity.",
+    "get_adherence": "Compute this week's adherence status for active fitness commitments. Returns per-day slot status for each commitment (done, missed, excused, unknown, pending). Use this before asking the user about missed days — check the adherence board first so you can distinguish unknown from missed and avoid shaming.",
 }
 
 
@@ -136,6 +146,7 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "check_oob": read_tools.check_oob,
     "get_self_model": read_tools.get_self_model,
     "get_bot_actions": read_tools.get_bot_actions,
+    "get_tool_call": read_tools.get_tool_call,
     "send_message_part": read_tools.send_message_part,
     "consult_perspective": _consult_perspective,
     "list_bridge_candidates": read_tools.list_bridge_candidates,
@@ -179,7 +190,89 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "set_pregnancy_edd": write_tools.set_pregnancy_edd,
     "correct_pregnancy_edd": write_tools.correct_pregnancy_edd,
     "end_pregnancy": write_tools.end_pregnancy,
+    # hector (commitments/events)
+    "create_commitment": write_tools.create_commitment,
+    "update_commitment": write_tools.update_commitment,
+    "close_commitment": write_tools.close_commitment,
+    "log_event": write_tools.log_event,
+    "list_commitments": read_tools.list_commitments,
+    "list_events": read_tools.list_events,
+    "get_adherence": read_tools.get_adherence,
 }
+
+# ── Hector-only tools ──────────────────────────────────────────────────────
+# These tools are exclusive to the Hector fitness bot.  Other bots (coach,
+# tante_rosi, mediator) MUST subtract this set from their tool_allowlist to
+# prevent leakage.  This frozenset is the single source of truth for
+# containment checks.
+HECTOR_ONLY_TOOLS: frozenset[str] = frozenset({
+    "create_commitment",
+    "update_commitment",
+    "close_commitment",
+    "log_event",
+    "list_commitments",
+    "list_events",
+    "get_adherence",
+})
+
+# ── Bot-exclusive tools ────────────────────────────────────────────────────
+# Dict mapping bot_id → tools that ONLY that bot may use. Non-matching bots
+# have these tools removed in _step_allowed(). Consumed by T11's filter.
+BOT_EXCLUSIVE_TOOLS: dict[str, frozenset[str]] = {
+    "hector": HECTOR_ONLY_TOOLS,
+}
+
+# Tools whose implementation already calls audit.log_tool_call themselves
+# (everything in write_tools.py + list_scheduled_tasks). The central
+# call_tool dispatcher uses this set to avoid double-logging.
+_SELF_LOGGING_TOOLS: frozenset[str] = frozenset({
+    # write_tools.py tools — all self-log
+    "update_user_style_notes",
+    "set_partner_sharing",
+    "create_bridge_candidate",
+    "update_bridge_candidate",
+    "send_bridge_candidate",
+    "add_memory",
+    "update_memory",
+    "supersede_memory",
+    "create_theme",
+    "update_theme",
+    "add_watch_item",
+    "update_watch_item",
+    "address_watch_item",
+    "log_observation",
+    "update_observation",
+    "add_distillation",
+    "update_distillation",
+    "revise_distillation",
+    "add_oob",
+    "update_oob",
+    "lift_oob",
+    "schedule_checkin",
+    "cancel_scheduled_checkin",
+    "schedule_task",
+    "update_scheduled_task",
+    "cancel_scheduled_task",
+    "schedule_partner_checkin",
+    "cancel_partner_nudge",
+    "escalate_to_partner",
+    "edit_outbound_message",
+    "delete_outbound_message",
+    "react_to_message",
+    "explain_media_item",
+    "log_feedback",
+    "set_topic_status",
+    "set_pregnancy_edd",
+    "correct_pregnancy_edd",
+    "end_pregnancy",
+    "create_commitment",
+    "update_commitment",
+    "close_commitment",
+    "log_event",
+    # read-shaped but lives in write_tools.py and self-logs
+    "list_scheduled_tasks",
+})
+
 
 READ_PHASE_TOOLS = {
     "search_messages",
@@ -196,11 +289,16 @@ READ_PHASE_TOOLS = {
     "check_oob",
     "get_self_model",
     "get_bot_actions",
+    "get_tool_call",
     "send_message_part",
     "consult_perspective",
     "list_bridge_candidates",
     "list_scheduled_tasks",
     "list_scheduled_checkins",
+    # hector read tools
+    "list_commitments",
+    "list_events",
+    "get_adherence",
 }
 
 WRITE_PHASE_TOOLS = {
@@ -258,8 +356,13 @@ RECORD_WRITE_TOOLS = WRITE_PHASE_TOOLS - SCHEDULE_TOOLS | {
     "set_pregnancy_edd",
     "correct_pregnancy_edd",
     "end_pregnancy",
+    # hector write tools
+    "create_commitment",
+    "update_commitment",
+    "close_commitment",
+    "log_event",
 }
-RESPOND_TOOLS = {"send_message_part", "search_emojis", "check_oob"}
+RESPOND_TOOLS = {"send_message_part", "search_emojis", "check_oob", "log_event"}
 READ_TOOLS_FOR_STEP = READ_PHASE_TOOLS - {"send_message_part"}
 STEP_ALLOWED_TOOLS: dict[TurnStep, set[str]] = {
     "read": READ_TOOLS_FOR_STEP,
@@ -288,6 +391,10 @@ READ_BEFORE_WRITE: dict[str, set[str]] = {
     "add_watch_item": {"list_watch_items"},
     "update_watch_item": {"list_watch_items"},
     "address_watch_item": {"list_watch_items"},
+    # hector: require list_commitments before creating/updating/closing
+    "create_commitment": {"list_commitments"},
+    "update_commitment": {"list_commitments"},
+    "close_commitment": {"list_commitments"},
 }
 
 _CONSULT_OWNER_INJECTING_TOOLS = {"check_oob"}
@@ -311,6 +418,13 @@ def _step_allowed(ctx: TurnContext) -> set[str]:
     )
     if ctx.bot_spec is not None and ctx.bot_spec.tool_allowlist is not None:
         allowed &= ctx.bot_spec.tool_allowlist | ALWAYS_ALLOWED_TOOLS
+    # Remove bot-exclusive tools for non-matching bots.
+    # This ensures non-Hector bots never see commitment/event tools even
+    # when their allowlist is broad or None.  Handler-level Hector guards
+    # in read_tools/write_tools are the backstop.
+    for exclusive_bot_id, exclusive_tools in BOT_EXCLUSIVE_TOOLS.items():
+        if getattr(ctx, 'bot_id', None) != exclusive_bot_id:
+            allowed -= exclusive_tools
     return allowed
 
 
@@ -338,8 +452,27 @@ def _inject_consult_defaults(
     return merged
 
 
-def _tool_error(message: str) -> dict[str, Any]:
-    return {"error": message, "is_error": True}
+def _tool_error(
+    message: str,
+    *,
+    error_code: str | None = None,
+    field: str | None = None,
+    retryable: bool | None = None,
+    failure_class: str | None = None,
+    correction_hint: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {"error": message, "is_error": True}
+    if error_code is not None:
+        result["error_code"] = error_code
+    if field is not None:
+        result["field"] = field
+    if retryable is not None:
+        result["retryable"] = retryable
+    if failure_class is not None:
+        result["failure_class"] = failure_class
+    if correction_hint is not None:
+        result["correction_hint"] = correction_hint
+    return result
 
 
 def _record_visible_tool_call(
@@ -505,6 +638,13 @@ async def call_tool(
         result = await fn(ctx, args)
     except ToolCallRejected as exc:
         result = {**exc.result, "is_error": True}
+        _rejection_meta: dict[str, Any] = {
+            "tool_name": name,
+            "reason": result.get("error") or "tool_call_rejected",
+        }
+        for _key in ("error_code", "field", "retryable", "failure_class", "correction_hint"):
+            if _key in result:
+                _rejection_meta[_key] = result[_key]
         await record_turn_event(
             ctx.pool,
             ctx.turn_id,
@@ -515,10 +655,7 @@ async def call_tool(
             duration_ms=max(
                 0, int((datetime.now(UTC) - started).total_seconds() * 1000)
             ),
-            metadata={
-                "tool_name": name,
-                "reason": result.get("error") or "tool_call_rejected",
-            },
+            metadata=_rejection_meta,
         )
         _record_visible_tool_call(
             tool_name=name,
@@ -596,4 +733,15 @@ async def call_tool(
             phase=phase,
             started_at=started,
         )
+        # Persist read-tool calls to mediator.tool_calls so the agent can
+        # introspect its own past decisions. Write tools self-log inside
+        # their handlers (tracked in _SELF_LOGGING_TOOLS).
+        if name not in _SELF_LOGGING_TOOLS:
+            try:
+                await _log_tool_call_audit(
+                    ctx, name, args, started, result_dict, kind="read"
+                )
+            except Exception:
+                # Audit logging must never break tool execution.
+                pass
     return result_dict

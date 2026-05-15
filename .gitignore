@@ -25,3 +25,4 @@ venv/
 backups/
 *.dump
 *.log
+supabase/.temp/

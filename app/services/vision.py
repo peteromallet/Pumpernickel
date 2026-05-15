@@ -10,7 +10,7 @@ import httpx
 
 from app.config import get_settings
 from app.models.user import User
-from app.services import storage, system_state, whatsapp
+from app.services import inbound_queue, storage, system_state, whatsapp
 from app.services.messaging import send_outbound
 from app.services.scope import InboundScope
 from app.services.spend import is_under_cap, record_llm_cost
@@ -188,9 +188,15 @@ async def handle_image(
 
     if not await is_under_cap(pool, "vision"):
         await pool.execute(
-            "UPDATE messages SET media_analysis=$1, processing_state='expired' WHERE id=$2",
+            "UPDATE messages SET media_analysis=$1 WHERE id=$2",
             {"unavailable": "daily_cap"},
             message_id,
+        )
+        await inbound_queue.expire_messages(
+            pool,
+            [message_id],
+            bot_id=scope.bot_id,
+            topic_id=scope.topic_id,
         )
         if not paused:
             await send_outbound(
@@ -207,9 +213,16 @@ async def handle_image(
     except Exception as exc:
         logger.exception("image analysis failed message_id=%s", message_id)
         await pool.execute(
-            "UPDATE messages SET media_analysis=$1, processing_state='expired' WHERE id=$2",
+            "UPDATE messages SET media_analysis=$1 WHERE id=$2",
             {"error": "vision_failed", "detail": type(exc).__name__},
             message_id,
+        )
+        await inbound_queue.fail_messages(
+            pool,
+            [message_id],
+            processing_error=f"vision_failed: {type(exc).__name__}",
+            bot_id=scope.bot_id,
+            topic_id=scope.topic_id,
         )
         if not paused:
             await send_outbound(

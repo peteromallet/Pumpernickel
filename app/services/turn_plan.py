@@ -57,6 +57,44 @@ MEMORY_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 
+FITNESS_RECORD_RE = re.compile(
+    r"\b("
+    r"work\s*out|workout|training|train|lift|lifting|gym|exercise|session|"
+    r"walk|dog walk|run|running|bench|laptop|morning|evening|weekday|weekdays|"
+    r"routine|habit|plan|regroup|next week|schedule|slot|missed|done|completed|"
+    r"before work|after work|computer|fitness"
+    r")\b",
+    re.IGNORECASE,
+)
+
+PREGNANCY_RECORD_RE = re.compile(
+    r"\b("
+    r"pregnan(?:t|cy)|schwanger|entbindungstermin|due date|edd|lmp|"
+    r"last period|scan|ultrasound|ultraschall|appointment|termin|hebamme|"
+    r"ärztin|arzt|birth|born|geboren|miscarriage|stillbirth|loss|lost|"
+    r"termination|ended|ended the pregnancy|bleeding|blutung|contractions|"
+    r"wehen|movement|kindsbewegung|nausea|übelkeit|scan moved|moved the due"
+    r")\b",
+    re.IGNORECASE,
+)
+
+FITNESS_CONFIRM_RE = re.compile(
+    r"\b("
+    r"let'?s\s+do\s+it|"
+    r"let\s+us\s+do\s+it|"
+    r"make\s+that\s+the\s+plan|"
+    r"log\s+that\s+for\s+me|"
+    r"let'?s\s+start\s+(next\s+)?(mon|tues|wednes|thurs|fri|satur|sun)day|"
+    r"let\s+us\s+start\s+(next\s+)?(mon|tues|wednes|thurs|fri|satur|sun)day|"
+    r"log\s+it|"
+    r"record\s+that|"
+    r"go ahead and schedule|"
+    r"set\s+that\s+up|"
+    r"add\s+that\s+to\s+(my\s+)?(plan|routine|schedule)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 AUDIT_REQUEST_RE = re.compile(
     r"\b(why did you|what did you|what have you|action log|tool call|tools? did you|did you tell|did you send)\b",
     re.IGNORECASE,
@@ -165,6 +203,15 @@ def pick_default_skeleton(
 
     text = _trigger_text(trigger_metadata)
     pacing = (trigger_metadata or {}).get("pacing") or {}
+
+    # --- plan-confirmation routing (before short-ack to prevent
+    #     accepted-plan confirmations from being downgraded) ---------
+    if (
+        (hot_context_signals or {}).get("bot_id") == "hector"
+        and FITNESS_CONFIRM_RE.search(text)
+    ):
+        return "standard"
+
     if pacing.get("action") in {"react", "silence"} or _is_short_ack(text):
         return "silence_or_react"
     if AUDIT_REQUEST_RE.search(text):
@@ -172,6 +219,16 @@ def pick_default_skeleton(
     if MEMORY_REQUEST_RE.search(text):
         return "standard"
     if (hot_context_signals or {}).get("explicit_memory_update"):
+        return "standard"
+    if (
+        (hot_context_signals or {}).get("bot_id") == "hector"
+        and FITNESS_RECORD_RE.search(text)
+    ):
+        return "standard"
+    if (
+        (hot_context_signals or {}).get("bot_id") == "tante_rosi"
+        and PREGNANCY_RECORD_RE.search(text)
+    ):
         return "standard"
     return "quick_reply"
 

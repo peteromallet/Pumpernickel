@@ -464,7 +464,7 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
     count = await catch_up_recent_messages(fake_pool, coalescer, client=test_client, bot_id="mediator")
 
     assert count == 2
-    assert calls == [("/channels/channel-1/messages", {"limit": 50, "after": None})]
+    assert calls == [("/channels/channel-1/messages", {"limit": 50})]
     inbound_ids = {
         row["whatsapp_message_id"]
         for row in fake_pool.messages.values()
@@ -475,29 +475,97 @@ async def test_catch_up_recent_messages_ingests_partner_history(fake_pool, monke
     get_settings.cache_clear()
 
 
-async def test_catch_up_recent_messages_strips_attachment_suffix_for_after(
+async def test_catch_up_replay_is_idempotent(
     fake_pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Running catch-up twice over the same REST window inserts only once and
+    does not enqueue duplicate coalescer calls."""
     monkeypatch.setenv("DISCORD_PARTNER_USER_ID_A", "456")
     monkeypatch.setenv("DISCORD_PARTNER_NAME_A", "Partner A")
     monkeypatch.setenv("DISCORD_PARTNER_USER_ID_B", "")
     monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
     get_settings.cache_clear()
     await seed_partner_users(fake_pool)
+    calls = []
+
+    async def get_dm_channel_id(user_id):
+        assert user_id == "456"
+        return "channel-1"
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {"id": "m2", "content": "second", "author": {"id": "456", "username": "p"}},
+                {"id": "m1", "content": "first", "author": {"id": "456", "username": "p"}},
+            ]
+
+    test_client = _make_test_client()
+    monkeypatch.setattr(test_client, "get_dm_channel_id", get_dm_channel_id)
+
+    class MockRest:
+        async def fetch_channel_messages(self, channel_id, **params):
+            calls.append((f"/channels/{channel_id}/messages", params))
+            return Response()
+
+    test_client._rest = MockRest()
+
+    class Coalescer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def add(self, user_id, message_id, user, *, source: str = "live", scope) -> None:
+            self.calls.append((user_id, message_id, user, source, scope))
+
+    coalescer = Coalescer()
+    count = await catch_up_recent_messages(fake_pool, coalescer, client=test_client, bot_id="mediator")
+    assert count == 2
+    assert len(coalescer.calls) == 2
+
+    # Second pass: 0 inserted, 0 coalescer enqueued (both skipped_existing).
+    coalescer2 = Coalescer()
+    count2 = await catch_up_recent_messages(fake_pool, coalescer2, client=test_client, bot_id="mediator")
+    assert count2 == 0
+    assert len(coalescer2.calls) == 0
+
+    inbound_ids = {
+        row["whatsapp_message_id"]
+        for row in fake_pool.messages.values()
+        if row["direction"] == "inbound"
+    }
+    assert inbound_ids == {"m1", "m2"}
+    get_settings.cache_clear()
+
+
+async def test_catch_up_cross_bot_duplicate(
+    fake_pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Discord message id already stored for mediator must still be inserted
+    for Hector — the idempotency key is (bot_id, discord_message_id)."""
+    monkeypatch.setenv("DISCORD_PARTNER_USER_ID_A", "456")
+    monkeypatch.setenv("DISCORD_PARTNER_NAME_A", "Partner A")
+    monkeypatch.setenv("DISCORD_PARTNER_USER_ID_B", "")
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    get_settings.cache_clear()
+    await seed_partner_users(fake_pool)
+
+    # Seed existing inbound row for mediator.
+    mediator_msg_id = uuid4()
     user_id = next(iter(fake_pool.users))
-    message_id = uuid4()
-    fake_pool.messages[message_id] = {
-        "id": message_id,
+    fake_pool.messages[mediator_msg_id] = {
+        "id": mediator_msg_id,
         "direction": "inbound",
         "sender_id": user_id,
         "recipient_id": None,
-        "content": None,
+        "content": "mediator already saw this",
         "processing_state": "processed",
         "sent_at": datetime.now(UTC),
         "charge": None,
-        "whatsapp_message_id": "1501272897379893248:1501272897061388338",
-        "media_type": "image",
-        "media_url": "mediator-media/image/x",
+        "whatsapp_message_id": "dc-msg-1",
+        "media_type": None,
+        "media_url": None,
         "media_duration_seconds": None,
         "media_analysis": None,
         "edit_history": None,
@@ -506,9 +574,9 @@ async def test_catch_up_recent_messages_strips_attachment_suffix_for_after(
         "bot_id": "mediator",
         "topic_id": uuid4(),
     }
-    calls = []
 
     async def get_dm_channel_id(user_id):
+        assert user_id == "456"
         return "channel-1"
 
     class Response:
@@ -516,28 +584,159 @@ async def test_catch_up_recent_messages_strips_attachment_suffix_for_after(
             return None
 
         def json(self):
-            return []
+            return [
+                {"id": "dc-msg-1", "content": "shared message", "author": {"id": "456", "username": "p"}},
+            ]
 
-    class Client:
-        async def get(self, path, headers=None, params=None):
-            calls.append((path, params))
-            return Response()
+    hector_client = _make_test_client(bot_id="hector")
+    monkeypatch.setattr(hector_client, "get_dm_channel_id", get_dm_channel_id)
 
-    test_client2 = _make_test_client()
-    monkeypatch.setattr(test_client2, "get_dm_channel_id", get_dm_channel_id)
-    class MockRest2:
+    class MockRest:
         async def fetch_channel_messages(self, channel_id, **params):
-            calls.append((f"/channels/{channel_id}/messages", params))
             return Response()
-    test_client2._rest = MockRest2()
 
-    assert await catch_up_recent_messages(fake_pool, None, client=test_client2, bot_id="mediator") == 0
-    assert calls == [
-        (
-            "/channels/channel-1/messages",
-            {"limit": 50, "after": "1501272897379893248"},
-        )
+    hector_client._rest = MockRest()
+
+    class Coalescer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def add(self, user_id, message_id, user, *, source: str = "live", scope) -> None:
+            self.calls.append((user_id, message_id, user, source, scope))
+
+    coalescer = Coalescer()
+    count = await catch_up_recent_messages(fake_pool, coalescer, client=hector_client, bot_id="hector")
+    assert count == 1
+    assert len(coalescer.calls) == 1
+
+    # Both bot rows exist with the same whatsapp_message_id.
+    hector_rows = [
+        row for row in fake_pool.messages.values()
+        if row["direction"] == "inbound" and row["whatsapp_message_id"] == "dc-msg-1" and row["bot_id"] == "hector"
     ]
+    mediator_rows = [
+        row for row in fake_pool.messages.values()
+        if row["direction"] == "inbound" and row["whatsapp_message_id"] == "dc-msg-1" and row["bot_id"] == "mediator"
+    ]
+    assert len(hector_rows) == 1
+    assert len(mediator_rows) == 1
+    get_settings.cache_clear()
+
+
+async def test_gateway_ready_triggers_catch_up(
+    fake_pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When _run_once receives READY it must call catch_up_recent_messages with
+    the correct bot_id and client."""
+    import json as _json
+
+    import websockets as _websockets
+
+    import app.services.discord as _discord_mod
+
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    get_settings.cache_clear()
+
+    catch_up_calls: list[dict] = []
+
+    async def _fake_catch_up(pool, coalescer, *, client, bot_id, limit=50):
+        catch_up_calls.append({"bot_id": bot_id, "client": client})
+        return 0
+
+    monkeypatch.setattr(_discord_mod, "catch_up_recent_messages", _fake_catch_up)
+
+    # Build a fake websocket that yields HELLO then READY.
+    ws_events = [
+        _json.dumps({"op": 10, "d": {"heartbeat_interval": 1000}}),
+        _json.dumps({"op": 0, "t": "READY", "d": {"user": {"username": "test", "id": "123"}, "session_id": "abc", "guilds": []}}),
+    ]
+
+    class _MockWS:
+        def __init__(self):
+            self._events = iter(ws_events)
+            self.sent: list[str] = []
+
+        async def recv(self):
+            try:
+                return next(self._events)
+            except StopIteration:
+                raise _websockets.exceptions.ConnectionClosed(None, None)
+
+        async def send(self, data):
+            self.sent.append(data)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._events)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    class _FakeCtx:
+        def __init__(self, ws):
+            self.ws = ws
+
+        async def __aenter__(self):
+            return self.ws
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(_websockets, "connect", lambda url: _FakeCtx(_MockWS()))
+
+    bot = DiscordGatewayBot("mediator", _make_test_client(), fake_pool, None)
+    await bot._run_once()
+
+    # Tear down the heartbeat task that _run_once spawned.
+    if bot._heartbeat_task and not bot._heartbeat_task.done():
+        bot._heartbeat_task.cancel()
+        try:
+            await bot._heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
+    assert len(catch_up_calls) == 1
+    assert catch_up_calls[0]["bot_id"] == "mediator"
+    assert catch_up_calls[0]["client"] is bot.client
+    get_settings.cache_clear()
+
+
+async def test_catch_up_rest_failure_is_logged(
+    fake_pool, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """When the REST fetch raises, catch_up_recent_messages logs the error and
+    returns 0 without propagating the exception."""
+    monkeypatch.setenv("DISCORD_PARTNER_USER_ID_A", "456")
+    monkeypatch.setenv("DISCORD_PARTNER_NAME_A", "Partner A")
+    monkeypatch.setenv("DISCORD_PARTNER_USER_ID_B", "")
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    get_settings.cache_clear()
+    await seed_partner_users(fake_pool)
+
+    async def get_dm_channel_id(user_id):
+        return "channel-1"
+
+    class FailingRest:
+        async def fetch_channel_messages(self, channel_id, **params):
+            raise httpx.HTTPStatusError(
+                "REST failure",
+                request=httpx.Request("GET", "https://discord.com/api/v10/channels/x/messages"),
+                response=httpx.Response(500),
+            )
+
+    test_client = _make_test_client()
+    monkeypatch.setattr(test_client, "get_dm_channel_id", get_dm_channel_id)
+    test_client._rest = FailingRest()
+
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        count = await catch_up_recent_messages(fake_pool, None, client=test_client, bot_id="mediator")
+
+    assert count == 0
+    assert "discord catch-up bot=mediator channel=channel-1 failed" in caplog.text
     get_settings.cache_clear()
 
 

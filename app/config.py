@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_role_key: SecretStr
     anthropic_api_key: SecretStr
+    deepseek_api_key: SecretStr | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
     openai_api_key: SecretStr
     groq_api_key: SecretStr
     whatsapp_token: SecretStr = SecretStr("")
@@ -50,6 +52,10 @@ class Settings(BaseSettings):
     vision_daily_cap_usd: float = 2.0
     transcription_daily_cap_usd: float = 1.0
     conversational_model: str = "claude-sonnet-4-6"  # Conversational loop model.
+    deepseek_conversational_model: str = "deepseek-chat"
+    deepseek_enabled_user_names: str = ""
+    deepseek_thinking_enabled: bool = False
+    deepseek_reasoning_effort: str | None = None
     consult_model: str = ""  # Bounded read-only consult loop model; defaults to conversational_model.
     consult_max_tool_iterations: int = Field(default=3, ge=0, le=10)
     consult_timeout_s: float = Field(default=20.0, ge=1.0, le=120.0)
@@ -91,11 +97,19 @@ class Settings(BaseSettings):
     discord_pacing_llm_judgement_enabled: bool = True
     discord_pacing_llm_min_ambiguity: float = Field(default=0.45, ge=0.0, le=1.0)
     discord_pacing_event_retention_days: int = Field(default=30, ge=1, le=365)
+    # Inbound queue: max age for unprocessed inbound messages before expiry.
+    # Messages older than this window are marked expired instead of retried.
+    inbound_queue_retention_days: int = Field(default=7, ge=1, le=365)
+    # Inbound queue: maximum retry attempts for failed messages before they
+    # are marked terminal (no further automatic retry).
+    inbound_queue_max_retry_attempts: int = Field(default=3, ge=0, le=50)
     heartbeat_interval_hours: int = 24
     anthropic_input_usd_per_mtok: float = 3.0  # Cache creation is 1.25x input.
     anthropic_output_usd_per_mtok: float = 15.0  # Cache reads are 0.10x input.
     anthropic_haiku_input_usd_per_mtok: float = 1.0  # Cache creation is 1.25x input.
     anthropic_haiku_output_usd_per_mtok: float = 5.0  # Cache reads are 0.10x input.
+    deepseek_input_usd_per_mtok: float = 0.27
+    deepseek_output_usd_per_mtok: float = 1.10
     sentry_dsn: str | None = None
     log_destination: str | None = None
     # Base64-encoded 32-byte symmetric key for column-level encryption of

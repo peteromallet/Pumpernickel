@@ -2,6 +2,7 @@
 
 import logging
 import inspect
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID, uuid5, NAMESPACE_URL
@@ -26,6 +27,16 @@ from app.services.vision import handle_image
 from app.services.whitelist import is_allowed_phone
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class InboundProcessResult:
+    """Counters aggregated across all messages in a single process_inbound call."""
+
+    inserted: int = 0
+    skipped_existing: int = 0
+    coalescer_enqueued: int = 0
+
 
 WELCOME_MESSAGE = (
     "Hi, I'm here as a reflection and mediation assistant for the two of you. "
@@ -64,6 +75,8 @@ def _edit_target_id(message: dict[str, Any]) -> str | None:
 
 
 async def _handle_edit(pool: Any, target_id: str, new_content: str) -> None:
+    # DEBT-090: UPDATE targets only whatsapp_message_id without bot_id.
+    # Accepted sprint debt per SD-006 (no broad queue semantics redesign).
     await pool.execute(
         """
         UPDATE messages
@@ -81,6 +94,8 @@ async def _handle_edit(pool: Any, target_id: str, new_content: str) -> None:
 
 
 async def _handle_delete(pool: Any, target_id: str) -> None:
+    # DEBT-090: DELETE targets only whatsapp_message_id without bot_id.
+    # Accepted sprint debt per SD-006 (no broad queue semantics redesign).
     await pool.execute(
         "UPDATE messages SET deleted_at = now() WHERE whatsapp_message_id = $1",
         target_id,
@@ -269,7 +284,7 @@ async def _insert_message(
             (direction, sender_id, content, content_encrypted, processing_state, whatsapp_message_id, sent_at,
              media_type, media_url, media_duration_seconds, media_analysis, charge, bot_id, topic_id)
         VALUES ('inbound', $1, $2, $3, 'raw', $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        ON CONFLICT (whatsapp_message_id) DO NOTHING
+        ON CONFLICT (bot_id, whatsapp_message_id) DO NOTHING
         RETURNING id
         """,
         user_id,
@@ -315,7 +330,8 @@ async def process_inbound(
     transport: Literal["discord", "whatsapp"],
     bot_id: str,
     coalescer_source: str = "live",
-) -> None:
+) -> InboundProcessResult:
+    result = InboundProcessResult()
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
@@ -373,6 +389,10 @@ async def process_inbound(
                     else:
                         charge_label = (await classify_charge(pool, content)).charge
                     row = await _insert_message(pool, user.id, content, wa_id, sent_at, charge=charge_label, bot_id=scope.bot_id, topic_id=scope.topic_id)
+                    if row is not None:
+                        result.inserted += 1
+                    else:
+                        result.skipped_existing += 1
                     if row is not None and content.strip() == "/pause":
                         await _handle_pause_command(pool, user, scope=scope)
                         continue
@@ -383,11 +403,16 @@ async def process_inbound(
                         continue
                     if row is not None and coalescer is not None and not await system_state.is_paused(pool):
                         await _coalescer_add(coalescer, user, row["id"], source=coalescer_source, scope=scope)
+                        result.coalescer_enqueued += 1
                     continue
 
                 if wa_type == "audio":
                     duration = message["audio"].get("duration")
                     row = await _insert_message(pool, user.id, None, wa_id, sent_at, "voice", duration=duration, bot_id=scope.bot_id, topic_id=scope.topic_id)
+                    if row is not None:
+                        result.inserted += 1
+                    else:
+                        result.skipped_existing += 1
                     if row is not None:
                         paused = await system_state.is_paused(pool)
                         if not paused and await claim_onboarding_welcome(pool, user.id):
@@ -397,6 +422,10 @@ async def process_inbound(
 
                 if wa_type == "image":
                     row = await _insert_message(pool, user.id, None, wa_id, sent_at, "image", bot_id=scope.bot_id, topic_id=scope.topic_id)
+                    if row is not None:
+                        result.inserted += 1
+                    else:
+                        result.skipped_existing += 1
                     if row is not None:
                         paused = await system_state.is_paused(pool)
                         if not paused and await claim_onboarding_welcome(pool, user.id):
@@ -415,12 +444,19 @@ async def process_inbound(
                     bot_id=scope.bot_id,
                     topic_id=scope.topic_id,
                 )
+                if row is not None:
+                    result.inserted += 1
+                else:
+                    result.skipped_existing += 1
                 if row is not None and await system_state.is_paused(pool):
                     continue
                 if row is not None and await claim_onboarding_welcome(pool, user.id):
                     await send_outbound(pool, user, WELCOME_MESSAGE, scope=scope)
                 if row is not None and coalescer is not None and not await system_state.is_paused(pool):
                     await _coalescer_add(coalescer, user, row["id"], source=coalescer_source, scope=scope)
+                    result.coalescer_enqueued += 1
+
+    return result
 
 
 def twilio_form_to_meta_payload(form: dict[str, str]) -> dict[str, Any]:

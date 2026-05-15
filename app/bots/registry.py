@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from app.bots.base import BotSpec, ReadScopes, WriteScopes
-from app.bots.ids import MEDIATOR_BOT_ID, TANTE_ROSI_BOT_ID
+from app.bots.ids import HECTOR_BOT_ID, MEDIATOR_BOT_ID, TANTE_ROSI_BOT_ID
 from app.bots.mediator import MEDIATOR_BOT
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,45 @@ def _maybe_register_staging_bots() -> None:
 
         rosi = build_tante_rosi_spec()
         BOT_SPECS[rosi.bot_id] = rosi
+
+        from app.bots.hector import build_hector_spec
+
+        hector = build_hector_spec()
+        BOT_SPECS[hector.bot_id] = hector
+
+        # Patch mediator's tool_allowlist now that TOOL_DISPATCH is available.
+        # MEDIATOR_BOT was constructed at module level before the tools module
+        # was fully initialized (circular import), so its tool_allowlist
+        # defaults to None.  Rebuild the BOT_SPECS entry with the correct
+        # allowlist that excludes Hector-only tools.
+        from app.services.tools.registry import HECTOR_ONLY_TOOLS, TOOL_DISPATCH
+
+        _PREGNANCY_ONLY_TOOLS = frozenset({
+            "set_pregnancy_edd", "correct_pregnancy_edd", "end_pregnancy",
+        })
+        mediator_allowlist = (
+            frozenset(TOOL_DISPATCH.keys())
+            - HECTOR_ONLY_TOOLS
+            - _PREGNANCY_ONLY_TOOLS
+        )
+        from app.bots.mediator import MediatorBotSpec
+
+        BOT_SPECS[MEDIATOR_BOT_ID] = MediatorBotSpec(
+            bot_id=MEDIATOR_BOT_ID,
+            prompt_renderer=MEDIATOR_BOT.prompt_renderer,
+            step_instructions=MEDIATOR_BOT.step_instructions,
+            skeleton_overrides=MEDIATOR_BOT.skeleton_overrides,
+            display_name=MEDIATOR_BOT.display_name,
+            primary_topic_slug=MEDIATOR_BOT.primary_topic_slug,
+            participants_shape=MEDIATOR_BOT.participants_shape,
+            read_scopes=MEDIATOR_BOT.read_scopes,
+            write_scopes=MEDIATOR_BOT.write_scopes,
+            cross_topic_policy=MEDIATOR_BOT.cross_topic_policy,
+            tool_allowlist=mediator_allowlist,
+            bot_spec_version=MEDIATOR_BOT.bot_spec_version,
+            hot_context_builder_version=MEDIATOR_BOT.hot_context_builder_version,
+            tool_schema_version=MEDIATOR_BOT.tool_schema_version,
+        )
 
 
 class UnknownBotSpec(ValueError):
@@ -90,6 +129,12 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
     # Reconstruct MediatorBotSpec with DB display_name + hardcoded defaults
     from app.bots.mediator import MediatorBotSpec, MEDIATOR_STEP_INSTRUCTIONS
 
+    from app.services.tools.registry import HECTOR_ONLY_TOOLS, TOOL_DISPATCH
+
+    _PREGNANCY_ONLY_TOOLS = frozenset({
+        "set_pregnancy_edd", "correct_pregnancy_edd", "end_pregnancy",
+    })
+
     rebuilt = MediatorBotSpec(
         bot_id=MEDIATOR_BOT_ID,
         prompt_renderer=MEDIATOR_BOT.prompt_renderer,
@@ -108,6 +153,7 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
             require_reason_for_cross_topic=True,
         ),
         cross_topic_policy="peek",
+        tool_allowlist=frozenset(TOOL_DISPATCH.keys()) - HECTOR_ONLY_TOOLS - _PREGNANCY_ONLY_TOOLS,
         # Preserve version fields so anything the in-code MEDIATOR_BOT
         # already had set survives the rebuild.
         bot_spec_version=MEDIATOR_BOT.bot_spec_version,
@@ -157,6 +203,42 @@ async def populate_tante_rosi_spec_from_db(pool: Any) -> None:
     )
 
 
+async def populate_hector_spec_from_db(pool: Any) -> None:
+    """Check for a Hector row in the bots table and register if present.
+
+    Mirrors populate_tante_rosi_spec_from_db but for Hector.  Row existence
+    is the enablement gate — the bots table has no ``enabled`` column (only
+    id, display_name, created_at per migration 0020).
+
+    Prod registration: the prod bots row is inserted by migration 0038.
+    Restart is required after row insertion because registration runs
+    once at startup.
+    """
+    try:
+        row = await pool.fetchrow("SELECT 1 FROM bots WHERE id = $1", HECTOR_BOT_ID)
+    except Exception:
+        logger.warning(
+            "populate_hector_spec_from_db: could not query bots table — "
+            "keeping staging-only registration",
+            exc_info=True,
+        )
+        return
+    if row is None:
+        logger.debug(
+            "populate_hector_spec_from_db: no hector row in bots table — "
+            "bot available only via STAGING=1"
+        )
+        return
+
+    from app.bots.hector import build_hector_spec
+
+    spec = build_hector_spec()
+    BOT_SPECS[spec.bot_id] = spec
+    logger.info(
+        "populate_hector_spec_from_db: hector spec registered from bots table"
+    )
+
+
 async def populate_topic_ids_from_db(pool: Any) -> None:
     """Read the relationship and pregnancy topic ids from mediator.topics and cache them.
 
@@ -167,7 +249,7 @@ async def populate_topic_ids_from_db(pool: Any) -> None:
     global _RELATIONSHIP_TOPIC_ID, _PREGNANCY_TOPIC_ID
     try:
         rows = await pool.fetch(
-            "SELECT id, slug FROM mediator.topics WHERE slug IN ('relationship', 'pregnancy')"
+            "SELECT id, slug FROM mediator.topics WHERE slug IN ('relationship', 'pregnancy', 'fitness')"
         )
     except Exception:
         logger.warning(

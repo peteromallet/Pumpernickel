@@ -382,9 +382,9 @@ async def _seed_inbound(pool: Any, scenario: Scenario, user: User) -> list[UUID]
             """
             INSERT INTO messages
                 (direction, sender_id, content, processing_state, whatsapp_message_id, sent_at,
-                 media_type, media_url, media_duration_seconds, media_analysis, charge)
-            VALUES ('inbound', $1, $2, 'raw', $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (whatsapp_message_id) DO NOTHING
+                 media_type, media_url, media_duration_seconds, media_analysis, charge, bot_id)
+            VALUES ('inbound', $1, $2, 'raw', $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (bot_id, whatsapp_message_id) DO NOTHING
             RETURNING id
             """,
             user.id,
@@ -396,6 +396,7 @@ async def _seed_inbound(pool: Any, scenario: Scenario, user: User) -> list[UUID]
             message.media_duration_seconds,
             None,
             seeded_charge or scenario.expectations.expected_charge or "routine",
+            "mediator",
         )
         if row is not None:
             ids.append(row["id"])

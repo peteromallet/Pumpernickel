@@ -8,6 +8,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -17,11 +18,13 @@ from app.bots.registry import get_bot_spec, primary_topic_id_for
 from app.config import get_settings
 from app.models.user import User, claim_onboarding_welcome
 from app.services import discord, hooks, system_state
+from app.services.deepseek import DeepSeekClient
 from app.services.hot_context import build_hot_context, render_hot_context
 from app.services.hot_context_solo import (
     build_hot_context_solo,
     render_hot_context_solo,
 )
+from app.services import inbound_queue
 from app.services.messaging import send_outbound, sent_contents_for_turn
 from app.services.partner_sharing import get_partner_share
 from app.services.spend import is_under_cap, record_llm_cost
@@ -70,7 +73,11 @@ class LLMPhaseError(Exception):
 
 
 class BoundedLoopExceeded(Exception):
-    failure_reason = "bounded_loop_exceeded"
+    failure_reason: str
+
+    def __init__(self, message: str = "bounded_loop_exceeded") -> None:
+        super().__init__(message)
+        self.failure_reason = message
 
 
 REACTION_DIRECTIVE_RE = re.compile(
@@ -219,6 +226,10 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
         data["id"] = _attr(block, "id")
         data["name"] = _attr(block, "name")
         data["input"] = _attr(block, "input", {}) or {}
+    elif block_type == "openai_assistant_message":
+        data["message"] = _attr(block, "message", {}) or {}
+    elif block_type == "reasoning_content":
+        data["reasoning_content"] = _attr(block, "reasoning_content", "")
     return data
 
 
@@ -246,22 +257,46 @@ def _usage_tokens(usage: Any, field: str) -> int:
     return int(value)
 
 
-async def _record_response_cost(pool: Any, usage: Any) -> None:
-    settings = get_settings()
-    input_price = settings.anthropic_input_usd_per_mtok
-    output_price = settings.anthropic_output_usd_per_mtok
+async def _record_response_cost(
+    pool: Any,
+    usage: Any,
+    *,
+    input_price: float,
+    output_price: float,
+) -> None:
+    input_rate = Decimal(str(input_price))
+    output_rate = Decimal(str(output_price))
     input_tokens = _usage_tokens(usage, "input_tokens")
     cache_create = _usage_tokens(usage, "cache_creation_input_tokens")
     cache_read = _usage_tokens(usage, "cache_read_input_tokens")
     output_tokens = _usage_tokens(usage, "output_tokens")
     regular_input_tokens = max(0, input_tokens - cache_create - cache_read)
     dollars = (
-        regular_input_tokens * input_price
-        + cache_create * input_price * 1.25
-        + cache_read * input_price * 0.10
-        + output_tokens * output_price
-    ) / 1_000_000
-    await record_llm_cost(pool, "text", dollars)
+        regular_input_tokens * input_rate
+        + cache_create * input_rate * Decimal("1.25")
+        + cache_read * input_rate * Decimal("0.10")
+        + output_tokens * output_rate
+    ) / Decimal("1000000")
+    if dollars > 0:
+        await record_llm_cost(pool, "text", dollars)
+
+
+def _deepseek_user_names(settings: Any) -> set[str]:
+    return {
+        name.strip().casefold()
+        for name in settings.deepseek_enabled_user_names.split(",")
+        if name.strip()
+    }
+
+
+def _llm_client_and_model_for_user(user: User) -> tuple[Any, str, str]:
+    settings = get_settings()
+    if user.name.strip().casefold() in _deepseek_user_names(settings):
+        return DeepSeekClient(), settings.deepseek_conversational_model, "deepseek"
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key.get_secret_value()
+    )
+    return client, settings.conversational_model, "anthropic"
 
 
 async def _create_message_with_retry(
@@ -272,6 +307,7 @@ async def _create_message_with_retry(
     tools: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     model: str | None = None,
+    provider: str = "anthropic",
     max_tokens: int = 1200,
 ) -> Any:
     settings = get_settings()
@@ -291,15 +327,27 @@ async def _create_message_with_retry(
             last_error = exc
             if attempt == 0:
                 logger.warning(
-                    "anthropic message create failed; retrying once: %s",
+                    "%s message create failed; retrying once: %s",
+                    provider,
                     exc,
                     extra=obs_fields(ctx),
                 )
                 continue
             raise LLMPhaseError(str(exc)) from exc
-        await _record_response_cost(ctx.pool, _attr(response, "usage", {}))
+        if provider == "deepseek":
+            input_price = settings.deepseek_input_usd_per_mtok
+            output_price = settings.deepseek_output_usd_per_mtok
+        else:
+            input_price = settings.anthropic_input_usd_per_mtok
+            output_price = settings.anthropic_output_usd_per_mtok
+        await _record_response_cost(
+            ctx.pool,
+            _attr(response, "usage", {}),
+            input_price=input_price,
+            output_price=output_price,
+        )
         return response
-    raise LLMPhaseError(str(last_error or "anthropic message create failed"))
+    raise LLMPhaseError(str(last_error or f"{provider} message create failed"))
 
 
 async def run_step(
@@ -310,20 +358,26 @@ async def run_step(
     allowed_tools: set[str],
     seed_messages: list[dict[str, Any]],
     model: str | None = None,
+    provider: str = "anthropic",
     max_tokens: int = 1200,
     max_tool_iterations: int | None = None,
 ) -> tuple[str, list[dict[str, Any]], int]:
     settings = get_settings()
     if client is None:
-        client = anthropic.AsyncAnthropic(
-            api_key=settings.anthropic_api_key.get_secret_value()
-        )
+        if provider == "deepseek":
+            client = DeepSeekClient()
+            model = model or settings.deepseek_conversational_model
+        else:
+            client = anthropic.AsyncAnthropic(
+                api_key=settings.anthropic_api_key.get_secret_value()
+            )
 
     system = _system_blocks(system_prompt, hot_context_rendered)
     tools = _anthropic_tools(allowed_tools)
     messages = list(seed_messages)
     tool_call_count = 0
     tool_iteration_count = 0
+    consecutive_recoverable_errors = 0
 
     while True:
         response = await _create_message_with_retry(
@@ -333,6 +387,7 @@ async def run_step(
             tools=tools,
             messages=messages,
             model=model,
+            provider=provider,
             max_tokens=max_tokens,
         )
         content_blocks = [
@@ -373,6 +428,50 @@ async def run_step(
                 }
             )
         messages.append({"role": "user", "content": tool_results})
+
+        # ── Recoverable validation-error correction cap ─────────────────
+        _iter_has_recoverable = any(
+            bool(tr.get("is_error"))
+            for tr in tool_results
+            if _tool_result_payload(tr).get("retryable") is True
+        )
+        if _iter_has_recoverable:
+            consecutive_recoverable_errors += 1
+        else:
+            consecutive_recoverable_errors = 0
+
+        if consecutive_recoverable_errors >= 2:
+            _last_failed = tool_results[-1] if tool_results else {}
+            _last_payload = _tool_result_payload(_last_failed)
+            await record_turn_event(
+                ctx.pool,
+                ctx.turn_id,
+                "tool.validation_cap_exceeded",
+                step=ctx.current_step,
+                severity="error",
+                actor="tool",
+                metadata={
+                    "tool_name": _last_payload.get("tool_name", "unknown"),
+                    "error_code": _last_payload.get("error_code"),
+                    "field": _last_payload.get("field"),
+                    "correction_hint": _last_payload.get("correction_hint"),
+                    "consecutive_recoverable_errors": consecutive_recoverable_errors,
+                },
+            )
+            raise BoundedLoopExceeded(
+                "tool_validation_recoverable_exhausted"
+            )
+
+
+def _tool_result_payload(tr: dict[str, Any]) -> dict[str, Any]:
+    """Parse the JSON content of a tool_result dict back into a payload dict."""
+    raw = tr.get("content", "{}")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
 
 
 def set_pool(pool: Any) -> None:
@@ -683,18 +782,53 @@ async def _record_turn_final_output(
     )
 
 
-async def _fail_turn(pool: Any, turn_id: UUID | None, failure_reason: str) -> None:
+def _failure_class_for(failure_reason: str) -> str:
+    """Map a failure_reason string to a durable-queue failure class.
+
+    Categories (must match exactly for inbound-queue-hardening consumption):
+    - tool_validation_recoverable_exhausted
+    - tool_infra_transient
+    - model_policy_or_instruction_failure
+    - database_unexpected
+    """
+    if failure_reason == "tool_validation_recoverable_exhausted":
+        return "tool_validation_recoverable_exhausted"
+    if failure_reason in ("llm_timeout",):
+        return "tool_infra_transient"
+    if failure_reason in (
+        "spend_cap",
+        "newer_inbound_before_final_send",
+    ):
+        return "model_policy_or_instruction_failure"
+    if failure_reason in ("crashed", "crashed_after_send"):
+        return "database_unexpected"
+    # Any unknown failure_reason → database_unexpected (safest default)
+    return "database_unexpected"
+
+
+async def _fail_turn(
+    pool: Any,
+    turn_id: UUID | None,
+    failure_reason: str,
+    metadata: dict | None = None,
+) -> None:
     if turn_id is None:
         return
     await pool.execute(
         "UPDATE bot_turns SET failure_reason=$1 WHERE id=$2", failure_reason, turn_id
     )
+    merged_metadata: dict[str, Any] = {
+        "failure_reason": failure_reason,
+        "failure_class": _failure_class_for(failure_reason),
+    }
+    if metadata:
+        merged_metadata.update(metadata)
     await record_turn_event(
         pool,
         turn_id,
         "turn.failed",
         severity="error",
-        metadata={"failure_reason": failure_reason},
+        metadata=merged_metadata,
     )
 
 
@@ -706,10 +840,12 @@ async def _defer_for_text_cap(
     bot_id: str | None = None,
     topic_id: UUID | None = None,
 ) -> bool:
-    if message_ids:
-        await pool.execute(
-            "UPDATE messages SET processing_state='deferred' WHERE id = ANY($1)",
+    if message_ids and bot_id is not None and topic_id is not None:
+        await inbound_queue.defer_messages(
+            pool,
             message_ids,
+            bot_id=bot_id,
+            topic_id=topic_id,
         )
     context_payload: dict[str, Any] = {
         "triggering_message_ids": [str(message_id) for message_id in message_ids],
@@ -842,12 +978,37 @@ async def _run_agentic(
         active_pool, bot_spec
     )
     selected_prompt_version = prompt_version or settings.system_prompt_version
+    llm_client, conversational_model, llm_provider = _llm_client_and_model_for_user(user)
     send_typing_indicator = not bool(
         trigger_metadata and trigger_metadata.get("pacing")
     )
     turn_id: UUID | None = None
     started_at = datetime.now(UTC)
     responded_to_user = False
+
+    # ── Pre-LLM claim gate ──────────────────────────────────────────
+    # Atomically claim triggering inbound messages before doing any expensive
+    # work (hot context construction, LLM calls).  If none of the triggering
+    # messages are claimable, bail out immediately — no hot context, no turn,
+    # no LLM, no reply.
+    claimed_message_ids: list[UUID] = []
+    if triggering_message_ids:
+        claimed_message_ids = await inbound_queue.claim_messages_for_turn(
+            active_pool,
+            triggering_message_ids,
+            bot_id=scope.bot_id,
+            topic_id=primary_topic_id,
+        )
+        if not claimed_message_ids:
+            logger.info(
+                "_run_agentic: zero of %d triggering messages claimable "
+                "bot_id=%s topic_id=%s — aborting before hot context",
+                len(triggering_message_ids),
+                scope.bot_id,
+                str(primary_topic_id),
+            )
+            return
+
     try:
         if bot_spec.participants_shape == "solo":
             partner = None
@@ -919,7 +1080,7 @@ async def _run_agentic(
             triggering_message_ids,
             user,
             prompt_snapshot,
-            settings.conversational_model,
+            conversational_model,
             selected_prompt_version,
             bot_id=scope.bot_id,
             topic_id=primary_topic_id,
@@ -927,6 +1088,14 @@ async def _run_agentic(
             hot_context_builder_version=bot_spec.hot_context_builder_version,
             tool_schema_version=_TOOL_SCHEMA_VERSION,
         )
+        # Stamp the active-processing turn on claimed inbound rows.
+        if claimed_message_ids:
+            await active_pool.execute(
+                "UPDATE messages SET handled_by_turn_id=$1 WHERE id = ANY($2::uuid[])",
+                turn_id,
+                claimed_message_ids,
+            )
+
         await record_turn_event(
             active_pool,
             turn_id,
@@ -937,7 +1106,8 @@ async def _run_agentic(
                 ),
                 "triggering_message_count": len(triggering_message_ids),
                 "user_in_context": user.id,
-                "model_version": settings.conversational_model,
+                "model_version": conversational_model,
+                "llm_provider": llm_provider,
                 "system_prompt_version": selected_prompt_version,
                 "bot_id": scope.bot_id,
                 "topic_id": str(primary_topic_id) if primary_topic_id else None,
@@ -954,6 +1124,8 @@ async def _run_agentic(
             hot_context
         )
         hot_context_signals = _build_hot_context_signals(hot_context)
+        hot_context_signals["bot_id"] = scope.bot_id
+        hot_context_signals["primary_topic_slug"] = bot_spec.primary_topic_slug
         skeleton_name = pick_default_skeleton(
             trigger_metadata=hot_context.trigger_metadata,
             charge=charge,
@@ -1007,6 +1179,7 @@ async def _run_agentic(
         reaction_emoji: str | None = None
         sent_summary_for_record: str | None = None
         final_output_message_id: UUID | None = None
+        provider_send_failed: bool = False
         reasoning_parts: list[str] = []
         delivered_parts: list[str] = []
 
@@ -1022,12 +1195,14 @@ async def _run_agentic(
             )
             try:
                 step_text, messages, step_tool_count = await run_step(
-                    None,
+                    llm_client,
                     ctx,
                     system_prompt,
                     rendered_hot_context,
                     _allowed_tools_for_step(ctx),
                     messages,
+                    model=conversational_model,
+                    provider=llm_provider,
                     max_tool_iterations=STEP_ITERATION_CAPS.get(ctx.current_step, 4),
                 )
             except Exception as exc:
@@ -1063,11 +1238,11 @@ async def _run_agentic(
 
             if ctx.current_step == "respond":
                 assistant_text = step_text
-                if triggering_message_ids:
-                    await active_pool.execute(
-                        "UPDATE messages SET processing_state='processed' WHERE id = ANY($1) AND processing_state='raw'",
-                        triggering_message_ids,
-                    )
+                # Note: inbound messages are now marked terminal by
+                # inbound_queue.complete_messages / fail_messages after the
+                # turn completes (see the normal-path finally and exception
+                # handler below).  The old early raw→processed UPDATE has
+                # been removed (durable-inbound-queue-hardening T4).
 
                 sent_parts = ctx.sent_message_parts or []
                 final_output_message_id = (
@@ -1171,7 +1346,7 @@ async def _run_agentic(
                                         raise NewerInboundBeforeFinalSend()
 
                                 try:
-                                    final_output_message_id = await send_outbound(
+                                    send_result = await send_outbound(
                                         active_pool,
                                         user,
                                         sendable_text,
@@ -1186,6 +1361,9 @@ async def _run_agentic(
                                             else None
                                         ),
                                     )
+                                    final_output_message_id = send_result["message_id"]
+                                    provider_send_failed = send_result["status"] == "provider_failed"
+                                    provider_visible = send_result["visible_to_user"]
                                 except NewerInboundBeforeFinalSend:
                                     await _append_reasoning(
                                         active_pool,
@@ -1206,23 +1384,59 @@ async def _run_agentic(
                                     )
                                     assistant_text = ""
                                 else:
-                                    await _record_turn_final_output(
-                                        active_pool, turn_id, final_output_message_id
-                                    )
-                                    await record_turn_event(
-                                        active_pool,
-                                        turn_id,
-                                        "outbound.sent",
-                                        step=ctx.current_step,
-                                        actor="delivery",
-                                        metadata={
-                                            "message_id": final_output_message_id,
-                                            "send_kind": "final",
-                                        },
-                                    )
-                                    await claim_onboarding_welcome(active_pool, user.id)
-                                    assistant_text = sendable_text
-                                    responded_to_user = True
+                                    if send_result["status"] == "provider_failed":
+                                        if send_result["visible_to_user"]:
+                                            # At least one chunk was delivered before
+                                            # the failure.  Record the last successful
+                                            # chunk as final output and treat the
+                                            # inbound as terminal replied.
+                                            await _record_turn_final_output(
+                                                active_pool,
+                                                turn_id,
+                                                final_output_message_id,
+                                            )
+                                            await record_turn_event(
+                                                active_pool,
+                                                turn_id,
+                                                "outbound.sent_partial",
+                                                step=ctx.current_step,
+                                                actor="delivery",
+                                                metadata={
+                                                    "message_id": final_output_message_id,
+                                                    "send_kind": "final",
+                                                    "partial_failure": True,
+                                                },
+                                            )
+                                            await claim_onboarding_welcome(
+                                                active_pool, user.id
+                                            )
+                                            assistant_text = sendable_text
+                                            responded_to_user = True
+                                        else:
+                                            # No chunk was visible to the user.
+                                            # Clear final_output_message_id so
+                                            # _complete_turn does not record a
+                                            # failed outbound row as the turn's
+                                            # final output.
+                                            final_output_message_id = None
+                                    else:
+                                        await _record_turn_final_output(
+                                            active_pool, turn_id, final_output_message_id
+                                        )
+                                        await record_turn_event(
+                                            active_pool,
+                                            turn_id,
+                                            "outbound.sent",
+                                            step=ctx.current_step,
+                                            actor="delivery",
+                                            metadata={
+                                                "message_id": final_output_message_id,
+                                                "send_kind": "final",
+                                            },
+                                        )
+                                        await claim_onboarding_welcome(active_pool, user.id)
+                                        assistant_text = sendable_text
+                                        responded_to_user = True
                         elif sendable_text:
                             assistant_text = sendable_text
                 elif charge in {"charged", "crisis"}:
@@ -1285,6 +1499,46 @@ async def _run_agentic(
             tool_call_count,
             reasoning,
         )
+
+        # ── Mark claimed inbound messages as terminal ──────────────────
+        if claimed_message_ids:
+            if responded_to_user:
+                handling_result = "replied"
+            elif provider_send_failed:
+                # Provider failed and no user-visible delivery occurred at all.
+                # Mark as failed for retry (not terminal 'replied').
+                failure_class = _failure_class_for("provider_send_failed")
+                error_detail = (
+                    f"provider_send_failed"
+                    f" [failure_class={failure_class}, retryable=true]"
+                )
+                await inbound_queue.fail_messages(
+                    active_pool,
+                    claimed_message_ids,
+                    processing_error=error_detail,
+                    handled_by_turn_id=turn_id,
+                    bot_id=scope.bot_id,
+                    topic_id=primary_topic_id,
+                )
+                return
+            elif assistant_text and not responded_to_user:
+                # Bot produced text but it was withheld (newer inbound, OOB block)
+                handling_result = "withheld_newer_inbound"
+            elif not assistant_text and not responded_to_user:
+                # Bot intentionally stayed silent
+                handling_result = "silent"
+            else:
+                handling_result = "no_action"
+            await inbound_queue.complete_messages(
+                active_pool,
+                claimed_message_ids,
+                handling_result=handling_result,
+                handled_by_turn_id=turn_id,
+                bot_id=scope.bot_id,
+                topic_id=primary_topic_id,
+            )
+        return
+
     except SpendCapExceeded:
         if turn_id is not None:
             scheduled = await _defer_for_text_cap(
@@ -1328,7 +1582,7 @@ async def _run_agentic(
                     )
                 else:
                     try:
-                        final_output_message_id = await send_outbound(
+                        fallback_result = await send_outbound(
                             active_pool,
                             user,
                             fallback_text,
@@ -1342,6 +1596,7 @@ async def _run_agentic(
                                 else None
                             ),
                         )
+                        final_output_message_id = fallback_result["message_id"]
                     except NewerInboundBeforeFinalSend:
                         await _append_reasoning(
                             active_pool,
@@ -1357,17 +1612,109 @@ async def _run_agentic(
                 "Text LLM spend cap hit; deferred original trigger messages for next-day retry.",
             )
             return
-        raise
+        # No turn was opened before spend cap was hit — defer the messages
+        # instead of failing them so they can be retried later.
+        if claimed_message_ids:
+            await inbound_queue.defer_messages(
+                active_pool,
+                claimed_message_ids,
+                bot_id=scope.bot_id,
+                topic_id=primary_topic_id,
+            )
+            logger.info(
+                "SpendCapExceeded before turn opened: deferred %d claimed messages"
+                " bot_id=%s topic_id=%s",
+                len(claimed_message_ids),
+                scope.bot_id,
+                str(primary_topic_id),
+            )
+        return
     except Exception as exc:
         failure_reason = getattr(exc, "failure_reason", "crashed")
-        await _fail_turn(active_pool, turn_id, failure_reason)
-        if responded_to_user:
-            logger.warning(
-                "agentic turn failed after outbound was sent: %s",
-                exc,
-                extra=obs_fields(ctx),
-            )
-            return
+        # Collect structured metadata from the exception when available
+        fail_metadata: dict[str, Any] | None = None
+        if hasattr(exc, "result"):
+            exc_result = getattr(exc, "result") or {}
+            if isinstance(exc_result, dict):
+                fail_metadata = {
+                    k: v
+                    for k in (
+                        "error_code",
+                        "field",
+                        "retryable",
+                        "correction_hint",
+                        "failure_class",
+                        "tool_name",
+                    )
+                    if (v := exc_result.get(k)) is not None
+                }
+        elif hasattr(exc, "__cause__") and exc.__cause__ is not None:
+            # Chain: extract from cause exception
+            cause = exc.__cause__
+            if hasattr(cause, "result"):
+                cause_result = getattr(cause, "result") or {}
+                if isinstance(cause_result, dict):
+                    fail_metadata = {
+                        k: v
+                        for k in (
+                            "error_code",
+                            "field",
+                            "retryable",
+                            "correction_hint",
+                            "failure_class",
+                            "tool_name",
+                        )
+                        if (v := cause_result.get(k)) is not None
+                    }
+        await _fail_turn(active_pool, turn_id, failure_reason, metadata=fail_metadata)
+
+        # ── Mark claimed inbound messages as failed ────────────────────
+        if claimed_message_ids:
+            if responded_to_user:
+                # A user-visible response already occurred — mark terminal
+                # as 'replied' (not retryable) but still record the turn failure.
+                await inbound_queue.complete_messages(
+                    active_pool,
+                    claimed_message_ids,
+                    handling_result="replied",
+                    handled_by_turn_id=turn_id,
+                    bot_id=scope.bot_id,
+                    topic_id=primary_topic_id,
+                )
+                logger.warning(
+                    "agentic turn failed after outbound was sent: %s",
+                    exc,
+                    extra=obs_fields(ctx),
+                )
+                return
+            else:
+                # No user-visible response — mark failed for potential retry.
+                failure_class = _failure_class_for(failure_reason)
+                retryable = (
+                    fail_metadata.get("retryable", True)
+                    if fail_metadata
+                    else True
+                )
+                exc_name = type(exc).__name__
+                exc_msg = str(exc)
+                if exc_msg:
+                    error_detail = (
+                        f"{exc_name}: {exc_msg}"
+                        f" [failure_class={failure_class}, retryable={retryable}]"
+                    )
+                else:
+                    error_detail = (
+                        f"{exc_name}"
+                        f" [failure_class={failure_class}, retryable={retryable}]"
+                    )
+                await inbound_queue.fail_messages(
+                    active_pool,
+                    claimed_message_ids,
+                    processing_error=error_detail[:500],
+                    handled_by_turn_id=turn_id,
+                    bot_id=scope.bot_id,
+                    topic_id=primary_topic_id,
+                )
         raise
 
 

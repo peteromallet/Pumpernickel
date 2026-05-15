@@ -6,7 +6,12 @@ import pytest
 
 from app.models.user import User
 from app.services.turn_context import TurnContext
-from app.services.turn_plan import SKELETONS, make_turn_plan, orient_summary, pick_default_skeleton
+from app.services.turn_plan import (
+    SKELETONS,
+    make_turn_plan,
+    orient_summary,
+    pick_default_skeleton,
+)
 from app.services.tools.registry import STEP_ALLOWED_TOOLS, call_tool
 from tests.conftest import FakePool
 
@@ -22,6 +27,139 @@ def test_pick_default_skeleton_covers_named_paths() -> None:
     assert pick_default_skeleton(trigger_metadata={"messages": [{"content": "this hurt"}]}, charge="charged") == "charged"
     assert pick_default_skeleton(trigger_metadata={"messages": [{"content": "I might hurt myself"}]}, charge="crisis") == "crisis"
     assert SKELETONS["quick_reply"] == ["respond", "done"]
+
+
+def test_hector_fitness_context_gets_record_capable_turn() -> None:
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "regrouping for next week"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "standard"
+    )
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={
+                "messages": [
+                    {
+                        "content": (
+                            "The bench is beside the computer, but the laptop "
+                            "pulls me into work too fast."
+                        )
+                    }
+                ]
+            },
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "standard"
+    )
+
+
+def test_hector_plan_confirmation_routes_to_standard() -> None:
+    """Accepted-plan confirmations route to 'standard' so Hector can record commitments."""
+    # Exact incident phrase
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "Yeah, let's do it please"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "standard"
+    )
+    # Other confirmation patterns
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "Yes, log that for me"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "standard"
+    )
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "Sounds good, make that the plan"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "standard"
+    )
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "Let's start Monday"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "standard"
+    )
+    # Additional variation: "go ahead and schedule that"
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "Go ahead and schedule"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "standard"
+    )
+
+
+def test_hector_casual_ok_stays_silence_or_react() -> None:
+    """Casual 'ok' / 'yeah' / 'thanks' with Hector still gets silence_or_react."""
+    for content in ("ok", "yeah", "thanks", "k"):
+        assert (
+            pick_default_skeleton(
+                trigger_metadata={"messages": [{"content": content}]},
+                charge=None,
+                hot_context_signals={"bot_id": "hector"},
+            )
+            == "silence_or_react"
+        )
+
+
+def test_hector_casual_chat_can_stay_quick() -> None:
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "Hey dude, how are you?"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "hector"},
+        )
+        == "quick_reply"
+    )
+
+
+def test_tante_rosi_pregnancy_context_gets_record_capable_turn() -> None:
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={
+                "messages": [{"content": "The scan moved my due date"}]
+            },
+            charge=None,
+            hot_context_signals={"bot_id": "tante_rosi"},
+        )
+        == "standard"
+    )
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={
+                "messages": [{"content": "Ich habe morgen einen Termin bei der Hebamme"}]
+            },
+            charge=None,
+            hot_context_signals={"bot_id": "tante_rosi"},
+        )
+        == "standard"
+    )
+
+
+def test_tante_rosi_casual_chat_can_stay_quick() -> None:
+    assert (
+        pick_default_skeleton(
+            trigger_metadata={"messages": [{"content": "Hallo, wie geht's?"}]},
+            charge=None,
+            hot_context_signals={"bot_id": "tante_rosi"},
+        )
+        == "quick_reply"
+    )
 
 
 def test_orient_summary_is_nonempty_runner_context() -> None:

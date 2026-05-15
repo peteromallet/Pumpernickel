@@ -164,6 +164,9 @@ class FakePool:
         # Multi-gateway: channels rows keyed by (transport, address).
         self.channels: dict[tuple[str, str], dict[str, Any]] = {}
         self._raise_undefined_table_on_channels: bool = False
+        # S7: Hector fitness — commitments and events tables (T15).
+        self.commitments: dict[UUID, dict[str, Any]] = {}
+        self.events: dict[UUID, dict[str, Any]] = {}
 
     def link_topic(
         self, artifact_table: str, artifact_id: UUID, topic_id: UUID
@@ -517,7 +520,7 @@ class FakePool:
             charge = rest[0] if rest else None
             inbound_bot_id = rest[1] if len(rest) > 1 else None
             inbound_topic_id = rest[2] if len(rest) > 2 else None
-            if any(m["whatsapp_message_id"] == wa_id for m in self.messages.values()):
+            if any(m["whatsapp_message_id"] == wa_id and m["bot_id"] == inbound_bot_id for m in self.messages.values()):
                 return None
             row = {
                 "id": uuid4(),
@@ -538,8 +541,13 @@ class FakePool:
                 "edit_history": None,
                 "edited_at": None,
                 "deleted_at": None,
-                "bot_id": inbound_bot_id,
-                "topic_id": inbound_topic_id,
+                # 0041 inbound queue metadata
+                "handled_at": None,
+                "handled_by_turn_id": None,
+                "handling_result": None,
+                "processing_started_at": None,
+                "processing_error": None,
+                "processing_attempts": 0,
             }
             self.messages[row["id"]] = row
             return {"id": row["id"]}
@@ -2000,6 +2008,100 @@ class FakePool:
                 "name": row.get("name"),
                 "timezone": row.get("timezone"),
             }
+        # ── Hector fitness: mediator.commitments ──────────────────────────────
+        if compact.startswith("SELECT id FROM mediator.commitments WHERE id =") and "user_id = " in compact and "bot_id = " in compact:
+            # log_event commitment existence check
+            cid = UUID(args[0]) if not isinstance(args[0], UUID) else args[0]
+            scope_user = args[1]
+            scope_topic = args[2]
+            scope_bot = args[3]
+            row = self.commitments.get(cid)
+            if row is not None and row["user_id"] == scope_user and row["topic_id"] == scope_topic and row["bot_id"] == scope_bot:
+                return {"id": row["id"]}
+            return None
+        if compact.startswith("INSERT INTO mediator.commitments") and "RETURNING id, label, cadence, created_at" in compact:
+            now = datetime.now(UTC)
+            row_id = uuid4()
+            row = {
+                "id": row_id,
+                "user_id": args[0],
+                "topic_id": args[1],
+                "bot_id": args[2],
+                "label": args[3],
+                "kind": args[4],
+                "cadence": args[5],
+                "days_of_week": list(args[6]) if args[6] else [],
+                "target_count": args[7],
+                "start_date": args[8],
+                "end_date": args[9],
+                "schedule_rule": args[10] if isinstance(args[10], dict) else {},
+                "pressure_style": args[11],
+                "status": "active",
+                "created_at": now,
+                "updated_at": now,
+            }
+            self.commitments[row_id] = row
+            return row
+        if compact.startswith("UPDATE mediator.commitments SET") and "RETURNING id, updated_at" in compact and "status = " not in compact:
+            # update_commitment (partial UPDATE, last 4 args are scope + id)
+            scope_user = args[-4]
+            scope_topic = args[-3]
+            scope_bot = args[-2]
+            commitment_id = UUID(args[-1]) if not isinstance(args[-1], UUID) else args[-1]
+            row = self.commitments.get(commitment_id)
+            if row is None or row["user_id"] != scope_user or row["topic_id"] != scope_topic or row["bot_id"] != scope_bot:
+                return None
+            set_values = args[:-4]
+            set_start = compact.find("SET ") + 4
+            set_end = compact.find(" WHERE ")
+            set_clause = compact[set_start:set_end]
+            parts = [p.strip() for p in set_clause.split(",")]
+            for i, part in enumerate(parts):
+                col = part.split(" = ")[0].strip()
+                if col in ("label", "kind", "cadence", "pressure_style"):
+                    row[col] = set_values[i]
+                elif col == "days_of_week":
+                    row[col] = list(set_values[i]) if set_values[i] else []
+                elif col in ("target_count", "start_date", "end_date"):
+                    row[col] = set_values[i]
+                elif col == "schedule_rule":
+                    row[col] = set_values[i] if isinstance(set_values[i], dict) else {}
+            row["updated_at"] = datetime.now(UTC)
+            return {"id": row["id"], "updated_at": row["updated_at"]}
+        if compact.startswith("UPDATE mediator.commitments SET status = ") and "RETURNING id, status, updated_at" in compact:
+            scope_user = args[0]
+            scope_topic = args[1]
+            scope_bot = args[2]
+            commitment_id = UUID(args[3]) if not isinstance(args[3], UUID) else args[3]
+            new_status = args[4]
+            row = self.commitments.get(commitment_id)
+            if row is None or row["user_id"] != scope_user or row["topic_id"] != scope_topic or row["bot_id"] != scope_bot:
+                return None
+            row["status"] = new_status
+            row["updated_at"] = datetime.now(UTC)
+            return {"id": row["id"], "status": row["status"], "updated_at": row["updated_at"]}
+        # ── Hector fitness: mediator.events ──────────────────────────────────
+        if compact.startswith("INSERT INTO mediator.events") and "RETURNING id, commitment_id, metric_key, adherence_status, observed_at" in compact:
+            now = datetime.now(UTC)
+            row_id = uuid4()
+            row = {
+                "id": row_id,
+                "commitment_id": args[0],
+                "user_id": args[1],
+                "topic_id": args[2],
+                "bot_id": args[3],
+                "metric_key": args[4],
+                "adherence_status": args[5],
+                "value_numeric": args[6],
+                "value_text": args[7],
+                "unit": args[8],
+                "observed_at": args[9],
+                "note": args[10],
+                "source_message_ids": list(args[11]) if args[11] else [],
+                "created_at": now,
+            }
+            self.events[row_id] = row
+            return row
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):
@@ -2181,6 +2283,51 @@ class FakePool:
 
     async def fetch(self, sql: str, *args):
         compact = " ".join(sql.split())
+        # ── 0041: claim_messages_for_turn CTE ────────────────────────────
+        if "WITH claimed AS ( UPDATE messages" in compact and "RETURNING id ) SELECT id FROM claimed" in compact:
+            message_ids = set(args[0])
+            bot_id_arg = args[1]
+            topic_id_arg = args[2]
+            claimed = []
+            for msg_id, msg in list(self.messages.items()):
+                if msg_id not in message_ids:
+                    continue
+                if msg.get("direction") != "inbound":
+                    continue
+                if msg.get("processing_state") not in ("raw", "deferred"):
+                    continue
+                ps = msg.get("processing_started_at")
+                if ps is not None and ps >= datetime.now(UTC) - timedelta(minutes=5):
+                    continue
+                if msg.get("bot_id") != bot_id_arg:
+                    continue
+                if msg.get("topic_id") != topic_id_arg:
+                    continue
+                msg["processing_state"] = "processing"
+                msg["processing_started_at"] = datetime.now(UTC)
+                msg["processing_attempts"] = msg.get("processing_attempts", 0) + 1
+                msg["processing_error"] = None
+                claimed.append({"id": msg_id})
+            return claimed
+        # ── 0041: _recovery_scopes query ─────────────────────────────────
+        if ("SELECT DISTINCT bot_id, topic_id FROM messages"
+                in compact and "direction = 'inbound'" in compact):
+            rows = []
+            seen = set()
+            for msg in self.messages.values():
+                if msg.get("direction") != "inbound":
+                    continue
+                if msg.get("processing_state") not in ("raw", "processing", "failed"):
+                    continue
+                bid = msg.get("bot_id")
+                tid = msg.get("topic_id")
+                if bid is None or tid is None:
+                    continue
+                key = (bid, tid)
+                if key not in seen:
+                    seen.add(key)
+                    rows.append({"bot_id": bid, "topic_id": tid})
+            return rows
         if (
             compact.startswith("SELECT id FROM messages WHERE id = ANY")
             and "sender_id=$2 OR recipient_id=$2" in compact
@@ -3130,6 +3277,103 @@ class FakePool:
                     }
                 result.append({"id": self.topics[slug]["id"], "slug": slug})
             return result
+        # ── Hector fitness: mediator.commitments ──────────────────────────────
+        if "FROM mediator.commitments" in compact:
+            # list_commitments / get_adherence commitments query
+            # args[0]=user_id, args[1]=topic_id.  args[2]=bot_id when parameterised,
+            # but _format_fitness_block hardcodes bot_id='hector' in the SQL literal.
+            scope_user = args[0]
+            scope_topic = args[1]
+            if "bot_id = 'hector'" in compact:
+                scope_bot = "hector"
+            elif len(args) >= 3 and isinstance(args[2], str):
+                scope_bot = args[2]
+            else:
+                scope_bot = args[2] if len(args) >= 3 else "hector"
+            # Optional status filter (args[3] if present)
+            status_filter = None
+            extra_args_start = 3
+            if "status = " in compact and "status = 'active'" in compact:
+                status_filter = "active"
+            elif "status = " in compact and "status = $4" in compact:
+                status_filter = args[3] if len(args) > 3 else None
+                extra_args_start = 4
+            # Optional commitment_ids filter for get_adherence
+            commitment_ids_filter = None
+            if "id = ANY" in compact:
+                commitment_ids_filter = set(args[-1]) if args else None
+            rows = [
+                row for row in self.commitments.values()
+                if row["user_id"] == scope_user
+                and row["topic_id"] == scope_topic
+                and row["bot_id"] == scope_bot
+                and (status_filter is None or row["status"] == status_filter)
+                and (commitment_ids_filter is None or row["id"] in commitment_ids_filter)
+            ]
+            rows.sort(key=lambda r: r["created_at"], reverse=("DESC" in compact))
+            if "LIMIT 50" in compact:
+                rows = rows[:50]
+            return rows
+        # ── Hector fitness: mediator.events ───────────────────────────────────
+        if "FROM mediator.events" in compact:
+            scope_user = args[0]
+            scope_topic = args[1]
+            # bot_id may be hardcoded in SQL literal (e.g. bot_id = 'hector')
+            # or passed as a parameter (args[2]).
+            if "bot_id = 'hector'" in compact:
+                scope_bot = "hector"
+            elif len(args) >= 3 and isinstance(args[2], str):
+                scope_bot = args[2]
+            else:
+                scope_bot = "hector"
+            # Optional commitment_id filter
+            commitment_id_filter = None
+            if "commitment_id = " in compact and "::uuid" in compact:
+                # args[3] = commitment_id, args[4] = limit or observed_at
+                commitment_id_filter = args[3]
+            # Optional before filter
+            before_filter = None
+            if "observed_at < " in compact:
+                # could be at position args[3] or args[4]
+                for a in args[3:]:
+                    if isinstance(a, datetime):
+                        before_filter = a
+                        break
+            # Optional observed_at >= cutoff (get_adherence)
+            cutoff_filter = None
+            if "observed_at >= " in compact:
+                for a in args[3:]:
+                    if isinstance(a, datetime) and not before_filter:
+                        cutoff_filter = a
+                        break
+                    elif isinstance(a, datetime):
+                        cutoff_filter = a
+                        break
+            # Optional commitment_id = ANY (get_adherence)
+            cids_filter = None
+            if "commitment_id = ANY" in compact:
+                for a in args[3:]:
+                    if isinstance(a, (list, set)):
+                        cids_filter = set(a)
+                        break
+            limit = 20
+            for a in reversed(args):
+                if isinstance(a, int):
+                    limit = a
+                    break
+            rows = [
+                row for row in self.events.values()
+                if row["user_id"] == scope_user
+                and row["topic_id"] == scope_topic
+                and row["bot_id"] == scope_bot
+                and (commitment_id_filter is None or str(row["commitment_id"]) == str(commitment_id_filter))
+                and (before_filter is None or row["observed_at"] < before_filter)
+                and (cutoff_filter is None or row["observed_at"] >= cutoff_filter)
+                and (cids_filter is None or row["commitment_id"] in cids_filter)
+            ]
+            rows.sort(key=lambda r: r["observed_at"], reverse=True)
+            rows = rows[:limit]
+            return rows
         raise AssertionError(f"unhandled fetch SQL: {compact}")
 
     async def execute(self, sql: str, *args) -> str:
@@ -3250,6 +3494,14 @@ class FakePool:
             if "processing_state='expired'" in compact:
                 self.messages[message_id]["processing_state"] = "expired"
             return "UPDATE 1"
+        if compact.startswith(
+            "UPDATE messages SET media_analysis = COALESCE(media_analysis"
+        ):
+            error_str, message_id = args
+            existing = self.messages[message_id].get("media_analysis") or {}
+            existing["_pipeline"] = {"attempts": 2, "last_error": error_str}
+            self.messages[message_id]["media_analysis"] = existing
+            return "UPDATE 1"
         if compact.startswith("UPDATE messages SET processing_state='expired'"):
             if len(args) == 1:
                 self.messages[args[0]]["processing_state"] = "expired"
@@ -3297,6 +3549,176 @@ class FakePool:
                 if message_id in self.messages:
                     self.messages[message_id]["processing_state"] = "raw"
             return "UPDATE 1"
+        # ── 0041: inbound_queue helpers ─────────────────────────────────
+        # complete_messages → processed + handling metadata
+        if ("handling_result" in compact and "handled_by_turn_id" in compact
+                and "handled_at = now()" in compact):
+            message_ids = set(args[0])
+            bot_id_arg = args[1]
+            topic_id_arg = args[2]
+            handling_result = args[3]
+            handled_by_turn_id = args[4]
+            count = 0
+            for message_id in message_ids:
+                if message_id in self.messages:
+                    msg = self.messages[message_id]
+                    if msg.get("direction") != "inbound":
+                        continue
+                    if msg.get("bot_id") != bot_id_arg:
+                        continue
+                    if msg.get("topic_id") != topic_id_arg:
+                        continue
+                    msg["processing_state"] = "processed"
+                    msg["handling_result"] = handling_result
+                    msg["handled_at"] = datetime.now(UTC)
+                    msg["handled_by_turn_id"] = handled_by_turn_id
+                    count += 1
+            return f"UPDATE {count}"
+        # fail_messages → failed + error
+        if ("processing_error" in compact
+                and "handling_result = 'failed'" in compact):
+            message_ids = set(args[0])
+            bot_id_arg = args[1]
+            topic_id_arg = args[2]
+            processing_error = args[3]
+            handled_by_turn_id = args[4] if len(args) > 4 else None
+            count = 0
+            for message_id in message_ids:
+                if message_id in self.messages:
+                    msg = self.messages[message_id]
+                    if msg.get("direction") != "inbound":
+                        continue
+                    if msg.get("bot_id") != bot_id_arg:
+                        continue
+                    if msg.get("topic_id") != topic_id_arg:
+                        continue
+                    msg["processing_state"] = "failed"
+                    msg["processing_error"] = processing_error
+                    msg["handling_result"] = "failed"
+                    if handled_by_turn_id is not None:
+                        msg["handled_by_turn_id"] = handled_by_turn_id
+                        msg["handled_at"] = datetime.now(UTC)
+                    count += 1
+            return f"UPDATE {count}"
+        # defer_messages (0041 queue helper with direction='inbound' guard)
+        if ("UPDATE messages SET processing_state = 'deferred'"
+                in compact and "direction = 'inbound'" in compact):
+            message_ids = set(args[0])
+            bot_id_arg = args[1]
+            topic_id_arg = args[2]
+            count = 0
+            for message_id in message_ids:
+                if message_id in self.messages:
+                    msg = self.messages[message_id]
+                    if msg.get("direction") != "inbound":
+                        continue
+                    if msg.get("bot_id") != bot_id_arg:
+                        continue
+                    if msg.get("topic_id") != topic_id_arg:
+                        continue
+                    msg["processing_state"] = "deferred"
+                    count += 1
+            return f"UPDATE {count}"
+        # expire_messages → expired terminal (per-message with id=ANY)
+        if ("handling_result = 'expired'" in compact
+                and "handled_at = now()" in compact
+                and "WHERE id = ANY" in compact):
+            message_ids = set(args[0])
+            bot_id_arg = args[1]
+            topic_id_arg = args[2]
+            count = 0
+            for message_id in message_ids:
+                if message_id in self.messages:
+                    msg = self.messages[message_id]
+                    if msg.get("direction") != "inbound":
+                        continue
+                    if msg.get("bot_id") != bot_id_arg:
+                        continue
+                    if msg.get("topic_id") != topic_id_arg:
+                        continue
+                    msg["processing_state"] = "expired"
+                    msg["handling_result"] = "expired"
+                    msg["handled_at"] = datetime.now(UTC)
+                    count += 1
+            return f"UPDATE {count}"
+        # Bulk expire in recovery (sent_at < cutoff, no id=ANY)
+        if ("handling_result = 'expired'" in compact
+                and "handled_at = now()" in compact
+                and "sent_at <" in compact
+                and "direction = 'inbound'" in compact):
+            cutoff = args[0]
+            count = 0
+            for msg_id, msg in list(self.messages.items()):
+                if msg.get("direction") != "inbound":
+                    continue
+                if ("processing_state = 'raw'" in compact
+                        and msg.get("processing_state") != "raw"):
+                    continue
+                if "processing_state IN ('failed', 'processing')" in compact:
+                    if msg.get("processing_state") not in ("failed", "processing"):
+                        continue
+                st = msg.get("sent_at")
+                if st is None:
+                    continue
+                if st < cutoff:
+                    msg["processing_state"] = "expired"
+                    msg["handling_result"] = "expired"
+                    msg["handled_at"] = datetime.now(UTC)
+                    count += 1
+            return f"UPDATE {count}"
+        # agentic.py: stamp handled_by_turn_id after _open_turn
+        if "UPDATE messages SET handled_by_turn_id" in compact:
+            turn_id = args[0]
+            message_ids = set(args[1])
+            count = 0
+            for message_id in message_ids:
+                if message_id in self.messages:
+                    self.messages[message_id]["handled_by_turn_id"] = turn_id
+                    count += 1
+            return f"UPDATE {count}"
+        # recover_stale_processing / recover_retryable_failed:
+        # UPDATE ... SET processing_state='raw', processing_started_at=NULL
+        # WHERE id IN (SELECT ...)
+        if ("processing_state = 'raw'" in compact
+                and "processing_started_at = NULL" in compact
+                and "WHERE id IN ( SELECT id FROM messages" in compact):
+            count = 0
+            for msg_id, msg in list(self.messages.items()):
+                if msg.get("direction") != "inbound":
+                    continue
+                if "processing_state = 'processing'" in compact:
+                    if msg.get("processing_state") != "processing":
+                        continue
+                    bot_arg = args[0] if args else None
+                    topic_arg = args[1] if len(args) > 1 else None
+                    if bot_arg and msg.get("bot_id") != bot_arg:
+                        continue
+                    if topic_arg and msg.get("topic_id") != topic_arg:
+                        continue
+                    ps = msg.get("processing_started_at")
+                    if ps is not None:
+                        stale_limit = datetime.now(UTC) - (args[2] if len(args) > 2 and isinstance(args[2], timedelta) else timedelta(seconds=300))
+                        if ps >= stale_limit:
+                            continue
+                    msg["processing_state"] = "raw"
+                    msg["processing_started_at"] = None
+                    count += 1
+                elif "processing_state = 'failed'" in compact:
+                    if msg.get("processing_state") != "failed":
+                        continue
+                    bot_arg = args[0] if args else None
+                    topic_arg = args[1] if len(args) > 1 else None
+                    if bot_arg and msg.get("bot_id") != bot_arg:
+                        continue
+                    if topic_arg and msg.get("topic_id") != topic_arg:
+                        continue
+                    max_retries = args[2] if len(args) > 2 and isinstance(args[2], int) else 3
+                    if msg.get("processing_attempts", 0) >= max_retries:
+                        continue
+                    msg["processing_state"] = "raw"
+                    msg["processing_started_at"] = None
+                    count += 1
+            return f"UPDATE {count}"
         if compact.startswith("UPDATE messages SET edit_history"):
             new_content = args[0]
             content_encrypted = args[1] if len(args) == 3 else None
@@ -3371,6 +3793,26 @@ class FakePool:
                     job["cancellation_reason"] = "too stale"
                     job["claimed_at"] = None
                     job["claimed_by"] = None
+            return "UPDATE 1"
+        if (
+            compact.startswith("UPDATE scheduled_jobs SET status = 'cancelled'")
+            and "context->>'kind' = 'commitment_checkin'" in compact
+        ):
+            user_id, bot_id, topic_id, commitment_id = args
+            for job in self.scheduled_jobs.values():
+                context = job.get("context") or {}
+                if (
+                    job.get("user_id") == user_id
+                    and job.get("bot_id") == bot_id
+                    and job.get("topic_id") == topic_id
+                    and job.get("job_type") == "scheduled_task"
+                    and job.get("status") == "pending"
+                    and context.get("kind") == "commitment_checkin"
+                    and str(context.get("commitment_id")) == str(commitment_id)
+                ):
+                    job["status"] = "cancelled"
+                    job["cancellation_reason"] = "commitment_closed"
+                    job["updated_at"] = datetime.now(UTC)
             return "UPDATE 1"
         if compact.startswith("UPDATE scheduled_jobs SET context = jsonb_set"):
             now = args[0]
@@ -3602,7 +4044,22 @@ class FakePool:
                 self.eval_runs[run_id]["notes"] = notes
             return "UPDATE 1"
         if compact.startswith("INSERT INTO tool_calls"):
-            turn_id, tool_name, arguments, result, called_at, duration_ms = args
+            # New schema (migration 0039) adds kind + summary; old call
+            # sites still pass 6 args, so handle both shapes.
+            if len(args) == 8:
+                (
+                    turn_id,
+                    tool_name,
+                    arguments,
+                    result,
+                    called_at,
+                    duration_ms,
+                    kind,
+                    summary,
+                ) = args
+            else:
+                turn_id, tool_name, arguments, result, called_at, duration_ms = args
+                kind, summary = "write", None
             self.tool_calls.append(
                 {
                     "turn_id": turn_id,
@@ -3611,6 +4068,8 @@ class FakePool:
                     "result": _coerce_jsonb(result),
                     "called_at": called_at,
                     "duration_ms": duration_ms,
+                    "kind": kind,
+                    "summary": summary,
                 }
             )
             return "INSERT 0 1"

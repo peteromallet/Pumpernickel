@@ -10,6 +10,8 @@ def test_config_loads(monkeypatch) -> None:
         "SUPABASE_URL": "https://example.supabase.co",
         "SUPABASE_SERVICE_ROLE_KEY": "dummy-service-role",
         "ANTHROPIC_API_KEY": "dummy-anthropic",
+        "DEEPSEEK_API_KEY": "dummy-deepseek",
+        "DEEPSEEK_BASE_URL": "https://deepseek.example",
         "OPENAI_API_KEY": "dummy-openai",
         "GROQ_API_KEY": "dummy-groq",
         "WHATSAPP_TOKEN": "dummy-whatsapp",
@@ -23,6 +25,10 @@ def test_config_loads(monkeypatch) -> None:
         "VISION_DAILY_CAP_USD": "2.5",
         "TRANSCRIPTION_DAILY_CAP_USD": "1.5",
         "CONVERSATIONAL_MODEL": "claude-sonnet-test",
+        "DEEPSEEK_CONVERSATIONAL_MODEL": "deepseek-test",
+        "DEEPSEEK_ENABLED_USER_NAMES": "Peter",
+        "DEEPSEEK_THINKING_ENABLED": "false",
+        "DEEPSEEK_REASONING_EFFORT": "medium",
         "CONSULT_MODEL": "claude-consult-test",
         "CONSULT_MAX_TOOL_ITERATIONS": "4",
         "CONSULT_TIMEOUT_S": "12.5",
@@ -58,6 +64,8 @@ def test_config_loads(monkeypatch) -> None:
         "ANTHROPIC_OUTPUT_USD_PER_MTOK": "16.5",
         "ANTHROPIC_HAIKU_INPUT_USD_PER_MTOK": "1.25",
         "ANTHROPIC_HAIKU_OUTPUT_USD_PER_MTOK": "5.25",
+        "DEEPSEEK_INPUT_USD_PER_MTOK": "0.33",
+        "DEEPSEEK_OUTPUT_USD_PER_MTOK": "1.25",
         "SENTRY_DSN": "https://example.invalid/sentry",
         "LOG_DESTINATION": "stdout",
     }
@@ -73,6 +81,9 @@ def test_config_loads(monkeypatch) -> None:
     assert isinstance(settings.supabase_service_role_key, SecretStr)
     assert settings.supabase_service_role_key.get_secret_value() == env["SUPABASE_SERVICE_ROLE_KEY"]
     assert settings.anthropic_api_key.get_secret_value() == env["ANTHROPIC_API_KEY"]
+    assert settings.deepseek_api_key is not None
+    assert settings.deepseek_api_key.get_secret_value() == env["DEEPSEEK_API_KEY"]
+    assert settings.deepseek_base_url == env["DEEPSEEK_BASE_URL"]
     assert settings.openai_api_key.get_secret_value() == env["OPENAI_API_KEY"]
     assert settings.groq_api_key.get_secret_value() == env["GROQ_API_KEY"]
     assert settings.whatsapp_token.get_secret_value() == env["WHATSAPP_TOKEN"]
@@ -86,6 +97,10 @@ def test_config_loads(monkeypatch) -> None:
     assert settings.vision_daily_cap_usd == 2.5
     assert settings.transcription_daily_cap_usd == 1.5
     assert settings.conversational_model == env["CONVERSATIONAL_MODEL"]
+    assert settings.deepseek_conversational_model == env["DEEPSEEK_CONVERSATIONAL_MODEL"]
+    assert settings.deepseek_enabled_user_names == env["DEEPSEEK_ENABLED_USER_NAMES"]
+    assert settings.deepseek_thinking_enabled is False
+    assert settings.deepseek_reasoning_effort == env["DEEPSEEK_REASONING_EFFORT"]
     assert settings.consult_model == env["CONSULT_MODEL"]
     assert settings.consult_max_tool_iterations == 4
     assert settings.consult_timeout_s == 12.5
@@ -121,6 +136,8 @@ def test_config_loads(monkeypatch) -> None:
     assert settings.anthropic_output_usd_per_mtok == 16.5
     assert settings.anthropic_haiku_input_usd_per_mtok == 1.25
     assert settings.anthropic_haiku_output_usd_per_mtok == 5.25
+    assert settings.deepseek_input_usd_per_mtok == 0.33
+    assert settings.deepseek_output_usd_per_mtok == 1.25
     assert settings.sentry_dsn == env["SENTRY_DSN"]
     assert settings.log_destination == env["LOG_DESTINATION"]
 

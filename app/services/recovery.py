@@ -2,14 +2,40 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
+from app.config import get_settings
 from app.models.user import fetch_user_by_id
-from app.services import system_state
+from app.services import inbound_queue, system_state
 from app.services.scope import scope_from_bot_turn_row, scope_from_message_row
 
 logger = logging.getLogger(__name__)
+
+
+async def _recovery_scopes(pool: Any) -> dict[str, set[UUID]]:
+    """Build a map of bot_id → set(topic_id) for all inbound messages in
+    recoverable states (raw/processing/failed).
+
+    Used by the sweeper to iterate recovery helpers per (bot_id, topic_id).
+    """
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT bot_id, topic_id
+        FROM messages
+        WHERE direction = 'inbound'
+          AND processing_state IN ('raw', 'processing', 'failed')
+          AND bot_id IS NOT NULL
+          AND topic_id IS NOT NULL
+        """
+    )
+    result: dict[str, set[UUID]] = {}
+    for row in rows:
+        bid = row["bot_id"]
+        tid = row["topic_id"]
+        result.setdefault(bid, set()).add(tid)
+    return result
 
 
 def _utc_now() -> datetime:
@@ -111,11 +137,29 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         """
     )
 
+    settings = get_settings()
+    retention_cutoff = (now or _utc_now()) - timedelta(days=settings.inbound_queue_retention_days)
+
+    # ── Expire inbound raw rows past retention ─────────────────────────
+    await pool.execute(
+        """
+        UPDATE messages
+        SET processing_state = 'expired',
+            handling_result  = 'expired',
+            handled_at       = now()
+        WHERE direction = 'inbound'
+          AND processing_state = 'raw'
+          AND sent_at < $1
+        """,
+        retention_cutoff,
+    )
+
     raw_messages = await pool.fetch(
         """
         SELECT m.id, m.sender_id AS user_id, m.bot_id, m.topic_id
         FROM messages m
-        WHERE m.processing_state='raw'
+        WHERE m.direction = 'inbound'
+          AND m.processing_state = 'raw'
           AND m.sent_at < now() - interval '30 seconds'
           AND NOT EXISTS (
               SELECT 1
@@ -135,6 +179,67 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
             logger.warning("skipping raw message recovery for message_id=%s: missing user_id=%s", row["id"], scope.user_id)
             continue
         await coalescer.add(user.id, row["id"], user, source="recovery", scope=scope)  # pause-check via send_outbound
+
+    # ── Recover stale inbound processing rows ──────────────────────────
+    stale_processing_recovered = 0
+    scope_map = await _recovery_scopes(pool)
+    for bot_id, topic_ids in scope_map.items():
+        for topic_id in topic_ids:
+            count = await inbound_queue.recover_stale_processing(
+                pool,
+                bot_id=bot_id,
+                topic_id=topic_id,
+                stale_seconds=300,
+                limit=50,
+            )
+            if count:
+                stale_processing_recovered += count
+                logger.info(
+                    "recovery: stale processing recovered=%d bot_id=%s topic_id=%s",
+                    count,
+                    bot_id,
+                    str(topic_id),
+                )
+    if stale_processing_recovered:
+        logger.info("recovery: total stale processing recovered=%d", stale_processing_recovered)
+
+    # ── Recover retryable inbound failed rows ──────────────────────────
+    max_retries = settings.inbound_queue_max_retry_attempts
+    failed_recovered = 0
+    failed_scope_map = await _recovery_scopes(pool)
+    for bot_id, topic_ids in failed_scope_map.items():
+        for topic_id in topic_ids:
+            count = await inbound_queue.recover_retryable_failed(
+                pool,
+                bot_id=bot_id,
+                topic_id=topic_id,
+                max_retries=max_retries,
+                limit=50,
+            )
+            if count:
+                failed_recovered += count
+                logger.info(
+                    "recovery: retryable failed recovered=%d bot_id=%s topic_id=%s",
+                    count,
+                    bot_id,
+                    str(topic_id),
+                )
+    if failed_recovered:
+        logger.info("recovery: total retryable failed recovered=%d", failed_recovered)
+
+    # ── Expire old failed/processing rows past retention ───────────────
+    await pool.execute(
+        """
+        UPDATE messages
+        SET processing_state = 'expired',
+            handling_result  = 'expired',
+            handled_at       = now()
+        WHERE direction = 'inbound'
+          AND processing_state IN ('failed', 'processing')
+          AND sent_at < $1
+        """,
+        retention_cutoff,
+    )
 
 
 async def run_recovery_forever(pool: Any, coalescer: Any, *, interval_seconds: float = 30.0) -> None:

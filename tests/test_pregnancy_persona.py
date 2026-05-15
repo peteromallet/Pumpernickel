@@ -160,6 +160,18 @@ class TestBuildTanteRosiSpec:
         assert "Tante Rosi" in result
         assert "Anna" in result
 
+    def test_step_instructions_are_specific_not_stubs(self):
+        """Tante Rosi should have real phase instructions, not placeholders."""
+        from app.bots.tante_rosi import build_tante_rosi_spec
+
+        spec = build_tante_rosi_spec()
+        rendered = "\n".join(spec.step_instructions.values()).lower()
+
+        assert "phase 1 stub" not in rendered
+        assert "durable pregnancy state" in rendered
+        assert "set_pregnancy_edd" in rendered
+        assert "read before durable writes" in rendered
+
 
 class TestTanteRosiPersonaContent:
     """Phase 2 content assertions — the persona must encode specific guardrails."""
@@ -182,6 +194,17 @@ class TestTanteRosiPersonaContent:
         # The instruction must include matching the user's language when they
         # clearly use another, not just German-only.
         assert "another language" in result.lower() or "match" in result.lower()
+
+    def test_prompt_defines_pregnancy_knowledge_primitives(self):
+        """Rosi should know what pregnancy context is worth preserving."""
+        result = self._render()
+        lower = result.lower()
+
+        assert "pregnancy knowledge primitives" in lower
+        assert "pregnancy state is the formal pregnancy timeline" in lower
+        assert "memories are stable concrete facts" in lower
+        assert "observations are patterns and support signals" in lower
+        assert "before adding or updating durable state" in lower
 
     def test_uses_du_not_sie(self):
         """German register is informal 'du'."""

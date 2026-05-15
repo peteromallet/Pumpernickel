@@ -47,6 +47,8 @@ WHITELIST_PATHS: set[str] = {
     "app/routers/admin.py",          # operator read-only views (allowlisted per-site)
     "routers/admin.py",              # alternate relative path form
     "services/topic_filter.py",      # alternate relative path form
+    "app/bots/prompts/hector.py",    # natural-language prompt text, not SQL
+    "bots/prompts/hector.py",        # alternate relative path form
 }
 WHITELIST_DIR_PREFIXES: tuple[str, ...] = (
     "tests/",

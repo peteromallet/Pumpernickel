@@ -1,6 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -78,7 +78,7 @@ class _FakePacer:
         return self.decisions.pop(0)
 
 
-def _seed_raw_message(fake_pool, user: User):
+def _seed_raw_message(fake_pool, user: User, *, bot_id: str = "mediator", topic_id: UUID | None = None):
     message_id = uuid4()
     fake_pool.messages[message_id] = {
         "id": message_id,
@@ -94,9 +94,18 @@ def _seed_raw_message(fake_pool, user: User):
         "media_url": None,
         "media_duration_seconds": None,
         "media_analysis": None,
+        "bot_id": bot_id,
+        "topic_id": topic_id,
         "edit_history": None,
         "edited_at": None,
         "deleted_at": None,
+        # 0041 inbound queue metadata
+        "handled_at": None,
+        "handled_by_turn_id": None,
+        "handling_result": None,
+        "processing_started_at": None,
+        "processing_error": None,
+        "processing_attempts": 0,
     }
     return message_id
 
@@ -249,7 +258,7 @@ async def test_paced_react_or_silence_marks_processed_without_agentic_turn(fake_
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
     scope = make_resolved_scope(user_id=user.id)
     fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
-    message_id = _seed_raw_message(fake_pool, user)
+    message_id = _seed_raw_message(fake_pool, user, bot_id=scope.bot_id, topic_id=scope.topic_id)
     decision = PacingDecision(action=action, reason=action, reaction="👍" if action == "react" else None)
     pacer = _FakePacer([decision], pool=fake_pool)
     coalescer = BurstCoalescer(

@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -17,6 +17,7 @@ from app.services.vision import explain_stored_image
 pytestmark = pytest.mark.anyio
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "whatsapp"
+_MEDIA_TEST_TOPIC_ID = UUID("00000000-0000-4000-8000-000000000010")
 
 
 class Recorder:
@@ -53,6 +54,8 @@ def _user_and_message(fake_pool):
         "edit_history": None,
         "edited_at": None,
         "deleted_at": None,
+        "bot_id": "mediator",
+        "topic_id": _MEDIA_TEST_TOPIC_ID,
     }
     return user, message_id
 
@@ -62,7 +65,7 @@ def _scope(user: User) -> InboundScope:
         bot_id="mediator",
         transport="whatsapp",
         user_id=user.id,
-        topic_id=uuid4(),
+        topic_id=_MEDIA_TEST_TOPIC_ID,
         channel_id=None,
         binding_id=uuid4(),
         dyad_id=uuid4(),
@@ -198,7 +201,7 @@ async def test_voice_double_failure_expires_with_audio_retained(fake_pool, monke
     message = fake_pool.messages[message_id]
 
     assert attempts == 2
-    assert message["processing_state"] == "expired"
+    assert message["processing_state"] == "failed"
     assert message["media_analysis"]["_pipeline"]["attempts"] == 2
     assert message["media_url"].endswith(f"voice/{message_id}")
     assert sent[0][2].name == "media_failure"
@@ -289,7 +292,7 @@ async def test_image_vision_failure_retains_media_and_keeps_raw(fake_pool, monke
     assert message["media_url"].endswith(f"image/{message_id}")
     assert message["media_analysis"]["error"] == "vision_failed"
     assert message["media_analysis"]["detail"] == "RuntimeError"
-    assert message["processing_state"] == "expired"
+    assert message["processing_state"] == "failed"
     assert sent[0][2].name == "media_failure"
 
 

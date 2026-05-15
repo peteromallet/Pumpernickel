@@ -51,6 +51,9 @@ from tool_schemas import (
     GetObservationsOutput,
     GetSelfModelInput,
     GetSelfModelOutput,
+    GetToolCallInput,
+    GetToolCallOutput,
+    ToolCallDetail,
     GetThemeInput,
     GetThemeOutput,
     ListBridgeCandidatesInput,
@@ -76,6 +79,17 @@ from tool_schemas import (
     SummarizeOOBTopicsOutput,
     ThemeDetail,
     ThreadDigest,
+    # hector
+    ListCommitmentsInput,
+    ListCommitmentsOutput,
+    CommitmentSummary,
+    ListEventsInput,
+    ListEventsOutput,
+    EventSummary,
+    GetAdherenceInput,
+    GetAdherenceOutput,
+    CommitmentAdherence,
+    AdherenceSlot,
 )
 
 logger = logging.getLogger(__name__)
@@ -1090,6 +1104,8 @@ async def get_bot_actions(
         f"""
         SELECT bt.id AS turn_id, bt.started_at, bt.user_in_context, bt.triggered_by_message_id,
                tm.content AS triggering_content,
+               tm.handling_result AS triggering_handling_result,
+               tm.processing_error AS triggering_processing_error,
                bt.final_output_message_id, om.content AS final_outbound_content,
                COALESCE(bt.reasoning, '') AS reasoning,
                COALESCE(
@@ -1146,9 +1162,52 @@ async def get_bot_actions(
                 audit_events=_with_audit_event_times(
                     list(row.get("audit_events") or []), ctx
                 ),
+                handling_result=row.get("triggering_handling_result"),
+                processing_error=row.get("triggering_processing_error"),
             )
             for row in rows
         ]
+    )
+
+
+async def get_tool_call(
+    ctx: TurnContext, args: GetToolCallInput
+) -> GetToolCallOutput:
+    """Fetch full arguments + result for a single past tool call by id.
+
+    Surfaces from the silent-turns hot-context block and from
+    get_bot_actions tool_calls listings. Use when the highlight summary
+    isn't specific enough.
+    """
+    logger.info(
+        "read tool get_tool_call turn_id=%s target_tool_call_id=%s",
+        ctx.turn_id,
+        args.tool_call_id,
+    )
+    row = await ctx.pool.fetchrow(
+        """
+        SELECT id, turn_id, tool_name, kind, summary,
+               arguments, result, called_at, duration_ms
+        FROM tool_calls
+        WHERE id = $1
+        """,
+        args.tool_call_id,
+    )
+    if row is None:
+        return GetToolCallOutput(tool_call=None)
+    return GetToolCallOutput(
+        tool_call=ToolCallDetail(
+            id=row["id"],
+            turn_id=row["turn_id"],
+            tool_name=row["tool_name"],
+            kind=row["kind"],
+            summary=row["summary"],
+            arguments=dict(row["arguments"] or {}),
+            result=dict(row["result"] or {}),
+            called_at=row["called_at"],
+            called_at_time=_time(row["called_at"], ctx),
+            duration_ms=row["duration_ms"],
+        )
     )
 
 
@@ -1220,3 +1279,291 @@ async def list_scheduled_checkins(
             )
         )
     return ListScheduledCheckinsOutput(checkins=checkins)
+
+
+# ── Hector fitness read tools ──────────────────────────────────────────────
+
+
+async def list_commitments(
+    ctx: TurnContext, args: "ListCommitmentsInput"
+) -> "ListCommitmentsOutput":
+    """List active or filtered commitments for the current user/topic/bot."""
+    _check_hector_read_scope(ctx)
+
+    conditions = [
+        "user_id = $1",
+        "topic_id = $2",
+        "bot_id = $3",
+    ]
+    params: list[Any] = [ctx.user.id, ctx.primary_topic_id, ctx.bot_id]
+    param_idx = 4
+
+    if args.status is not None:
+        conditions.append(f"status = ${param_idx}")
+        params.append(args.status)
+        param_idx += 1
+
+    rows = await ctx.pool.fetch(
+        f"""
+        SELECT id, label, kind, status, cadence, days_of_week, target_count,
+               start_date, end_date, pressure_style, created_at, updated_at
+        FROM mediator.commitments
+        WHERE {' AND '.join(conditions)}
+        ORDER BY created_at DESC
+        LIMIT 50
+        """,
+        *params,
+    )
+
+    commitments = [
+        CommitmentSummary(
+            id=str(row["id"]),
+            label=row["label"],
+            kind=row["kind"],
+            status=row["status"],
+            cadence=row["cadence"],
+            days_of_week=list(row["days_of_week"]) if row["days_of_week"] else [],
+            target_count=row["target_count"],
+            start_date=row["start_date"].isoformat() if row["start_date"] else "",
+            end_date=row["end_date"].isoformat() if row["end_date"] else None,
+            pressure_style=row["pressure_style"],
+            created_at=row["created_at"].isoformat() if row["created_at"] else "",
+            updated_at=row["updated_at"].isoformat() if row["updated_at"] else "",
+        )
+        for row in rows
+    ]
+
+    return ListCommitmentsOutput(commitments=commitments)
+
+
+async def list_events(
+    ctx: TurnContext, args: "ListEventsInput"
+) -> "ListEventsOutput":
+    """List recent events for the current user/topic/bot, optionally filtered."""
+    _check_hector_read_scope(ctx)
+
+    conditions = [
+        "user_id = $1",
+        "topic_id = $2",
+        "bot_id = $3",
+    ]
+    params: list[Any] = [ctx.user.id, ctx.primary_topic_id, ctx.bot_id]
+    param_idx = 4
+
+    if args.commitment_id is not None:
+        from app.services.tools.common import parse_optional_uuid_field  # noqa: PLC0415
+
+        _validated_cid = parse_optional_uuid_field(
+            args.commitment_id,
+            field_name="commitment_id",
+            tool_name="list_events",
+        )
+        conditions.append(f"commitment_id = ${param_idx}::uuid")
+        params.append(str(_validated_cid))
+        param_idx += 1
+
+    if args.before is not None:
+        conditions.append(f"observed_at < ${param_idx}::timestamptz")
+        params.append(args.before)
+        param_idx += 1
+
+    limit = args.limit or 20
+    params.append(limit)
+
+    rows = await ctx.pool.fetch(
+        f"""
+        SELECT id, commitment_id, metric_key, adherence_status,
+               value_numeric, value_text, unit, observed_at, note, created_at
+        FROM mediator.events
+        WHERE {' AND '.join(conditions)}
+        ORDER BY observed_at DESC
+        LIMIT ${param_idx}
+        """,
+        *params,
+    )
+
+    events = [
+        EventSummary(
+            id=str(row["id"]),
+            commitment_id=str(row["commitment_id"]) if row["commitment_id"] else None,
+            metric_key=row["metric_key"],
+            adherence_status=row["adherence_status"],
+            value_numeric=float(row["value_numeric"]) if row["value_numeric"] is not None else None,
+            value_text=row["value_text"],
+            unit=row["unit"],
+            observed_at=row["observed_at"].isoformat() if row["observed_at"] else "",
+            note=row["note"],
+            created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        )
+        for row in rows
+    ]
+
+    return ListEventsOutput(events=events)
+
+
+async def get_adherence(
+    ctx: TurnContext, args: "GetAdherenceInput"
+) -> "GetAdherenceOutput":
+    """Compute adherence checklist for active commitments."""
+    from datetime import date as _date, datetime as _datetime
+
+    _check_hector_read_scope(ctx)
+
+    # Resolve timezone from user
+    user_tz = ctx.user.timezone or "UTC"
+    today = _date.today()
+
+    # Query active commitments for this user/topic/bot
+    conds = [
+        "user_id = $1",
+        "topic_id = $2",
+        "bot_id = $3",
+        "status = 'active'",
+    ]
+    params: list[Any] = [ctx.user.id, ctx.primary_topic_id, ctx.bot_id]
+    param_idx = 4
+
+    if args.commitment_ids:
+        from app.services.tools.common import parse_optional_uuid_field  # noqa: PLC0415
+
+        _validated_cids: list[str] = []
+        for _cid in args.commitment_ids:
+            _v = parse_optional_uuid_field(
+                _cid,
+                field_name="commitment_ids",
+                tool_name="get_adherence",
+            )
+            _validated_cids.append(str(_v))
+        conds.append(f"id = ANY(${param_idx}::uuid[])")
+        params.append(_validated_cids)
+        param_idx += 1
+
+    crows = await ctx.pool.fetch(
+        f"""
+        SELECT id, label, cadence, days_of_week, target_count,
+               start_date, end_date, schedule_rule
+        FROM mediator.commitments
+        WHERE {' AND '.join(conds)}
+        ORDER BY created_at
+        """,
+        *params,
+    )
+
+    if not crows:
+        return GetAdherenceOutput()
+
+    # Build list of commitment IDs for event query
+    cids = [row["id"] for row in crows]
+
+    # Query events for the last 14 days
+    from datetime import timedelta as _td
+    cutoff = _datetime.now(UTC) - _td(days=14)
+
+    erows = await ctx.pool.fetch(
+        """
+        SELECT id, commitment_id, adherence_status, value_numeric, value_text,
+               observed_at
+        FROM mediator.events
+        WHERE user_id = $1
+          AND topic_id = $2
+          AND bot_id = $3
+          AND observed_at >= $4
+          AND commitment_id = ANY($5::uuid[])
+        ORDER BY observed_at DESC
+        """,
+        ctx.user.id,
+        ctx.primary_topic_id,
+        ctx.bot_id,
+        cutoff,
+        cids,
+    )
+
+    # Group events by commitment_id
+    events_by_cid: dict[str, list[dict[str, Any]]] = {}
+    for row in erows:
+        cid_key = str(row["commitment_id"]) if row["commitment_id"] else "_none"
+        events_by_cid.setdefault(cid_key, []).append(dict(row))
+
+    # Compute adherence per commitment
+    from app.services.adherence import compute_adherence, summarize_board
+    from zoneinfo import ZoneInfo
+
+    try:
+        tz = ZoneInfo(user_tz)
+    except Exception:
+        from datetime import timezone as _tz
+        tz = _tz.utc  # type: ignore[assignment]
+
+    commitments: list[CommitmentAdherence] = []
+    week_start: str | None = None
+    week_end: str | None = None
+
+    for crow in crows:
+        cdict = dict(crow)
+        cid_str = str(cdict["id"])
+        evts = events_by_cid.get(cid_str, [])
+
+        board = compute_adherence(cdict, evts, today, tz)
+
+        if week_start is None and board.slots:
+            week_start = board.slots[0].date.isoformat()
+            week_end = board.slots[-1].date.isoformat()
+
+        slots = [
+            AdherenceSlot(
+                date=s.date.isoformat(),
+                day_label=s.day_label,
+                status=s.status,
+            )
+            for s in board.slots
+        ]
+
+        summary = summarize_board(board)
+
+        commitments.append(
+            CommitmentAdherence(
+                commitment_id=cid_str,
+                label=board.label,
+                cadence=board.cadence,
+                slots=slots,
+                summary=summary,
+            )
+        )
+
+    return GetAdherenceOutput(
+        commitments=commitments,
+        week_start=week_start,
+        week_end=week_end,
+    )
+
+
+def _check_hector_read_scope(ctx: TurnContext) -> None:
+    """Enforce that only Hector bot can call fitness commitment/event read tools.
+
+    Rejects if any scope value (bot_id, primary_topic_id, user.id) is None,
+    or if the bot is not Hector.
+    """
+    from app.bots.ids import HECTOR_BOT_ID
+
+    if ctx.bot_id is None:
+        raise ValueError(
+            "commitment/event read tools require ctx.bot_id (got None)"
+        )
+    if ctx.primary_topic_id is None:
+        raise ValueError(
+            "commitment/event read tools require ctx.primary_topic_id (got None)"
+        )
+    if ctx.user.id is None:
+        raise ValueError(
+            "commitment/event read tools require ctx.user.id (got None)"
+        )
+    if ctx.bot_id != HECTOR_BOT_ID:
+        raise ValueError(
+            f"Only bot_id='{HECTOR_BOT_ID}' can use commitment/event read tools, "
+            f"got bot_id={ctx.bot_id!r}"
+        )
+    if ctx.primary_topic_slug != "fitness":
+        raise ValueError(
+            f"Commitment/event read tools require fitness topic, "
+            f"got primary_topic_slug={ctx.primary_topic_slug!r}"
+        )

@@ -12,7 +12,7 @@ import httpx
 
 from app.config import get_settings
 from app.models.user import User
-from app.services import storage, system_state, whatsapp
+from app.services import inbound_queue, storage, system_state, whatsapp
 from app.services.crypto import encrypt_value
 from app.services.messaging import send_outbound
 from app.services.scope import InboundScope
@@ -63,13 +63,19 @@ async def handle_voice(
         await pool.execute(
             """
             UPDATE messages
-            SET content=$1, content_encrypted=$2, media_analysis=$3, processing_state='expired'
+            SET content=$1, content_encrypted=$2, media_analysis=$3
             WHERE id=$4
             """,
             "I can't transcribe right now -- can you send it as text?",
             encrypt_value("I can't transcribe right now -- can you send it as text?"),
             {"unavailable": "daily_cap"},
             message_id,
+        )
+        await inbound_queue.expire_messages(
+            pool,
+            [message_id],
+            bot_id=scope.bot_id,
+            topic_id=scope.topic_id,
         )
         if not paused:
             await send_outbound(
@@ -103,13 +109,19 @@ async def handle_voice(
     await pool.execute(
         """
         UPDATE messages
-        SET processing_state='expired',
-            media_analysis = COALESCE(media_analysis, '{}'::jsonb)
-                || jsonb_build_object('_pipeline', jsonb_build_object('attempts', 2, 'last_error', $1))
+        SET media_analysis = COALESCE(media_analysis, '{}'::jsonb)
+            || jsonb_build_object('_pipeline', jsonb_build_object('attempts', 2, 'last_error', $1))
         WHERE id=$2
         """,
         str(last_error),
         message_id,
+    )
+    await inbound_queue.fail_messages(
+        pool,
+        [message_id],
+        processing_error=f"transcription_failed: {last_error}",
+        bot_id=scope.bot_id,
+        topic_id=scope.topic_id,
     )
     if not paused:
         await send_outbound(

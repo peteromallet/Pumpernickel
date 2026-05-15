@@ -9,6 +9,7 @@ from uuid import UUID
 from resident_chat_runtime.coalescing import AsyncBurstCoalescer, BurstBatch
 
 from app.models.user import User
+from app.services import inbound_queue
 from app.services.pacer import PacingDecision
 from app.services.scope import InboundScope
 
@@ -136,10 +137,10 @@ class BurstCoalescer:
         if decision.action == "react":
             if self.on_paced_reaction is not None:
                 await self.on_paced_reaction(message_ids, burst.user, decision, scope=burst.scope)
-            await self._mark_processed(message_ids)
+            await self._mark_processed(message_ids, handling_result="replied", scope=burst.scope)
             return
         if decision.action == "silence":
-            await self._mark_processed(message_ids)
+            await self._mark_processed(message_ids, handling_result="silent", scope=burst.scope)
             return
         await self._call_paced_answer(message_ids, burst.user, decision, scope=burst.scope)
 
@@ -173,13 +174,17 @@ class BurstCoalescer:
             return
         await self.on_burst_complete(message_ids, user, scope=scope)
 
-    async def _mark_processed(self, message_ids: list[UUID]) -> None:
+    async def _mark_processed(self, message_ids: list[UUID], *, handling_result: str, scope: InboundScope) -> None:
         pool = getattr(self.pacer, "pool", None)
         if pool is None or not message_ids:
             return
-        await pool.execute(
-            "UPDATE messages SET processing_state='processed' WHERE id = ANY($1::uuid[]) AND processing_state='raw'",
+        await inbound_queue.complete_messages(
+            pool,
             message_ids,
+            handling_result=handling_result,
+            handled_by_turn_id=None,  # pacer never opens a bot_turns row
+            bot_id=scope.bot_id,
+            topic_id=scope.topic_id,
         )
 
     def _merge_source(self, existing: str, incoming: str) -> str:

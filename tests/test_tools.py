@@ -2626,3 +2626,79 @@ async def test_get_bot_actions_filters_distillation_target(tool_ctx):
     )
 
     assert result["actions"][0]["tool_calls"][0]["tool_name"] == "revise_distillation"
+
+
+# ---------------------------------------------------------------------------
+# Tool validation error → model-visible dict (regression for incident)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_call_tool_validation_error_is_typed(fake_pool):
+    """call_tool must return a model-visible dict (is_error=True), not raise an uncaught exception."""
+    from uuid import uuid4
+
+    from app.services.turn_context import TurnContext
+    from app.services.tools.registry import call_tool
+    from app.models.user import User
+    from app.bots.registry import get_relationship_topic_id
+
+    user = User(uuid4(), "ValidationTest", "15555550199", "UTC")
+    fake_pool.users[user.id] = {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "timezone": user.timezone,
+        "onboarding_state": "welcomed",
+        "pacing_preferences": {},
+        "pregnancy_edd": None,
+        "pregnancy_dating_basis": None,
+        "pregnancy_lmp_date": None,
+        "pregnancy_scan_date": None,
+        "pregnancy_scan_corrected_at": None,
+        "pregnancy_started_at": None,
+        "pregnancy_ended_at": None,
+        "pregnancy_outcome": None,
+    }
+    turn_id = uuid4()
+    fake_pool.bot_turns[turn_id] = {
+        "id": turn_id,
+        "reasoning": "",
+        "completed_at": None,
+        "failure_reason": None,
+    }
+    # Use Hector bot + fitness topic so the Hector-specific tools are allowed
+    fitness_topic_id = uuid4()
+    ctx = TurnContext(
+        turn_id=turn_id,
+        pool=fake_pool,
+        user=user,
+        partner=None,
+        triggering_message_ids=[uuid4()],
+        bot_id="hector",
+        primary_topic_id=fitness_topic_id,
+        primary_topic_slug="fitness",
+        current_step="record",
+    )
+
+    result = await call_tool(
+        "log_event",
+        {
+            "commitment_id": "pending",
+            "metric_key": "test",
+            "adherence_status": "done",
+        },
+        ctx,
+    )
+
+    assert isinstance(result, dict), "call_tool must return a dict for the model"
+    assert result["is_error"] is True, "placeholder ID must be a model-visible error"
+    assert result["error_code"] == "invalid_uuid"
+    assert result["field"] == "commitment_id"
+    assert result["retryable"] is True
+    assert "list_commitments" in result["correction_hint"].lower()
+    assert "create_commitment" in result["correction_hint"].lower()
+
+    # The call must NOT crash — we got here, so the dict path worked.
+    # Also verify no SQL was executed against the events table.
+    assert len(fake_pool.events) == 0

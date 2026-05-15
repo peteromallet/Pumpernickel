@@ -274,6 +274,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from app.bots.registry import populate_tante_rosi_spec_from_db
 
         await populate_tante_rosi_spec_from_db(pool)
+        # Hector: check for Hector bots row (prod-registration gate)
+        from app.bots.registry import populate_hector_spec_from_db
+
+        await populate_hector_spec_from_db(pool)
         # Sprint 2a: cache relationship topic id for scope fallbacks
         from app.bots.registry import populate_topic_ids_from_db
 
@@ -370,10 +374,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     pacer=pacer,
                 )
                 app.state.discord_gateways[bot_id] = gateway
-
-                await discord.catch_up_recent_messages(
-                    pool, bot_coalescer, client=client, bot_id=bot_id
-                )
 
                 if bot_id == "mediator":
                     await discord.seed_partner_users(pool)

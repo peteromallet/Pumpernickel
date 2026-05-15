@@ -51,6 +51,7 @@ class HotContext:
     distillations: list[dict[str, Any]] = field(default_factory=list)
     bridge_candidates: list[dict[str, Any]] = field(default_factory=list)
     recent_reactions: list[dict[str, Any]] = field(default_factory=list)
+    silent_turns: list[dict[str, Any]] = field(default_factory=list)
     topic_status: dict[str, Any] | None = None
     cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
     cross_topic_status: list[dict[str, Any]] = field(default_factory=list)
@@ -166,6 +167,27 @@ def _media_label(item: dict[str, Any]) -> str:
     if media_type == "image":
         return " [image analysis]"
     return f" [{media_type}{duration_text}]"
+
+
+def _queue_outcome_label(item: dict[str, Any]) -> str:
+    """Return a short label explaining queue outcome for non-replied inbound messages."""
+    qo = item.get("queue_outcome")
+    if not qo:
+        return ""
+    result = qo.get("handling_result", "")
+    if result == "silent":
+        return " [bot intentionally silent]"
+    if result == "withheld_newer_inbound":
+        return " [stale response withheld, newer message arrived]"
+    if result == "failed":
+        err = qo.get("processing_error") or ""
+        err_short = err[:80] + "..." if len(err) > 80 else err
+        return f" [processing failed: {err_short}]" if err_short else " [processing failed]"
+    if result == "expired":
+        return " [expired, not processed]"
+    if result == "no_action":
+        return " [bot chose no action]"
+    return f" [outcome: {result}]"
 
 
 def _message_content(item: dict[str, Any], clip_limit: int) -> str:
@@ -672,7 +694,8 @@ async def build_hot_context(
     message_rows = await pool.fetch(
         """
         SELECT id, direction, sender_id, recipient_id, content, media_type, media_duration_seconds,
-               media_analysis, sent_at, COALESCE(charge, 'routine') AS charge, bot_id, topic_id
+               media_analysis, sent_at, COALESCE(charge, 'routine') AS charge, bot_id, topic_id,
+               processing_state, handling_result, handled_at, processing_error
         FROM messages
         WHERE deleted_at IS NULL
           AND (sender_id = ANY($1::uuid[]) OR recipient_id = ANY($1::uuid[]))
@@ -816,6 +839,20 @@ async def build_hot_context(
             "sent_at": _iso(row["sent_at"]),
             "sent_at_time": _time_context(row["sent_at"], user_timezone, now_utc),
             "charge": row["charge"],
+            **(
+                {
+                    "queue_outcome": {
+                        "handling_result": row["handling_result"],
+                        "handled_at": _iso(row["handled_at"]),
+                        "processing_error": row.get("processing_error"),
+                    }
+                }
+                if row.get("direction") == "inbound"
+                and row.get("handling_result") is not None
+                and row["handling_result"]
+                not in (None, "replied")
+                else {}
+            ),
         }
         for row in reversed(message_rows)
         if _message_thread_owner_id(row) in partner_share_by_user
@@ -913,6 +950,77 @@ async def build_hot_context(
             )
         )
     ]
+    # Silent agent turns since the user's last message in this dyad/bot —
+    # turns that did work (e.g. fired a scheduled task) but produced no
+    # outbound message. The message timeline can't show these.
+    silent_turns_rows = await pool.fetch(
+        """\
+        WITH last_inbound AS (
+            SELECT MAX(sent_at) AS sent_at
+            FROM messages
+            WHERE direction = 'inbound'
+              AND sender_id = $1
+              AND bot_id = $3
+              AND topic_id = $4
+        ),
+        floor_ts AS (
+            SELECT COALESCE(
+                (SELECT sent_at FROM last_inbound),
+                $2::timestamptz - INTERVAL '24 hours'
+            ) AS ts
+        )
+        SELECT bt.id AS turn_id,
+               bt.started_at,
+               bt.completed_at,
+               bt.bot_id,
+               bt.reasoning,
+               COALESCE(
+                 jsonb_agg(
+                   jsonb_build_object(
+                     'id', tc.id,
+                     'tool_name', tc.tool_name,
+                     'kind', tc.kind,
+                     'summary', tc.summary,
+                     'called_at', tc.called_at
+                   )
+                   ORDER BY tc.called_at
+                 ) FILTER (WHERE tc.id IS NOT NULL),
+                 '[]'::jsonb
+               ) AS tool_calls
+        FROM bot_turns bt
+        LEFT JOIN tool_calls tc ON tc.turn_id = bt.id
+        WHERE bt.user_in_context = $1
+          AND bt.completed_at IS NOT NULL
+          AND bt.completed_at > (SELECT ts FROM floor_ts)
+          AND bt.completed_at <= $2
+          AND bt.final_output_message_id IS NULL
+          AND bt.failure_reason IS NULL
+          AND bt.bot_id = $3
+          AND bt.topic_id = $4
+        GROUP BY bt.id
+        ORDER BY bt.completed_at DESC
+        LIMIT 5
+        """,
+        user.id,
+        now_utc,
+        bot_id,
+        primary_topic,
+    )
+    silent_turns = [
+        {
+            "turn_id": str(row["turn_id"]),
+            "started_at": _iso(row["started_at"]),
+            "started_at_time": _time_context(
+                row["started_at"], user_timezone, now_utc
+            ),
+            "completed_at": _iso(row["completed_at"]),
+            "bot_id": row["bot_id"],
+            "reasoning": row["reasoning"],
+            "tool_calls": list(row["tool_calls"] or []),
+        }
+        for row in silent_turns_rows
+    ]
+
     cross_topic_peek: list[dict[str, Any]] = []
     if allow_cross_topic_peek:
         peek_since = now_utc - timedelta(days=14)
@@ -951,6 +1059,7 @@ async def build_hot_context(
         distillations=distillations,
         bridge_candidates=bridge_candidates,
         recent_reactions=recent_reactions,
+        silent_turns=silent_turns,
         recent_messages=recent_messages,
         topic_status=topic_status,
         cross_topic_peek=cross_topic_peek,
@@ -1266,11 +1375,38 @@ def _render_with_counts(
         lines.append("- none")
     lines += ["", "## Recent messages"]
     lines.extend(
-        f"- {_time_label(item, 'sent_at') or item['sent_at']} {item['direction']} charge={item['charge']} sender={item['sender_id']} recipient={item['recipient_id']}{_message_content(item, clip_limit)}"
+        f"- {_time_label(item, 'sent_at') or item['sent_at']} {item['direction']} charge={item['charge']} sender={item['sender_id']} recipient={item['recipient_id']}{_message_content(item, clip_limit)}{_queue_outcome_label(item)}"
         for item in hc.recent_messages
     )
     if truncations.get("recent_messages"):
         lines.append(f"- [truncated, {truncations['recent_messages']} more]")
+    # Silent agent turns since the user's last message — work the agent
+    # already did that produced no outbound message. The message timeline
+    # cannot show these; this section is the only record.
+    lines += ["", "## Your silent turns since the user's last message"]
+    if hc.silent_turns:
+        for turn in hc.silent_turns:
+            started_label = _time_label(turn, "started_at") or turn.get("started_at")
+            reasoning_text = (turn.get("reasoning") or "").strip()
+            first_line = reasoning_text.splitlines()[0] if reasoning_text else ""
+            reasoning = _clip(first_line, clip_limit)
+            lines.append(
+                f"- {started_label} turn_id={turn['turn_id']}"
+                f"{' bot=' + turn['bot_id'] if turn.get('bot_id') else ''}"
+                f" — {reasoning or '[no reasoning recorded]'}"
+            )
+            for tc in turn.get("tool_calls") or []:
+                summary = tc.get("summary") or f"{tc.get('tool_name')} (no summary)"
+                lines.append(
+                    f"    · tool_call_id={tc.get('id')} {_clip(summary, clip_limit)}"
+                )
+        lines.append(
+            "- Use these to answer 'did you do X this morning?' truthfully."
+            " Drill into a specific tool call with get_tool_call(tool_call_id)"
+            " when the summary isn't enough."
+        )
+    else:
+        lines.append("- none")
     lines += ["", "## New reactions since previous turn"]
     if hc.recent_reactions:
         lines.extend(
@@ -1345,6 +1481,7 @@ def render_hot_context(hc: HotContext) -> str:
         distillations=list(hc.distillations),
         bridge_candidates=list(hc.bridge_candidates),
         recent_reactions=list(hc.recent_reactions),
+        silent_turns=list(hc.silent_turns),
         recent_messages=list(hc.recent_messages),
         partner_shareable_summaries=list(hc.partner_shareable_summaries),
         topic_status=hc.topic_status,

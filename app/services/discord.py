@@ -557,6 +557,8 @@ class DiscordGatewayBot:
                         )
                     else:
                         logger.info("[gateway:%s] event #%d op=%s t=%s", self.bot_id, events_seen, op, t)
+                if t == "READY":
+                    await self._catch_up_after_ready()
                 if op == 0:
                     try:
                         await self._gateway_loop.dispatch_payload(event)
@@ -581,6 +583,26 @@ class DiscordGatewayBot:
             logger.warning(
                 "[gateway:%s] heartbeat stopped after %d ticks: WS closed code=%s reason=%r",
                 self.bot_id, ticks, getattr(e, "code", "?"), getattr(e, "reason", "?"),
+            )
+
+    async def _catch_up_after_ready(self) -> None:
+        """Run bot-scoped bounded catch-up after gateway READY (initial connect or reconnect).
+
+        Failures are logged but never raised — the gateway loop must stay alive.
+        The catch-up is idempotent so it is safe to run on every READY, not just
+        the first one.
+        """
+        try:
+            await catch_up_recent_messages(
+                self.pool,
+                self.coalescer,
+                client=self.client,
+                bot_id=self.bot_id,
+            )
+        except Exception:
+            logger.exception(
+                "[gateway:%s] catch_up_recent_messages failed after READY",
+                self.bot_id,
             )
 
     async def _handle_gateway_event(self, payload: dict[str, Any]) -> None:
@@ -628,6 +650,8 @@ class DiscordGatewayBot:
             return
         if "content" not in message:
             return
+        # DEBT-090: UPDATE targets only whatsapp_message_id without bot_id.
+        # Accepted sprint debt per SD-006 (no broad queue semantics redesign).
         await self.pool.execute(
             """
             UPDATE messages
@@ -644,6 +668,8 @@ class DiscordGatewayBot:
         )
 
     async def _handle_message_delete(self, message: dict[str, Any]) -> None:
+        # DEBT-090: DELETE targets only whatsapp_message_id without bot_id.
+        # Accepted sprint debt per SD-006 (no broad queue semantics redesign).
         await self.pool.execute(
             "UPDATE messages SET deleted_at = now() WHERE whatsapp_message_id = $1",
             str(message["id"]),
@@ -696,7 +722,7 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, client: 
     Accepts a per-bot DiscordClient so catch-up uses the correct token, plus an
     explicit bot_id so the inbound writes are correctly attributed.
     """
-    from app.services.inbound import process_inbound
+    from app.services.inbound import InboundProcessResult, process_inbound
 
     settings = get_settings()
     partner_ids = [
@@ -704,47 +730,100 @@ async def catch_up_recent_messages(pool: Any, coalescer: Any | None, *, client: 
         for value in (settings.discord_partner_user_id_a, settings.discord_partner_user_id_b)
         if value
     ]
-    processed = 0
+    total_processed = 0
     for partner_id in partner_ids:
         user_id = _discord_user_id(partner_id)
         channel_id = await client.get_dm_channel_id(user_id)
-        last_seen_id = await pool.fetchval(
-            """
-            SELECT m.whatsapp_message_id
-            FROM messages m
-            JOIN user_identities ui ON ui.user_id = m.sender_id
-            WHERE m.direction='inbound'
-              AND ui.transport='legacy'
-              AND ui.address=$1
-              AND m.whatsapp_message_id IS NOT NULL
-            ORDER BY m.sent_at DESC
-            LIMIT 1
-            """,
-            user_id,
-        )
-        response = await client._rest.fetch_channel_messages(
-            channel_id,
-            limit=limit,
-            after=_discord_base_message_id(last_seen_id),
-        )
-        response.raise_for_status()
-        for message in reversed(response.json()):
-            if str(message.get("author", {}).get("id", "")) != user_id:
-                continue
-            if message.get("author", {}).get("bot"):
-                continue
-            if not message.get("content") and not _has_supported_attachment(message):
-                continue
-            await process_inbound(
+        try:
+            channel_result = await _catch_up_channel(
                 pool,
-                message_to_meta_payload(message),
                 coalescer,
-                transport="discord",
+                client=client,
                 bot_id=bot_id,
-                coalescer_source="catch_up",
+                channel_id=channel_id,
+                user_id=user_id,
+                limit=limit,
             )
-            processed += 1
-    if processed:
-        # obs N/A: no scope in catch-up
-        logger.info("discord catch-up ingested %s recent message(s)", processed)
-    return processed
+        except Exception:
+            logger.exception(
+                "discord catch-up bot=%s channel=%s failed",
+                bot_id,
+                channel_id,
+            )
+            continue
+        total_processed += channel_result.inserted
+    if total_processed:
+        logger.info(
+            "discord catch-up bot=%s ingested %d message(s) across %d channel(s)",
+            bot_id,
+            total_processed,
+            len(partner_ids),
+        )
+    return total_processed
+
+
+async def _catch_up_channel(
+    pool: Any,
+    coalescer: Any | None,
+    *,
+    client: Any,
+    bot_id: str,
+    channel_id: str,
+    user_id: str,
+    limit: int,
+) -> "InboundProcessResult":
+    """Run bounded replay for one DM channel and return per-channel metrics."""
+    from app.services.inbound import InboundProcessResult, process_inbound
+
+    logger.info(
+        "discord catch-up start bot=%s channel=%s limit=%d",
+        bot_id,
+        channel_id,
+        limit,
+    )
+    response = await client._rest.fetch_channel_messages(
+        channel_id,
+        limit=limit,
+    )
+    response.raise_for_status()
+    messages = list(response.json())
+    fetched = len(messages)
+    channel_result = InboundProcessResult()
+    unsupported = 0
+    bot_authored = 0
+    not_partner = 0
+    # Process oldest-to-newest (Discord REST returns newest-first).
+    for message in reversed(messages):
+        if str(message.get("author", {}).get("id", "")) != user_id:
+            not_partner += 1
+            continue
+        if message.get("author", {}).get("bot"):
+            bot_authored += 1
+            continue
+        if not message.get("content") and not _has_supported_attachment(message):
+            unsupported += 1
+            continue
+        msg_result = await process_inbound(
+            pool,
+            message_to_meta_payload(message),
+            coalescer,
+            transport="discord",
+            bot_id=bot_id,
+            coalescer_source="catch_up",
+        )
+        channel_result.inserted += msg_result.inserted
+        channel_result.skipped_existing += msg_result.skipped_existing
+        channel_result.coalescer_enqueued += msg_result.coalescer_enqueued
+    logger.info(
+        "discord catch-up end bot=%s channel=%s fetched=%d inserted=%d skipped=%d enqueued=%d unsupported=%d bot_authored=%d not_partner=%d",
+        bot_id,
+        channel_id,
+        fetched,
+        channel_result.inserted,
+        channel_result.skipped_existing,
+        channel_result.coalescer_enqueued,
+        unsupported,
+        bot_authored,
+        not_partner,
+    )
+    return channel_result

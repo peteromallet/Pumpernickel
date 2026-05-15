@@ -50,10 +50,12 @@ class HotContextSolo:
     distillations: list[dict[str, Any]] = field(default_factory=list)
     bridge_candidates: list[dict[str, Any]] = field(default_factory=list)
     recent_reactions: list[dict[str, Any]] = field(default_factory=list)
+    silent_turns: list[dict[str, Any]] = field(default_factory=list)
     topic_status: dict[str, Any] | None = None
     cross_topic_peek: list[dict[str, Any]] = field(default_factory=list)
     pregnancy_state: str | None = None
     partner_pregnancy_state: str | None = None
+    fitness_block: str | None = None
     bot_id: str = "coach"
 
 
@@ -171,6 +173,27 @@ def _media_label(item: dict[str, Any]) -> str:
     if media_type == "image":
         return " [image analysis]"
     return f" [{media_type}{duration_text}]"
+
+
+def _queue_outcome_label(item: dict[str, Any]) -> str:
+    """Return a short label explaining queue outcome for non-replied inbound messages."""
+    qo = item.get("queue_outcome")
+    if not qo:
+        return ""
+    result = qo.get("handling_result", "")
+    if result == "silent":
+        return " [bot intentionally silent]"
+    if result == "withheld_newer_inbound":
+        return " [stale response withheld, newer message arrived]"
+    if result == "failed":
+        err = qo.get("processing_error") or ""
+        err_short = err[:80] + "..." if len(err) > 80 else err
+        return f" [processing failed: {err_short}]" if err_short else " [processing failed]"
+    if result == "expired":
+        return " [expired, not processed]"
+    if result == "no_action":
+        return " [bot chose no action]"
+    return f" [outcome: {result}]"
 
 
 def _message_content(item: dict[str, Any], clip_limit: int) -> str:
@@ -327,16 +350,16 @@ async def build_hot_context_solo(
                 "timezone": partner_row.get("timezone")
                 if isinstance(partner_row, dict)
                 else partner_row["timezone"],
-                "pregnancy_edd": partner_row["pregnancy_edd"],
-                "pregnancy_dating_basis": partner_row["pregnancy_dating_basis"],
-                "pregnancy_lmp_date": partner_row["pregnancy_lmp_date"],
-                "pregnancy_scan_date": partner_row["pregnancy_scan_date"],
-                "pregnancy_scan_corrected_at": partner_row[
+                "pregnancy_edd": partner_row.get("pregnancy_edd"),
+                "pregnancy_dating_basis": partner_row.get("pregnancy_dating_basis"),
+                "pregnancy_lmp_date": partner_row.get("pregnancy_lmp_date"),
+                "pregnancy_scan_date": partner_row.get("pregnancy_scan_date"),
+                "pregnancy_scan_corrected_at": partner_row.get(
                     "pregnancy_scan_corrected_at"
-                ],
-                "pregnancy_started_at": partner_row["pregnancy_started_at"],
-                "pregnancy_ended_at": partner_row["pregnancy_ended_at"],
-                "pregnancy_outcome": partner_row["pregnancy_outcome"],
+                ),
+                "pregnancy_started_at": partner_row.get("pregnancy_started_at"),
+                "pregnancy_ended_at": partner_row.get("pregnancy_ended_at"),
+                "pregnancy_outcome": partner_row.get("pregnancy_outcome"),
                 # Recipient-side per-bot sharing state, normalized to one of
                 # {opt_in, opt_out, pending}. Used by the partner-nudge tool
                 # to decide whether scheduling is allowed.
@@ -552,7 +575,8 @@ async def build_hot_context_solo(
     message_rows = await pool.fetch(
         """\
         SELECT id, direction, sender_id, recipient_id, content, media_type, media_duration_seconds,
-               media_analysis, sent_at, COALESCE(charge, 'routine') AS charge
+               media_analysis, sent_at, COALESCE(charge, 'routine') AS charge,
+               processing_state, handling_result, handled_at, processing_error
         FROM messages
         WHERE deleted_at IS NULL
           AND (sender_id = $1 OR recipient_id = $1)
@@ -638,6 +662,20 @@ async def build_hot_context_solo(
             "sent_at": _iso(row["sent_at"]),
             "sent_at_time": _time_context(row["sent_at"], user_timezone, now_utc),
             "charge": row["charge"],
+            **(
+                {
+                    "queue_outcome": {
+                        "handling_result": row["handling_result"],
+                        "handled_at": _iso(row["handled_at"]),
+                        "processing_error": row.get("processing_error"),
+                    }
+                }
+                if row.get("direction") == "inbound"
+                and row.get("handling_result") is not None
+                and row["handling_result"]
+                not in (None, "replied")
+                else {}
+            ),
         }
         for row in reversed(message_rows)
     ]
@@ -703,6 +741,72 @@ async def build_hot_context_solo(
         )
     ]
 
+    # Silent turns since the user's last inbound message — turns where the
+    # agent did something (e.g. fired a scheduled task) but sent no outbound
+    # message, so the message timeline has no record. Without this section
+    # the agent has no way to know it already ran a check this morning.
+    silent_turns_rows = await pool.fetch(
+        """\
+        WITH last_inbound AS (
+            SELECT MAX(sent_at) AS sent_at
+            FROM messages
+            WHERE direction = 'inbound'
+              AND sender_id = $1
+        ),
+        floor_ts AS (
+            SELECT COALESCE(
+                (SELECT sent_at FROM last_inbound),
+                $2::timestamptz - INTERVAL '24 hours'
+            ) AS ts
+        )
+        SELECT bt.id AS turn_id,
+               bt.started_at,
+               bt.completed_at,
+               bt.bot_id,
+               bt.reasoning,
+               COALESCE(
+                 jsonb_agg(
+                   jsonb_build_object(
+                     'id', tc.id,
+                     'tool_name', tc.tool_name,
+                     'kind', tc.kind,
+                     'summary', tc.summary,
+                     'called_at', tc.called_at
+                   )
+                   ORDER BY tc.called_at
+                 ) FILTER (WHERE tc.id IS NOT NULL),
+                 '[]'::jsonb
+               ) AS tool_calls
+        FROM bot_turns bt
+        LEFT JOIN tool_calls tc ON tc.turn_id = bt.id
+        WHERE bt.user_in_context = $1
+          AND bt.completed_at IS NOT NULL
+          AND bt.completed_at > (SELECT ts FROM floor_ts)
+          AND bt.completed_at <= $2
+          AND bt.final_output_message_id IS NULL
+          AND bt.failure_reason IS NULL
+        GROUP BY bt.id
+        ORDER BY bt.completed_at DESC
+        LIMIT 5
+        """,
+        user.id,
+        now_utc,
+    )
+    silent_turns = [
+        {
+            "turn_id": str(row["turn_id"]),
+            "started_at": _iso(row["started_at"]),
+            "started_at_time": _time_context(
+                row["started_at"], user_timezone, now_utc
+            ),
+            "completed_at": _iso(row["completed_at"]),
+            "bot_id": row["bot_id"],
+            "reasoning": row["reasoning"],
+            "tool_calls": list(row["tool_calls"] or []),
+        }
+        for row in silent_turns_rows
+    ]
+
     cross_topic_peek: list[dict[str, Any]] = []
     if allow_cross_topic_peek:
         peek_since = now_utc - timedelta(days=14)
@@ -729,6 +833,22 @@ async def build_hot_context_solo(
                 today=pregnancy_today,
             )
 
+    # ── Fitness adherence (Hector only) ────────────────────────────────
+    fitness_block: str | None = None
+    if bot_id == "hector":
+        try:
+            fitness_block = await _format_fitness_block(
+                user_id=user.id,
+                topic_id=primary_topic_id,
+                today=now_utc,
+                tz_name=user_timezone or "UTC",
+                conn=pool,
+            )
+        except Exception:
+            # Failure isolation: non-Hector bots and any DB errors
+            # result in None (no fitness block)
+            pass
+
     return HotContextSolo(
         current_user=current_user,
         partner_user=partner_user,
@@ -742,11 +862,13 @@ async def build_hot_context_solo(
         distillations=distillations,
         bridge_candidates=[],  # no bridge candidates for solo
         recent_reactions=recent_reactions,
+        silent_turns=silent_turns,
         recent_messages=recent_messages,
         topic_status=topic_status,
         cross_topic_peek=cross_topic_peek,
         pregnancy_state=pregnancy_state,
         partner_pregnancy_state=partner_pregnancy_state,
+        fitness_block=fitness_block,
         bot_id=bot_id,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
@@ -775,6 +897,130 @@ async def build_hot_context_solo(
             ],
         },
     )
+
+async def _format_fitness_block(
+    user_id: UUID,
+    topic_id: UUID,
+    today: datetime,
+    tz_name: str,
+    conn: Any,
+) -> str | None:
+    """Query active commitments and recent events, compute adherence, and
+    return a pre-formatted '## Fitness' block string for solo hot context.
+
+    Returns None when there are no active commitments.
+    """
+    from app.services.adherence import compute_adherence, summarize_board
+    from zoneinfo import ZoneInfo
+
+    try:
+        _zone = ZoneInfo(tz_name)
+    except Exception:
+        _zone = ZoneInfo("UTC")
+
+    _today = today.astimezone(_zone).date()
+
+    # Fetch active commitments (max 5)
+    crows = await conn.fetch(
+        """
+        SELECT id, label, cadence, days_of_week, target_count,
+               start_date, end_date, schedule_rule, pressure_style
+        FROM mediator.commitments
+        WHERE user_id = $1
+          AND bot_id = 'hector'
+          AND topic_id = $2
+          AND status = 'active'
+        ORDER BY created_at
+        LIMIT 5
+        """,
+        user_id,
+        topic_id,
+    )
+
+    if not crows:
+        return None
+
+    active_commitments: list[dict[str, Any]] = []
+    for crow in crows:
+        cdict = dict(crow)
+        cdict["id"] = str(cdict["id"])
+        cdict.setdefault("pressure_style", "low_key")
+        active_commitments.append(cdict)
+
+    # Fetch recent events from last 14 days (max 10 for display)
+    since = today - timedelta(days=14)
+    erows = await conn.fetch(
+        """
+        SELECT id, commitment_id, metric_key, adherence_status,
+               value_numeric, value_text, unit, observed_at, note
+        FROM mediator.events
+        WHERE user_id = $1
+          AND bot_id = 'hector'
+          AND topic_id = $2
+          AND observed_at >= $3
+        ORDER BY observed_at DESC
+        LIMIT 10
+        """,
+        user_id,
+        topic_id,
+        since,
+    )
+
+    events: list[dict[str, Any]] = [dict(r) for r in erows]
+
+    # Build per-commitment adherence summaries
+    events_by_cid: dict[str, list[dict[str, Any]]] = {}
+    for evt in events:
+        cid_key = str(evt["commitment_id"]) if evt.get("commitment_id") else "_none"
+        events_by_cid.setdefault(cid_key, []).append(evt)
+
+    per_commitment_status: dict[str, str] = {}
+    for cdict in active_commitments:
+        cid_str = cdict["id"]
+        c_evts = events_by_cid.get(cid_str, [])
+        board = compute_adherence(cdict, c_evts, _today, _zone)
+        per_commitment_status[board.label] = summarize_board(board)
+
+    # Build the formatted block
+    lines: list[str] = []
+
+    # Current focus
+    focus = active_commitments[0]["label"] if active_commitments else "fitness"
+    lines.append(f"Current focus: {focus}")
+
+    # Active commitments
+    lines.append("Active commitments:")
+    for c in active_commitments:
+        ps = c.get("pressure_style", "low_key")
+        lines.append(f"  - {c['label']} (pressure={ps})")
+
+    # This week per-commitment per-day status
+    if per_commitment_status:
+        lines.append("This week:")
+        for label, status in per_commitment_status.items():
+            lines.append(f"  - {label}: {status}")
+
+    # Recent events (~5)
+    if events:
+        lines.append("Recent events:")
+        for e in events[:5]:
+            obs = e.get("observed_at")
+            if obs is not None and hasattr(obs, "isoformat"):
+                obs_str = obs.isoformat()[:10]
+            elif obs is not None:
+                obs_str = str(obs)[:10]
+            else:
+                obs_str = "?"
+            metric = e.get("metric_key", "")
+            status = e.get("adherence_status", "")
+            note = (e.get("note") or "")[:80]
+            parts = [obs_str, metric, status]
+            if note:
+                parts.append(note)
+            lines.append(f"  - {' '.join(p for p in parts if p)}")
+
+    return "\n".join(lines)
+
 
 
 def _line(prefix: str, value: Any) -> str:
@@ -867,6 +1113,10 @@ def _render_solo_with_counts(
     elif hc.partner_pregnancy_state is not None:
         lines += ["", "## Partner pregnancy", hc.partner_pregnancy_state]
 
+    # ── Fitness adherence (Hector only) ─────────────────────────────
+    if hc.fitness_block:
+        lines += ["", "## Fitness", hc.fitness_block]
+
     # Cross-topic peek for solo
     if hc.cross_topic_peek:
         lines += ["", "## Cross-topic activity (peek)"]
@@ -937,11 +1187,42 @@ def _render_solo_with_counts(
         lines.append(f"- [truncated, {truncations['distillations']} more]")
     lines += ["", "## Recent messages"]
     lines.extend(
-        f"- {_time_label(item, 'sent_at') or item['sent_at']} {item['direction']} charge={item['charge']} sender={item['sender_id']} recipient={item['recipient_id']}{_message_content(item, clip_limit)}"
+        f"- {_time_label(item, 'sent_at') or item['sent_at']} {item['direction']} charge={item['charge']} sender={item['sender_id']} recipient={item['recipient_id']}{_message_content(item, clip_limit)}{_queue_outcome_label(item)}"
         for item in hc.recent_messages
     )
     if truncations.get("recent_messages"):
         lines.append(f"- [truncated, {truncations['recent_messages']} more]")
+    # Silent agent turns since the user's last message — work the agent
+    # already did that did NOT produce an outbound message (e.g. a fired
+    # scheduled_task that decided to stay quiet). Without this section,
+    # the message timeline gives the agent no record of these turns.
+    lines += ["", "## Your silent turns since the user's last message"]
+    if hc.silent_turns:
+        for turn in hc.silent_turns:
+            started_label = _time_label(turn, "started_at") or turn.get("started_at")
+            reasoning = _clip(
+                (turn.get("reasoning") or "").strip().splitlines()[0]
+                if turn.get("reasoning")
+                else "",
+                clip_limit,
+            )
+            lines.append(
+                f"- {started_label} turn_id={turn['turn_id']}"
+                f"{' bot=' + turn['bot_id'] if turn.get('bot_id') else ''}"
+                f" — {reasoning or '[no reasoning recorded]'}"
+            )
+            for tc in turn.get("tool_calls") or []:
+                summary = tc.get("summary") or f"{tc.get('tool_name')} (no summary)"
+                lines.append(
+                    f"    · tool_call_id={tc.get('id')} {_clip(summary, clip_limit)}"
+                )
+        lines.append(
+            "- Use these to answer 'did you do X this morning?' truthfully."
+            " Drill into a specific tool call with get_tool_call(tool_call_id)"
+            " when the summary isn't enough."
+        )
+    else:
+        lines.append("- none")
     lines += ["", "## New reactions since previous turn"]
     if hc.recent_reactions:
         lines.extend(
@@ -1025,11 +1306,13 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         distillations=list(hc.distillations),
         bridge_candidates=[],
         recent_reactions=list(hc.recent_reactions),
+        silent_turns=list(hc.silent_turns),
         recent_messages=list(hc.recent_messages),
         topic_status=hc.topic_status,
         cross_topic_peek=list(hc.cross_topic_peek),
         pregnancy_state=hc.pregnancy_state,
         partner_pregnancy_state=hc.partner_pregnancy_state,
+        fitness_block=hc.fitness_block,
         bot_id=hc.bot_id,
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,

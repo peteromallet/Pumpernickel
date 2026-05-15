@@ -722,10 +722,37 @@ class BotAction(BaseModel):
         default_factory=list,
         description="Queryable per-turn diagnostic events. Plain metadata is sanitized; raw sensitive text is not exposed.",
     )
+    handling_result: str | None = None
+    processing_error: str | None = None
 
 
 class GetBotActionsOutput(BaseModel):
     actions: list[BotAction]
+
+
+# --- get_tool_call ---
+
+class GetToolCallInput(BaseModel):
+    tool_call_id: UUID = Field(
+        description="The id of the tool_calls row to fetch — usually surfaced from a recent-turn summary or get_bot_actions output."
+    )
+
+
+class ToolCallDetail(BaseModel):
+    id: UUID
+    turn_id: UUID
+    tool_name: str
+    kind: str
+    summary: str | None
+    arguments: dict
+    result: dict
+    called_at: datetime
+    called_at_time: TemporalReference | None = None
+    duration_ms: int | None
+
+
+class GetToolCallOutput(BaseModel):
+    tool_call: ToolCallDetail | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1860,6 +1887,305 @@ class EndPregnancyOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Hector fitness tools — commitment/adherence substrate
+# ---------------------------------------------------------------------------
+
+
+# ── Hector enums (must match migration CHECK constraints exactly) ──────
+
+
+class CommitmentStatus(str, Enum):
+    active = "active"
+    paused = "paused"
+    completed = "completed"
+    dropped = "dropped"
+
+
+class Cadence(str, Enum):
+    daily = "daily"
+    weekdays = "weekdays"
+    weekly_count = "weekly_count"
+    custom = "custom"
+    custom_days = "custom_days"
+
+
+class PressureStyle(str, Enum):
+    very_gentle = "very_gentle"
+    low_key = "low_key"
+    firm = "firm"
+
+
+class AdherenceStatus(str, Enum):
+    done = "done"
+    missed = "missed"
+    excused = "excused"
+
+
+class ScheduleRule(BaseModel):
+    """Small structured schedule details stored as JSONB in commitments."""
+
+    period: str = "week"
+    days: list[int] = Field(default_factory=list)
+    target_count: int = 1
+    timezone: str = "UTC"
+
+
+# --- create_commitment ---
+
+
+class CreateCommitmentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(description="Short human-readable label for the commitment.")
+    kind: str = Field(
+        description="Category: workout, nutrition, steps, mobility, sleep, alcohol, body_measurement, other."
+    )
+    cadence: Cadence = Field(
+        description="How often the commitment is expected."
+    )
+    days_of_week: list[int] | None = Field(
+        default=None,
+        description="For custom_days cadence: 0=Monday … 6=Sunday.",
+    )
+    target_count: int | None = Field(
+        default=None,
+        description="For weekly_count cadence: how many times per week.",
+    )
+    start_date: str | None = Field(
+        default=None, description="ISO date string, e.g. '2026-05-11'. Defaults to today."
+    )
+    end_date: str | None = Field(
+        default=None, description="ISO date string. Open-ended if omitted."
+    )
+    schedule_rule: ScheduleRule | None = Field(
+        default=None,
+        description="Optional structured schedule details (period, days, target_count, timezone).",
+    )
+    pressure_style: PressureStyle = Field(
+        default=PressureStyle.low_key, description="How much pressure Hector should apply."
+    )
+
+    @model_validator(mode="after")
+    def validate_cadence_constraints(self) -> "CreateCommitmentInput":
+        if self.cadence == Cadence.weekly_count and self.target_count is not None:
+            if self.target_count < 1 or self.target_count > 7:
+                raise ValueError("target_count must be between 1 and 7 for weekly_count cadence")
+        if self.cadence == Cadence.custom_days and not self.days_of_week:
+            raise ValueError("days_of_week is required when cadence is custom_days")
+        return self
+
+
+class CreateCommitmentOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    commitment_id: str | None = None
+    label: str | None = None
+    cadence: str | None = None
+    created_at: str | None = None
+
+
+# --- update_commitment ---
+
+
+class UpdateCommitmentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commitment_id: str = Field(description="UUID of the commitment to update.")
+    label: str | None = None
+    kind: str | None = None
+    cadence: Cadence | None = None
+    days_of_week: list[int] | None = None
+    target_count: int | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    schedule_rule: ScheduleRule | None = None
+    pressure_style: PressureStyle | None = None
+
+
+class UpdateCommitmentOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    commitment_id: str | None = None
+    updated_at: str | None = None
+
+
+# --- close_commitment ---
+
+
+class CloseCommitmentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commitment_id: str = Field(description="UUID of the commitment to close.")
+    status: Literal["paused", "completed", "dropped"] = Field(
+        description="Final status: paused (temporary), completed (done), dropped (abandoned)."
+    )
+
+
+class CloseCommitmentOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    commitment_id: str | None = None
+    status: str | None = None
+    closed_at: str | None = None
+
+
+# --- log_event ---
+
+
+class LogEventInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commitment_id: str | None = Field(
+        default=None,
+        description="UUID of the related commitment, if this event satisfies/modifies one.",
+    )
+    metric_key: str = Field(
+        description="What was measured/logged: workout_session, ate_on_plan, takeout_night, body_weight, etc."
+    )
+    adherence_status: AdherenceStatus | None = Field(
+        default=None,
+        description="Adherence outcome. Required unless value_numeric or value_text is set.",
+    )
+    value_numeric: float | None = Field(
+        default=None, description="Numeric measurement value."
+    )
+    value_text: str | None = Field(
+        default=None, description="Free-text measurement value."
+    )
+    unit: str | None = Field(default=None, description="Unit for value_numeric.")
+    observed_at: str | None = Field(
+        default=None, description="ISO datetime. Defaults to now()."
+    )
+    note: str | None = Field(default=None, description="Optional context note.")
+    source_message_ids: list[str] | None = Field(
+        default=None, description="Message UUIDs that triggered this event."
+    )
+
+    @model_validator(mode="after")
+    def require_at_least_one_value(self) -> "LogEventInput":
+        if (
+            self.adherence_status is None
+            and self.value_numeric is None
+            and self.value_text is None
+        ):
+            raise ValueError(
+                "At least one of adherence_status, value_numeric, or value_text must be set."
+            )
+        return self
+
+
+class LogEventOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    event_id: str | None = None
+    commitment_id: str | None = None
+    metric_key: str | None = None
+    adherence_status: str | None = None
+    observed_at: str | None = None
+
+
+# --- list_commitments ---
+
+
+class ListCommitmentsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str | None = Field(
+        default="active",
+        description="Filter by status: active, paused, completed, dropped. None = all.",
+    )
+
+
+class CommitmentSummary(BaseModel):
+    id: str
+    label: str
+    kind: str
+    status: str
+    cadence: str
+    days_of_week: list[int] = []
+    target_count: int | None = None
+    start_date: str
+    end_date: str | None = None
+    pressure_style: str
+    created_at: str
+    updated_at: str
+
+
+class ListCommitmentsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    commitments: list[CommitmentSummary] = []
+
+
+# --- list_events ---
+
+
+class ListEventsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commitment_id: str | None = Field(
+        default=None, description="Filter to a specific commitment."
+    )
+    limit: int = Field(default=20, ge=1, le=200)
+    before: str | None = Field(
+        default=None, description="ISO datetime. Only events before this time."
+    )
+
+
+class EventSummary(BaseModel):
+    id: str
+    commitment_id: str | None = None
+    metric_key: str
+    adherence_status: str | None = None
+    value_numeric: float | None = None
+    value_text: str | None = None
+    unit: str | None = None
+    observed_at: str
+    note: str | None = None
+    created_at: str
+
+
+class ListEventsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    events: list[EventSummary] = []
+
+
+# --- get_adherence ---
+
+
+class GetAdherenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commitment_ids: list[str] | None = Field(
+        default=None,
+        description="Specific commitment UUIDs. None = all active commitments for this topic.",
+    )
+
+
+class AdherenceSlot(BaseModel):
+    date: str
+    day_label: str
+    status: Literal["done", "missed", "excused", "unknown", "pending"]
+
+
+class CommitmentAdherence(BaseModel):
+    commitment_id: str
+    label: str
+    cadence: str
+    slots: list[AdherenceSlot]
+    summary: str
+
+
+class GetAdherenceOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    commitments: list[CommitmentAdherence] = []
+    week_start: str | None = None
+    week_end: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
 #
@@ -1905,6 +2231,7 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "check_oob": (CheckOOBInput, CheckOOBOutput),
     "get_self_model": (GetSelfModelInput, GetSelfModelOutput),
     "get_bot_actions": (GetBotActionsInput, GetBotActionsOutput),
+    "get_tool_call": (GetToolCallInput, GetToolCallOutput),
     "send_message_part": (SendMessagePartInput, SendMessagePartOutput),
     "consult_perspective": (ConsultPerspectiveInput, ConsultPerspectiveOutput),
     "list_bridge_candidates": (ListBridgeCandidatesInput, ListBridgeCandidatesOutput),
@@ -1967,4 +2294,12 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "set_pregnancy_edd": (SetPregnancyEddInput, SetPregnancyEddOutput),
     "correct_pregnancy_edd": (CorrectPregnancyEddInput, CorrectPregnancyEddOutput),
     "end_pregnancy": (EndPregnancyInput, EndPregnancyOutput),
+    # hector
+    "create_commitment": (CreateCommitmentInput, CreateCommitmentOutput),
+    "update_commitment": (UpdateCommitmentInput, UpdateCommitmentOutput),
+    "close_commitment": (CloseCommitmentInput, CloseCommitmentOutput),
+    "log_event": (LogEventInput, LogEventOutput),
+    "list_commitments": (ListCommitmentsInput, ListCommitmentsOutput),
+    "list_events": (ListEventsInput, ListEventsOutput),
+    "get_adherence": (GetAdherenceInput, GetAdherenceOutput),
 }

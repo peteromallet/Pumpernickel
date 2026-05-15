@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -29,6 +29,7 @@ from app.services.templates import TemplateCall
 from app.services.time_context import temporal_reference
 from app.services.turn_context import TurnContext, obs_fields, scope_from_turn_context
 from app.services.scheduled_task_recurrence import normalize_recurrence
+from app.services.tools.audit import log_tool_call as _log_tool_call_shared
 from app.services.tools.common import current_scheduled_task
 from app.services.tools.scope_guard import (
     check_write_scope,
@@ -123,6 +124,15 @@ from tool_schemas import (
     UpdateUserStyleNotesOutput,
     UpdateWatchItemInput,
     UpdateWatchItemOutput,
+    # hector
+    CreateCommitmentInput,
+    CreateCommitmentOutput,
+    UpdateCommitmentInput,
+    UpdateCommitmentOutput,
+    CloseCommitmentInput,
+    CloseCommitmentOutput,
+    LogEventInput,
+    LogEventOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,18 +166,9 @@ async def _log_tool_call(
     started_at: datetime,
     result: BaseModel | dict[str, Any],
 ) -> None:
-    duration_ms = max(0, int((datetime.now(UTC) - started_at).total_seconds() * 1000))
-    await ctx.pool.execute(
-        """
-        INSERT INTO tool_calls (turn_id, tool_name, arguments, result, called_at, duration_ms)
-        VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
-        """,
-        ctx.turn_id,
-        name,
-        _jsonb_payload(args),
-        _jsonb_payload(result),
-        started_at,
-        duration_ms,
+    """Back-compat shim: delegate to the shared audit logger as a write."""
+    await _log_tool_call_shared(
+        ctx, name, args, started_at, result, kind="write"
     )
 
 
@@ -2039,7 +2040,9 @@ async def list_scheduled_tasks(
     result = ListScheduledTasksOutput(
         tasks=[_scheduled_task_row(row, ctx) for row in rows]
     )
-    await _log_tool_call(ctx, "list_scheduled_tasks", args, started, result)
+    await _log_tool_call_shared(
+        ctx, "list_scheduled_tasks", args, started, result, kind="read"
+    )
     return result
 
 
@@ -2896,3 +2899,521 @@ async def set_topic_status(
     )
     await _log_tool_call(ctx, "set_topic_status", args, started, result)
     return result
+
+
+# ── Hector fitness write tools ─────────────────────────────────────────────
+
+
+async def create_commitment(
+    ctx: TurnContext, args: "CreateCommitmentInput"
+) -> "CreateCommitmentOutput":
+    """Create a new fitness commitment for the current user/topic/bot."""
+    from datetime import date as _date, datetime as _datetime
+
+    started = _start()
+
+    # Scope guard: only Hector can create commitments for the fitness topic
+    _check_hector_scope(ctx)
+
+    sd = _date.fromisoformat(args.start_date) if args.start_date else _date.today()
+    ed = _date.fromisoformat(args.end_date) if args.end_date else None
+    sr = (
+        args.schedule_rule.model_dump(exclude_none=True)
+        if args.schedule_rule
+        else {}
+    )
+    dow = args.days_of_week or []
+
+    row = await ctx.pool.fetchrow(
+        """
+        INSERT INTO mediator.commitments
+          (user_id, topic_id, bot_id, label, kind, cadence,
+           days_of_week, target_count, start_date, end_date,
+           schedule_rule, pressure_style)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+        RETURNING id, label, cadence, created_at
+        """,
+        ctx.user.id,
+        ctx.primary_topic_id,
+        ctx.bot_id,
+        args.label,
+        args.kind,
+        args.cadence,
+        dow,
+        args.target_count,
+        sd,
+        ed,
+        sr,
+        args.pressure_style,
+    )
+
+    result = CreateCommitmentOutput(
+        commitment_id=str(row["id"]),
+        label=row["label"],
+        cadence=row["cadence"],
+        created_at=row["created_at"].isoformat() if row["created_at"] else None,
+    )
+    await _ensure_commitment_checkin_task(ctx, args, row)
+    await _log_tool_call(ctx, "create_commitment", args, started, result)
+    return result
+
+
+async def update_commitment(
+    ctx: TurnContext, args: "UpdateCommitmentInput"
+) -> "UpdateCommitmentOutput":
+    """Update an existing commitment with partial field changes."""
+    started = _start()
+    _check_hector_scope(ctx)
+
+    from datetime import date as _date  # noqa: PLC0415
+
+    from app.services.tools.common import parse_required_uuid_field  # noqa: PLC0415
+
+    _validated_cid = parse_required_uuid_field(
+        args.commitment_id,
+        field_name="commitment_id",
+        tool_name="update_commitment",
+    )
+
+    updates: list[str] = []
+    params: list[Any] = []
+    param_idx = 1
+
+    if args.label is not None:
+        updates.append(f"label = ${param_idx}")
+        params.append(args.label)
+        param_idx += 1
+    if args.kind is not None:
+        updates.append(f"kind = ${param_idx}")
+        params.append(args.kind)
+        param_idx += 1
+    if args.cadence is not None:
+        updates.append(f"cadence = ${param_idx}")
+        params.append(args.cadence)
+        param_idx += 1
+    if args.days_of_week is not None:
+        updates.append(f"days_of_week = ${param_idx}")
+        params.append(args.days_of_week)
+        param_idx += 1
+    if args.target_count is not None:
+        updates.append(f"target_count = ${param_idx}")
+        params.append(args.target_count)
+        param_idx += 1
+    if args.start_date is not None:
+        updates.append(f"start_date = ${param_idx}")
+        params.append(_date.fromisoformat(args.start_date))
+        param_idx += 1
+    if args.end_date is not None:
+        updates.append(f"end_date = ${param_idx}")
+        params.append(_date.fromisoformat(args.end_date))
+        param_idx += 1
+    if args.schedule_rule is not None:
+        updates.append(f"schedule_rule = ${param_idx}::jsonb")
+        params.append(args.schedule_rule.model_dump(exclude_none=True))
+        param_idx += 1
+    if args.pressure_style is not None:
+        updates.append(f"pressure_style = ${param_idx}")
+        params.append(args.pressure_style)
+        param_idx += 1
+
+    if not updates:
+        raise ToolCallRejected(
+            {"error": "update_commitment: no fields to update"}
+        )
+
+    updates.append("updated_at = now()")
+    params.extend([ctx.user.id, ctx.primary_topic_id, ctx.bot_id, str(_validated_cid)])
+
+    row = await ctx.pool.fetchrow(
+        f"""
+        UPDATE mediator.commitments
+        SET {', '.join(updates)}
+        WHERE user_id = ${param_idx}
+          AND topic_id = ${param_idx + 1}
+          AND bot_id = ${param_idx + 2}
+          AND id = ${param_idx + 3}::uuid
+        RETURNING id, updated_at
+        """,
+        *params,
+    )
+
+    if row is None:
+        raise ToolCallRejected(
+            {
+                "error": "update_commitment: commitment not found or access denied",
+                "is_error": True,
+                "error_code": "not_found",
+                "field": "commitment_id",
+                "retryable": True,
+                "correction_hint": (
+                    "Call list_commitments to find existing commitments; "
+                    "if none match, call create_commitment and use the returned commitment_id."
+                ),
+                "failure_class": "tool_validation_recoverable",
+            }
+        )
+
+    result = UpdateCommitmentOutput(
+        commitment_id=str(row["id"]),
+        updated_at=row["updated_at"].isoformat() if row["updated_at"] else None,
+    )
+    await _log_tool_call(ctx, "update_commitment", args, started, result)
+    return result
+
+
+async def close_commitment(
+    ctx: TurnContext, args: "CloseCommitmentInput"
+) -> "CloseCommitmentOutput":
+    """Close a commitment (pause, complete, or drop)."""
+    started = _start()
+    _check_hector_scope(ctx)
+
+    from app.services.tools.common import parse_required_uuid_field  # noqa: PLC0415
+
+    _validated_cid = parse_required_uuid_field(
+        args.commitment_id,
+        field_name="commitment_id",
+        tool_name="close_commitment",
+    )
+
+    row = await ctx.pool.fetchrow(
+        """
+        UPDATE mediator.commitments
+        SET status = $5, updated_at = now()
+        WHERE user_id = $1
+          AND topic_id = $2
+          AND bot_id = $3
+          AND id = $4::uuid
+        RETURNING id, status, updated_at
+        """,
+        ctx.user.id,
+        ctx.primary_topic_id,
+        ctx.bot_id,
+        str(_validated_cid),
+        args.status,
+    )
+
+    if row is None:
+        raise ToolCallRejected(
+            {
+                "error": "close_commitment: commitment not found or access denied",
+                "is_error": True,
+                "error_code": "not_found",
+                "field": "commitment_id",
+                "retryable": True,
+                "correction_hint": (
+                    "Call list_commitments to find existing commitments; "
+                    "if none match, call create_commitment and use the returned commitment_id."
+                ),
+                "failure_class": "tool_validation_recoverable",
+            }
+        )
+
+    result = CloseCommitmentOutput(
+        commitment_id=str(row["id"]),
+        status=row["status"],
+        closed_at=row["updated_at"].isoformat() if row["updated_at"] else None,
+    )
+    await _cancel_commitment_checkin_tasks(ctx, args.commitment_id)
+    await _log_tool_call(ctx, "close_commitment", args, started, result)
+    return result
+
+
+async def log_event(
+    ctx: TurnContext, args: "LogEventInput"
+) -> "LogEventOutput":
+    """Log a fitness event (adherence outcome or measurement)."""
+    from datetime import datetime as _datetime
+
+    started = _start()
+    _check_hector_scope(ctx)
+
+    from app.services.tools.common import parse_optional_uuid_field  # noqa: PLC0415
+
+    _validated_cid = parse_optional_uuid_field(
+        args.commitment_id,
+        field_name="commitment_id",
+        tool_name="log_event",
+    )
+
+    # Existence / access check: a valid UUID must reference an accessible commitment.
+    if _validated_cid is not None:
+        exists = await ctx.pool.fetchrow(
+            "SELECT id FROM mediator.commitments "
+            "WHERE id = $1::uuid AND user_id = $2 AND topic_id = $3 AND bot_id = $4",
+            str(_validated_cid),
+            ctx.user.id,
+            ctx.primary_topic_id,
+            ctx.bot_id,
+        )
+        if exists is None:
+            raise ToolCallRejected(
+                {
+                    "error": "commitment_not_found",
+                    "is_error": True,
+                    "error_code": "not_found",
+                    "field": "commitment_id",
+                    "retryable": True,
+                    "correction_hint": (
+                        "Call list_commitments to find existing commitments; "
+                        "if none match, call create_commitment and use the returned commitment_id."
+                    ),
+                    "failure_class": "tool_validation_recoverable",
+                }
+            )
+
+    obs = (
+        _datetime.fromisoformat(args.observed_at.replace("Z", "+00:00"))
+        if args.observed_at
+        else _datetime.now(UTC)
+    )
+    if obs.tzinfo is None:
+        obs = obs.replace(tzinfo=UTC)
+
+    source_ids = list(args.source_message_ids) if args.source_message_ids else []
+
+    row = await ctx.pool.fetchrow(
+        """
+        INSERT INTO mediator.events
+          (commitment_id, user_id, topic_id, bot_id, metric_key,
+           adherence_status, value_numeric, value_text, unit,
+           observed_at, note, source_message_ids)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::uuid[])
+        RETURNING id, commitment_id, metric_key, adherence_status, observed_at
+        """,
+        str(_validated_cid) if _validated_cid is not None else None,
+        ctx.user.id,
+        ctx.primary_topic_id,
+        ctx.bot_id,
+        args.metric_key,
+        args.adherence_status,
+        args.value_numeric,
+        args.value_text,
+        args.unit,
+        obs,
+        args.note,
+        source_ids,
+    )
+
+    result = LogEventOutput(
+        event_id=str(row["id"]),
+        commitment_id=str(row["commitment_id"]) if row["commitment_id"] else None,
+        metric_key=row["metric_key"],
+        adherence_status=row["adherence_status"],
+        observed_at=row["observed_at"].isoformat() if row["observed_at"] else None,
+    )
+    await _log_tool_call(ctx, "log_event", args, started, result)
+    return result
+
+
+def _check_hector_scope(ctx: TurnContext) -> None:
+    """Enforce that only Hector bot can call fitness commitment/event tools.
+
+    Rejects if any scope value (bot_id, primary_topic_id, user.id) is None,
+    or if the bot is not Hector.
+    """
+    from app.bots.ids import HECTOR_BOT_ID
+
+    if ctx.bot_id is None:
+        raise ToolCallRejected(
+            {
+                "error": "scope_denied: missing bot_id",
+                "reason": "Commitment/event tools require ctx.bot_id (got None)",
+            }
+        )
+    if ctx.primary_topic_id is None:
+        raise ToolCallRejected(
+            {
+                "error": "scope_denied: missing topic_id",
+                "reason": "Commitment/event tools require ctx.primary_topic_id (got None)",
+            }
+        )
+    if ctx.user.id is None:
+        raise ToolCallRejected(
+            {
+                "error": "scope_denied: missing user_id",
+                "reason": "Commitment/event tools require ctx.user.id (got None)",
+            }
+        )
+    if ctx.bot_id != HECTOR_BOT_ID:
+        raise ToolCallRejected(
+            {
+                "error": "scope_denied: wrong bot",
+                "reason": (
+                    f"Only bot_id='{HECTOR_BOT_ID}' can use commitment/event tools, "
+                    f"got bot_id={ctx.bot_id!r}"
+                ),
+            }
+        )
+    if ctx.primary_topic_slug != "fitness":
+        raise ToolCallRejected(
+            {
+                "error": "scope_denied: wrong topic",
+                "reason": (
+                    f"Commitment/event tools require fitness topic, "
+                    f"got primary_topic_slug={ctx.primary_topic_slug!r}"
+                ),
+            }
+        )
+
+
+async def _ensure_commitment_checkin_task(
+    ctx: TurnContext,
+    args: "CreateCommitmentInput",
+    row: Any,
+) -> None:
+    """Create a recurring internal check-in for a new commitment.
+
+    The scheduled turn checks adherence first and stays silent when the slot
+    is already handled, so the reminder is conditional rather than a blind nag.
+    """
+
+    scheduled_for, recurrence = _commitment_checkin_schedule(ctx, args)
+    if scheduled_for is None or recurrence is None:
+        return
+
+    commitment_id = str(row["id"])
+    context = {
+        "task_id": str(uuid4()),
+        "kind": "commitment_checkin",
+        "commitment_id": commitment_id,
+        "commitment_label": row["label"],
+        "recurrence": recurrence,
+        "brief": (
+            f"Check Hector fitness commitment '{row['label']}'. First read "
+            "the adherence board with get_adherence and recent events if "
+            "needed. If the relevant slot is already done, missed, or excused, "
+            "stay silent unless a short acknowledgement is clearly useful. If "
+            "it is still unknown after the intended window, ask one low-key "
+            "question and log the result if the user answers. If the commitment "
+            "is no longer active, cancel this current scheduled task."
+        ),
+    }
+    try:
+        await ctx.pool.fetchrow(
+            """
+            INSERT INTO scheduled_jobs (user_id, job_type, scheduled_for, context, status, bot_id, topic_id)
+            VALUES ($1, 'scheduled_task', $2, $3::jsonb, 'pending', $4, $5)
+            RETURNING id AS job_id, scheduled_for, context
+            """,
+            ctx.user.id,
+            scheduled_for,
+            context,
+            ctx.bot_id,
+            ctx.primary_topic_id,
+        )
+    except Exception:
+        logger.exception(
+            "failed to schedule commitment check-in",
+            extra=obs_fields(ctx),
+        )
+
+
+def _commitment_checkin_schedule(
+    ctx: TurnContext,
+    args: "CreateCommitmentInput",
+) -> tuple[datetime | None, dict[str, Any] | None]:
+    timezone = _commitment_timezone(ctx, args)
+    now_local = datetime.now(UTC).astimezone(timezone)
+    start = date.fromisoformat(args.start_date) if args.start_date else now_local.date()
+    end = date.fromisoformat(args.end_date) if args.end_date else None
+
+    if args.cadence == "daily":
+        weekdays = None
+        local_time = datetime.min.time().replace(hour=20, minute=30)
+        recurrence: dict[str, Any] = {"type": "daily", "interval": 1}
+    elif args.cadence == "weekdays":
+        weekdays = [0, 1, 2, 3, 4]
+        local_time = datetime.min.time().replace(hour=20, minute=30)
+        recurrence = {"type": "weekly", "interval": 1, "weekdays": weekdays}
+    elif args.cadence == "custom_days":
+        weekdays = list(args.days_of_week or [])
+        local_time = datetime.min.time().replace(hour=20, minute=30)
+        recurrence = {"type": "weekly", "interval": 1, "weekdays": weekdays}
+    elif args.cadence in {"weekly_count", "custom"}:
+        weekdays = [6]
+        local_time = datetime.min.time().replace(hour=19, minute=0)
+        recurrence = {"type": "weekly", "interval": 1, "weekdays": weekdays}
+    else:
+        return None, None
+
+    if end is not None:
+        recurrence["until"] = datetime.combine(
+            end,
+            datetime.max.time().replace(microsecond=0),
+            tzinfo=timezone,
+        ).astimezone(UTC).isoformat()
+
+    first = _next_local_commitment_checkin(
+        now_local=now_local,
+        start=start,
+        local_time=local_time,
+        weekdays=weekdays,
+    )
+    if end is not None and first.date() > end:
+        return None, None
+    return first.astimezone(UTC), recurrence
+
+
+def _commitment_timezone(ctx: TurnContext, args: "CreateCommitmentInput") -> ZoneInfo:
+    timezone_name = None
+    if args.schedule_rule is not None:
+        timezone_name = args.schedule_rule.timezone
+    timezone_name = timezone_name or getattr(ctx.user, "timezone", None) or "UTC"
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def _next_local_commitment_checkin(
+    *,
+    now_local: datetime,
+    start: date,
+    local_time: Any,
+    weekdays: list[int] | None,
+) -> datetime:
+    candidate_date = max(now_local.date(), start)
+    for offset in range(0, 15):
+        day = candidate_date + timedelta(days=offset)
+        if weekdays is not None and day.weekday() not in weekdays:
+            continue
+        candidate = datetime.combine(day, local_time, tzinfo=now_local.tzinfo)
+        if candidate > now_local:
+            return candidate
+    return datetime.combine(
+        candidate_date + timedelta(days=1),
+        local_time,
+        tzinfo=now_local.tzinfo,
+    )
+
+
+async def _cancel_commitment_checkin_tasks(
+    ctx: TurnContext,
+    commitment_id: str,
+) -> None:
+    try:
+        await ctx.pool.execute(
+            """
+            UPDATE scheduled_jobs
+            SET status = 'cancelled',
+                cancellation_reason = 'commitment_closed',
+                updated_at = now()
+            WHERE user_id = $1
+              AND bot_id = $2
+              AND topic_id = $3
+              AND job_type = 'scheduled_task'
+              AND status = 'pending'
+              AND context->>'kind' = 'commitment_checkin'
+              AND context->>'commitment_id' = $4
+            """,
+            ctx.user.id,
+            ctx.bot_id,
+            ctx.primary_topic_id,
+            str(commitment_id),
+        )
+    except Exception:
+        logger.exception(
+            "failed to cancel commitment check-in tasks",
+            extra=obs_fields(ctx),
+        )

@@ -64,8 +64,15 @@ async def test_capture_records_read_and_write_once_without_duplicate_persisted_r
     assert write_result["id"] == str(observation_id)
     assert [call.tool_name for call in transcript.calls] == ["get_observations", "update_observation"]
     assert [call.phase for call in transcript.calls] == ["read", "record"]
-    assert len(fake_pool.tool_calls) == 1
-    assert fake_pool.tool_calls[0]["tool_name"] == "update_observation"
+    # Migration 0039: reads are persisted too, with kind='read'. Writes
+    # still self-log as kind='write'. No duplicate rows for either.
+    assert [
+        (row["tool_name"], row.get("kind", "write"))
+        for row in fake_pool.tool_calls
+    ] == [
+        ("get_observations", "read"),
+        ("update_observation", "write"),
+    ]
 
 
 async def test_capture_records_validation_errors_without_persisting(fake_pool: FakePool) -> None:

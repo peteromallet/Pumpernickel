@@ -324,6 +324,12 @@ class HotContextPool:
                 )
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return rows[:5]
+        if "FROM bot_turns bt" in compact and "final_output_message_id IS NULL" in compact:
+            # Silent-turns hot-context block. The real query joins
+            # tool_calls; the fake pool doesn't track silent turns, so
+            # default to no silent turns. Tests that exercise the block
+            # should construct rows directly.
+            return []
         if "FROM messages" in compact and "WHERE id = ANY" in compact:
             ids = set(args[0])
             bot_filter = args[1] if len(args) > 1 else None

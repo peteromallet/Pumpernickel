@@ -76,7 +76,8 @@ async def test_free_form_path_sends_text_and_updates_row(fake_pool, monkeypatch)
 
     monkeypatch.setattr("app.services.whatsapp.send_text", send_text)
 
-    row_id = await send_outbound(fake_pool, user, "hello", scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "hello", scope=_scope(user))
+    row_id = send_result["message_id"]
 
     assert sent == [(user.phone, "hello")]
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "wamid.out"
@@ -94,7 +95,8 @@ async def test_free_form_path_records_bot_turn_id(fake_pool, monkeypatch) -> Non
 
     monkeypatch.setattr("app.services.whatsapp.send_text", send_text)
 
-    row_id = await send_outbound(fake_pool, user, "hello", bot_turn_id=turn_id, scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "hello", bot_turn_id=turn_id, scope=_scope(user))
+    row_id = send_result["message_id"]
 
     assert fake_pool.messages[row_id]["bot_turn_id"] == turn_id
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "wamid.out"
@@ -108,13 +110,14 @@ async def test_successful_bot_initiated_outbound_marks_onboarding_welcomed(fake_
 
     monkeypatch.setattr("app.services.whatsapp.send_template", send_template)
 
-    row_id = await send_outbound(
+    send_result = await send_outbound(
         fake_pool,
         user,
         "first contact",
         template_fallback=TemplateCall("media_failure", [user.name, "voice"]),
         scope=_scope(user),
     )
+    row_id = send_result["message_id"]
 
     assert fake_pool.messages[row_id]["processing_state"] == "processed"
     assert fake_pool.users[user.id]["onboarding_state"] == "welcomed"
@@ -235,7 +238,8 @@ async def test_discord_provider_sends_without_whatsapp_window(fake_pool, monkeyp
 
     monkeypatch.setattr("app.services.discord.send_text", send_text)
 
-    row_id = await send_outbound(fake_pool, user, "hello discord", scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "hello discord", scope=_scope(user))
+    row_id = send_result["message_id"]
 
     assert sent == [(user.phone, "hello discord", True)]
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message"
@@ -257,10 +261,38 @@ async def test_discord_provider_can_suppress_low_level_typing(fake_pool, monkeyp
 
     monkeypatch.setattr("app.services.discord.send_text", send_text)
 
-    row_id = await send_outbound(fake_pool, user, "hello discord", send_typing_indicator=False, scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "hello discord", send_typing_indicator=False, scope=_scope(user))
+    row_id = send_result["message_id"]
 
     assert sent == [(user.phone, "hello discord", False)]
     assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message"
+    assert fake_pool.messages[row_id]["processing_state"] == "processed"
+    get_settings.cache_clear()
+
+
+async def test_discord_final_outbound_splits_on_paragraph_boundaries(fake_pool, monkeypatch) -> None:
+    monkeypatch.setenv("MESSAGING_PROVIDER", "discord")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    user = _user(fake_pool)
+    sent = []
+
+    async def send_text(to, body, *, send_typing_indicator=True, bot_id="mediator"):
+        sent.append((to, body, send_typing_indicator))
+        return {"messages": [{"id": f"discord-message-{len(sent)}"}]}
+
+    monkeypatch.setattr("app.services.discord.send_text", send_text)
+
+    paragraphs = ["A" * 600, "B" * 600, "C" * 600]
+    send_result = await send_outbound(fake_pool, user, "\n\n".join(paragraphs), scope=_scope(user))
+    row_id = send_result["message_id"]
+
+    assert [body for _, body, _ in sent] == paragraphs
+    assert [typing for _, _, typing in sent] == [True, False, False]
+    assert all(len(body) < 1900 for _, body, _ in sent)
+    assert fake_pool.messages[row_id]["content"] == paragraphs[-1]
+    assert fake_pool.messages[row_id]["whatsapp_message_id"] == "discord-message-3"
     assert fake_pool.messages[row_id]["processing_state"] == "processed"
     get_settings.cache_clear()
 
@@ -297,7 +329,8 @@ async def test_defer_without_template_appends_reasoning(fake_pool) -> None:
         "triggering_message_ids": [],
     }
 
-    row_id = await send_outbound(fake_pool, user, "too specific", bot_turn_id=turn_id, scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "too specific", bot_turn_id=turn_id, scope=_scope(user))
+    row_id = send_result["message_id"]
 
     assert fake_pool.messages[row_id]["processing_state"] == "withheld"
     assert "outside WhatsApp 24h window" in fake_pool.bot_turns[turn_id]["reasoning"]
@@ -323,7 +356,8 @@ async def test_retry_success_and_exhaustion(fake_pool, monkeypatch) -> None:
 
     monkeypatch.setattr("app.services.whatsapp.send_text", send_text)
     monkeypatch.setattr("app.services.messaging.asyncio.sleep", no_sleep)
-    row_id = await send_outbound(fake_pool, user, "hello", scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "hello", scope=_scope(user))
+    row_id = send_result["message_id"]
     assert fake_pool.messages[row_id]["processing_state"] == "processed"
     assert sleeps == [1, 2]
 
@@ -337,7 +371,8 @@ async def test_retry_success_and_exhaustion(fake_pool, monkeypatch) -> None:
         raise RuntimeError("down")
 
     monkeypatch.setattr("app.services.whatsapp.send_text", always_fails)
-    row_id = await send_outbound(fake_pool, user, "hello", scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "hello", scope=_scope(user))
+    row_id = send_result["message_id"]
     assert attempts == 3
     assert sleeps == [1, 2]
     assert fake_pool.messages[row_id]["processing_state"] == "expired"
@@ -358,11 +393,13 @@ async def test_pause_and_oob_hooks(fake_pool, monkeypatch) -> None:
 
     monkeypatch.setattr("app.services.hooks.paused_for_user", paused)
     monkeypatch.setattr("app.services.whatsapp.send_text", send_text)
-    row_id = await send_outbound(fake_pool, user, "hidden", scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "hidden", scope=_scope(user))
+    row_id = send_result["message_id"]
     assert fake_pool.messages[row_id]["processing_state"] == "withheld"
     assert sent == []
 
-    row_id = await send_outbound(fake_pool, user, "control", ignore_pause=True, scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "control", ignore_pause=True, scope=_scope(user))
+    row_id = send_result["message_id"]
     assert fake_pool.messages[row_id]["processing_state"] == "processed"
     assert sent == ["control"]
     sent.clear()
@@ -378,7 +415,8 @@ async def test_pause_and_oob_hooks(fake_pool, monkeypatch) -> None:
         return {"verdict": "rewrite", "reason": "too specific", "suggested_rewrite": "rewritten"}
 
     hooks.check_oob = rewrite
-    row_id = await send_outbound(fake_pool, user, "rough", scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "rough", scope=_scope(user))
+    row_id = send_result["message_id"]
     assert sent == []
     assert fake_pool.messages[row_id]["content"] == "rough"
     assert fake_pool.messages[row_id]["processing_state"] == "withheld"
@@ -393,7 +431,8 @@ async def test_pause_and_oob_hooks(fake_pool, monkeypatch) -> None:
         return {"verdict": "block", "reason": "blocked", "suggested_rewrite": None}
 
     hooks.check_oob = block
-    row_id = await send_outbound(fake_pool, user, "blocked", scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "blocked", scope=_scope(user))
+    row_id = send_result["message_id"]
     assert fake_pool.messages[row_id]["processing_state"] == "withheld"
 
 
@@ -409,8 +448,10 @@ async def test_global_pause_default_withholds_and_ignore_pause_bypasses(fake_poo
     monkeypatch.setattr("app.services.whatsapp.send_text", send_text)
     await system_state.pause(fake_pool, user.id)
 
-    withheld_id = await send_outbound(fake_pool, user, "ordinary", scope=_scope(user))
-    sent_id = await send_outbound(fake_pool, user, "control", ignore_pause=True, scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "ordinary", scope=_scope(user))
+    withheld_id = send_result["message_id"]
+    send_result = await send_outbound(fake_pool, user, "control", ignore_pause=True, scope=_scope(user))
+    sent_id = send_result["message_id"]
 
     assert fake_pool.messages[withheld_id]["processing_state"] == "withheld"
     assert fake_pool.messages[sent_id]["processing_state"] == "processed"
@@ -441,7 +482,8 @@ async def test_send_outbound_passes_protected_owner_ids_and_withholds_current_us
     monkeypatch.setattr("app.services.whatsapp.send_text", send_text)
     hooks.check_oob = block_current_user_leak
 
-    row_id = await send_outbound(fake_pool, user, "current-user protected detail", protected_owner_ids=protected_owner_ids, scope=_scope(user))
+    send_result = await send_outbound(fake_pool, user, "current-user protected detail", protected_owner_ids=protected_owner_ids, scope=_scope(user))
+    row_id = send_result["message_id"]
 
     assert sent == []
     assert len(oob_calls) == 1

@@ -135,10 +135,10 @@ class ScheduledJobHandlers:
         context = job.get("context") or {}
         message_ids = [UUID(value) for value in context.get("triggering_message_ids", [])]
         if message_ids:
-            await self.pool.execute(
-                "UPDATE messages SET processing_state='raw' WHERE id = ANY($1)",
-                message_ids,
-            )
+            # Let _run_agentic handle claiming atomically via its pre-LLM
+            # claim gate.  If the messages were already handled since the job
+            # was scheduled, the claim gate will return zero claimed and
+            # abort before any turn/LLM work.
             await run_agentic_turn(message_ids, user, scope=scope)
 
     async def handle_scheduled_task(self, job: dict[str, Any]) -> None:

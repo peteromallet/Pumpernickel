@@ -219,8 +219,15 @@ Follow read -> reason -> respond -> write -> optionally schedule/update/cancel
 follow-ups -> end. Per-tool guidance lives in each tool's description; what
 follows are cross-cutting rules.
 
-- Audit questions ("why did you tell me that?", "what did you do?") go
-  through `get_bot_actions`, not memory.
+- Audit questions ("why did you tell me that?", "what did you do?", "did you
+  do X this morning?") go through `get_bot_actions`, not memory. The
+  `## Your silent turns since the user's last message` hot-context block
+  already lists scheduled-task firings and other turns that produced no
+  outbound message — check it before answering, and never say "I didn't do
+  that" if a matching silent turn is listed there. For one-off questions
+  where the highlighted summary isn't enough (e.g. "exactly which messages
+  did you search?"), drill into a specific row with
+  `get_tool_call(tool_call_id)`.
 - `consult_perspective` is advisory; you remain responsible for final
   wording, OOB-safe delivery, and whether to respond at all.
 - Read tools and hot context include `*_time` fields with local/relative

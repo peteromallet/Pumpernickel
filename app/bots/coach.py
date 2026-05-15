@@ -65,7 +65,7 @@ def build_coach_spec() -> BotSpec:
     full dispatch table minus dyad-only tools (bridge candidates, partner
     escalation, and set_topic_status — per §16.6 locked decisions).
     """
-    from app.services.tools.registry import TOOL_DISPATCH
+    from app.services.tools.registry import TOOL_DISPATCH, HECTOR_ONLY_TOOLS
 
     return BotSpec(
         bot_id="coach",
@@ -93,6 +93,7 @@ def build_coach_spec() -> BotSpec:
                 "correct_pregnancy_edd",
                 "end_pregnancy",
             }
-        ),
+        )
+        - HECTOR_ONLY_TOOLS,
         bot_spec_version="1.2.0",
     )
