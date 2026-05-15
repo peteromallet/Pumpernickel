@@ -1140,7 +1140,7 @@ async def get_bot_actions(
         LEFT JOIN messages om ON om.id = bt.final_output_message_id
         LEFT JOIN tool_calls tc ON tc.turn_id = bt.id
         {where}
-        GROUP BY bt.id, tm.content, om.content
+        GROUP BY bt.id, tm.content, tm.handling_result, tm.processing_error, om.content
         ORDER BY bt.started_at DESC
         LIMIT ${len(params)}
         """,
