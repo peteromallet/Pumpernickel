@@ -289,7 +289,19 @@ async def test_deepseek_failure_falls_back_to_anthropic(app_env, monkeypatch):
         "system",
         "context",
         READ_PHASE_TOOLS,
-        [{"role": "user", "content": "Phase A"}],
+        [
+            {"role": "user", "content": "Phase A"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "openai_assistant_message",
+                        "message": {"role": "assistant", "content": "native"},
+                    },
+                    {"type": "text", "text": "keep me"},
+                ],
+            },
+        ],
         model="deepseek-chat",
         provider="deepseek",
     )
@@ -298,6 +310,9 @@ async def test_deepseek_failure_falls_back_to_anthropic(app_env, monkeypatch):
     assert tool_count == 0
     assert events.count("deepseek_call") == 2
     assert events.count("client_call") == 1
+    assert requests[0]["messages"][1]["content"] == [
+        {"type": "text", "text": "keep me"}
+    ]
 
 
 def test_peter_uses_deepseek_and_hannah_stays_anthropic(app_env, monkeypatch):

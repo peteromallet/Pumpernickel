@@ -346,7 +346,7 @@ async def _create_message_with_retry(
                     model=settings.conversational_model,
                     max_tokens=max_tokens,
                     system=system,
-                    messages=messages,
+                    messages=_anthropic_safe_messages(messages),
                     tools=tools,
                 )
                 await _record_response_cost(
@@ -371,6 +371,30 @@ async def _create_message_with_retry(
         )
         return response
     raise LLMPhaseError(str(last_error or f"{provider} message create failed"))
+
+
+def _anthropic_safe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip provider-native blocks that Anthropic's API cannot accept."""
+    safe: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            safe.append(dict(message))
+            continue
+        filtered = [
+            block
+            for block in content
+            if not (
+                isinstance(block, dict)
+                and block.get("type")
+                in {"openai_assistant_message", "reasoning_content"}
+            )
+        ]
+        if filtered:
+            next_message = dict(message)
+            next_message["content"] = filtered
+            safe.append(next_message)
+    return safe
 
 
 async def run_step(
