@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from app.bots.registry import BOT_SPECS, _maybe_register_staging_bots
 from app.config import get_settings
 from app.db import get_pool
-from app.services.live.prep import StubAgendaProducer, produce_agenda
+from app.services.live.prep import produce_agenda, select_agenda_producer
 from app.services.live.schemas import PrepRequest, TurnRequest
 from app.services.live.stt import select_transcriber
 from app.services.live.synthesis import finalize_session, save_review, synthesize_review
@@ -255,7 +255,7 @@ async def create_session(
         topic_slug=body.topic,
     )
     try:
-        result = await produce_agenda(pool, request, producer=StubAgendaProducer())
+        result = await produce_agenda(pool, request, producer=select_agenda_producer())
     except Exception as exc:
         logger.exception("live_voice: prep failed")
         raise HTTPException(

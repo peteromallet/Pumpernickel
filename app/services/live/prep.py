@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -25,6 +26,22 @@ from app.services.live.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def select_agenda_producer() -> "AgendaProducer":
+    """Pick the agenda producer based on env.
+
+    * ``LIVE_VOICE_PREP_PROVIDER=stub`` (or missing real ANTHROPIC_API_KEY) →
+      :class:`StubAgendaProducer`.
+    * ``LIVE_VOICE_PREP_PROVIDER=anthropic`` (default when key is real) →
+      :class:`AnthropicOpusAgendaProducer`.
+    """
+    provider = (os.environ.get("LIVE_VOICE_PREP_PROVIDER") or "").strip().lower()
+    api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    has_real_key = api_key.startswith("sk-ant-") and "stub" not in api_key
+    if provider == "stub" or (provider == "" and not has_real_key):
+        return StubAgendaProducer()
+    return AnthropicOpusAgendaProducer()
 
 
 class AgendaProducer(Protocol):
@@ -273,3 +290,89 @@ class StubAgendaProducer:
         )
         # Round-trip validates the schema (raises on internal-ref / uniqueness failures).
         return Agenda.model_validate(json.loads(agenda.model_dump_json()))
+
+
+# --------------------------------------------------------------------------- #
+# Real impl: Anthropic Opus via function-calling.
+# --------------------------------------------------------------------------- #
+
+
+class AnthropicOpusAgendaProducer:
+    """Real Opus-driven agenda producer (gated on a real ANTHROPIC_API_KEY).
+
+    Schema-validated: Opus is forced to emit the ``compose_agenda`` tool;
+    we validate the tool input through :class:`Agenda` before returning.
+    Tests skip this impl by selecting the stub.
+    """
+
+    def __init__(self, *, model: str = "claude-opus-4-7") -> None:
+        self._model = model
+
+    async def __call__(self, request: PrepRequest, context: dict[str, Any]) -> Agenda:
+        try:
+            import anthropic
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(f"anthropic SDK unavailable: {exc}") from exc
+
+        client = anthropic.AsyncAnthropic()
+        user_info = context.get("user") or {}
+        themes = context.get("themes") or []
+        distillations = context.get("distillations") or []
+
+        system = [
+            {
+                "type": "text",
+                "text": (
+                    "You are preparing a live voice conversation between a user and a "
+                    "Veas coach bot. Produce a checklist agenda the bot can drive. "
+                    "Stay grounded in the user's recent state. Output ONLY via the "
+                    "compose_agenda tool — never plain text. Items must include at "
+                    "least one 'must' priority anchored to the user's stated intent."
+                ),
+            },
+            {
+                "type": "text",
+                "text": (
+                    "USER CONTEXT:\n"
+                    f"- name: {user_info.get('name') or '(unknown)'}\n"
+                    f"- timezone: {user_info.get('timezone') or '(unknown)'}\n"
+                    f"- style_notes: {user_info.get('style_notes') or '(none)'}\n"
+                    f"- bot: {request.bot_id}\n"
+                ),
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": "EXISTING THEMES:\n" + json.dumps(themes, indent=2),
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": "RECENT DISTILLATIONS:\n" + json.dumps(distillations, indent=2),
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+
+        user_message = (
+            f"Build an agenda for the conversation. "
+            f"Steering text from user (may be empty): {request.steering_text or '(none)'}\n"
+            f"Topic slug: {request.topic_slug or '(none)'}\n"
+            f"Aim for 3-6 items. Include 1-2 must items anchored to the steering."
+        )
+        tool = {
+            "name": "compose_agenda",
+            "description": "Return the structured Agenda for this prep step.",
+            "input_schema": Agenda.model_json_schema(),
+        }
+        resp = await client.messages.create(
+            model=self._model,
+            max_tokens=2048,
+            system=system,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "compose_agenda"},
+            messages=[{"role": "user", "content": user_message}],
+        )
+        for block in resp.content:
+            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "compose_agenda":
+                return Agenda.model_validate(block.input)
+        raise RuntimeError("Opus did not emit compose_agenda tool_use")
