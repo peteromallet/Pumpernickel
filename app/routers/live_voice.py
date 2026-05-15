@@ -27,8 +27,9 @@ from app.bots.registry import BOT_SPECS, _maybe_register_staging_bots
 from app.config import get_settings
 from app.db import get_pool
 from app.services.live.prep import StubAgendaProducer, produce_agenda
-from app.services.live.schemas import PrepRequest
+from app.services.live.schemas import PrepRequest, TurnRequest
 from app.services.live.stt import select_transcriber
+from app.services.live.turn_loop import apply_emission, load_turn_context, select_turn_caller
 
 logger = logging.getLogger(__name__)
 
@@ -404,7 +405,11 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
 
         pool = websocket.app.state.pool
 
+        turn_caller = select_turn_caller()
+
         async def forward_events() -> None:
+            from uuid import UUID as _UUID
+            session_uuid = _UUID(session_id)
             while True:
                 event = await transcriber.events.get()
                 etype = event.get("type")
@@ -426,10 +431,50 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                             logger.warning(
                                 "live_voice: failed to persist transcript_turn", exc_info=True
                             )
-                # Forward to client regardless.
+                # Forward STT event to client regardless.
                 await websocket.send_json({"type": f"transcript_{etype}", **{
                     k: v for k, v in event.items() if k != "type"
                 }})
+
+                if etype == "final" and (event.get("text") or "").strip():
+                    # Drive a bot turn off the user's final transcript.
+                    try:
+                        ctx = await load_turn_context(pool, session_uuid)
+                        emission = await turn_caller.call(
+                            TurnRequest(
+                                session_id=str(session_uuid),
+                                user_transcript_final=event["text"],
+                            ),
+                            ctx,
+                        )
+                    except Exception as exc:
+                        await websocket.send_json({
+                            "type": "bot_turn_error",
+                            "message": str(exc),
+                        })
+                        continue
+                    try:
+                        await apply_emission(pool, session_uuid, emission)
+                    except Exception:
+                        logger.warning("live_voice: apply_emission failed", exc_info=True)
+                    try:
+                        await pool.execute(
+                            """
+                            INSERT INTO mediator.transcript_turns
+                                (conversation_id, speaker_label, speaker_role, text)
+                            VALUES ($1::uuid, 'bot', 'bot', $2)
+                            """,
+                            session_id,
+                            emission.utterance,
+                        )
+                    except Exception:
+                        logger.warning("live_voice: failed to persist bot turn", exc_info=True)
+                    await websocket.send_json({
+                        "type": "bot_turn",
+                        "utterance": emission.utterance,
+                        "route_to_item_id": emission.route_to_item_id,
+                        "notes": [n.model_dump() for n in emission.notes],
+                    })
 
         forwarder_task = asyncio.create_task(forward_events())
 

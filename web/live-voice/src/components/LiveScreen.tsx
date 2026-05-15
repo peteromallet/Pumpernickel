@@ -69,6 +69,25 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
         } else if (parsed?.type === "transcript_error") {
           kind = "error";
           text = `STT error: ${parsed.message ?? "unknown"}`;
+        } else if (parsed?.type === "bot_turn") {
+          kind = "phase";
+          text = `${persona.display_name}: ${parsed.utterance}`;
+          // v0 TTS fallback: speak the bot utterance via the browser's
+          // SpeechSynthesis API. Real ElevenLabs Flash lands in Sprint 3b.
+          try {
+            if (typeof window !== "undefined" && "speechSynthesis" in window) {
+              const u = new SpeechSynthesisUtterance(parsed.utterance);
+              u.rate = 1.0;
+              u.pitch = 1.0;
+              window.speechSynthesis.cancel();
+              window.speechSynthesis.speak(u);
+            }
+          } catch {
+            // ignore — TTS is best-effort
+          }
+        } else if (parsed?.type === "bot_turn_error") {
+          kind = "error";
+          text = `Bot turn failed: ${parsed.message ?? "unknown"}`;
         } else {
           text = parsed.label ?? parsed.phase ?? parsed.text ?? JSON.stringify(parsed);
         }

@@ -1,8 +1,351 @@
-"""Sprint 3+ Haiku turn-loop — emit_live_turn structured-output caller.
+"""Sprint 3 — Haiku per-turn caller.
 
-Placeholder for Sprint 0; full behavior lands in Sprint 3.
+Contract (:class:`TurnCaller`): given a fresh user transcript, return one
+:class:`~app.services.live.schemas.TurnEmission`.  The orchestrator then
+applies it atomically to the DB.
+
+Ships two impls:
+
+* :class:`StubTurnCaller` — deterministic stub for dev/no-key runs.
+  Generates a plausible mediator-style utterance, advances coverage on the
+  current item, and notes a single "fact".  Wire protocol is identical to
+  the real Haiku caller.
+* :class:`AnthropicHaikuTurnCaller` — calls Claude Haiku 4.5 with the
+  agenda prompt-cached.  Selected when ``LIVE_VOICE_TURN_PROVIDER=anthropic``
+  AND ``ANTHROPIC_API_KEY`` is a real key.  Schema-validated.
 """
 
 from __future__ import annotations
 
-__all__ = ["__doc__"]
+import logging
+import os
+import time
+from typing import Any, Protocol
+from uuid import UUID
+
+from app.services.live.schemas import (
+    CoverageDelta,
+    TurnEmission,
+    TurnNote,
+    TurnRequest,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class TurnCaller(Protocol):
+    async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission: ...
+
+
+def select_turn_caller() -> "TurnCaller":
+    provider = (os.environ.get("LIVE_VOICE_TURN_PROVIDER") or "").strip().lower()
+    api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    has_real_key = api_key.startswith("sk-ant-") and "stub" not in api_key
+    if provider == "stub" or (provider == "" and not has_real_key):
+        return StubTurnCaller()
+    return AnthropicHaikuTurnCaller()
+
+
+async def load_turn_context(pool: Any, session_id: UUID) -> dict[str, Any]:
+    """Pull what Haiku needs to plan a turn: conversation row, current item,
+    last few transcript_turns, items still pending.
+    """
+    context: dict[str, Any] = {"session_id": str(session_id)}
+    try:
+        conv = await pool.fetchrow(
+            """
+            SELECT id, user_id, bot_id, prep_summary, current_item_id,
+                   session_fields, status
+            FROM mediator.conversations
+            WHERE id = $1
+            """,
+            session_id,
+        )
+    except Exception:
+        logger.warning("turn_loop: failed to load conversation row", exc_info=True)
+        return context
+    if conv is None:
+        return context
+    context["conversation"] = {k: v for k, v in dict(conv).items()}
+
+    try:
+        items = await pool.fetch(
+            """
+            SELECT id, title, intent, ask, done_when, status, priority, order_hint
+            FROM mediator.conversation_items
+            WHERE conversation_id = $1
+            ORDER BY order_hint, created_at
+            """,
+            session_id,
+        )
+        context["items"] = [dict(r) for r in items]
+    except Exception:
+        context["items"] = []
+
+    try:
+        last_turns = await pool.fetch(
+            """
+            SELECT speaker_role, speaker_label, text, ts
+            FROM mediator.transcript_turns
+            WHERE conversation_id = $1
+            ORDER BY ts DESC
+            LIMIT 8
+            """,
+            session_id,
+        )
+        context["last_turns"] = list(reversed([dict(r) for r in last_turns]))
+    except Exception:
+        context["last_turns"] = []
+
+    return context
+
+
+async def apply_emission(pool: Any, session_id: UUID, emission: TurnEmission) -> None:
+    """Atomic apply of a validated TurnEmission to the DB.
+
+    * Coverage: bump conversation_items.status (+ coverage fields) for each delta.
+    * new_items: insert as conversation_items with kind in {dynamic, thread}.
+    * notes: insert as conversation_notes rows.
+    * session_fields_patch: shallow-merge into conversations.session_fields.
+    * route_to_item_id: update conversations.current_item_id.
+
+    Maps Haiku's stable string item ids to DB UUIDs via title lookup for
+    coverage on planned items (the stub uses titles); the real Haiku
+    caller will be given UUIDs in its prompt so it returns them directly.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for delta in emission.coverage:
+                # Coverage targets may arrive as either a UUID string or a
+                # planning-time id (e.g. "must_anchor").  Resolve via UUID
+                # first, fall back to title prefix match for the stub.
+                target_uuid = _maybe_uuid(delta.item_id)
+                if target_uuid is None:
+                    # Stub-id path: match against the title prefix that
+                    # StubAgendaProducer baked in.
+                    row = await conn.fetchrow(
+                        """
+                        SELECT id FROM mediator.conversation_items
+                        WHERE conversation_id = $1 AND title ILIKE $2 || '%'
+                        ORDER BY order_hint
+                        LIMIT 1
+                        """,
+                        session_id,
+                        delta.item_id[:8],  # best-effort
+                    )
+                    if row is None:
+                        continue
+                    target_uuid = row["id"]
+                await conn.execute(
+                    """
+                    UPDATE mediator.conversation_items
+                    SET status = $2,
+                        coverage_evidence_quote = COALESCE($3, coverage_evidence_quote),
+                        coverage_summary = COALESCE($4, coverage_summary),
+                        covered_at = CASE WHEN $2 = 'covered' THEN now() ELSE covered_at END
+                    WHERE id = $1
+                    """,
+                    target_uuid,
+                    delta.status,
+                    delta.evidence_quote,
+                    delta.summary,
+                )
+
+            for new in emission.new_items:
+                await conn.execute(
+                    """
+                    INSERT INTO mediator.conversation_items
+                        (conversation_id, kind, title, intent, ask, done_when,
+                         priority, speaker_scope, coverage_evidence_required)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    """,
+                    session_id,
+                    new.kind,
+                    new.title,
+                    new.intent,
+                    new.ask,
+                    new.done_when,
+                    new.priority,
+                    new.speaker_scope,
+                    new.coverage_evidence_required,
+                )
+
+            for note in emission.notes:
+                # conversation_notes has no `kind` column; encode kind as a
+                # short text prefix so we don't lose it.
+                await conn.execute(
+                    """
+                    INSERT INTO mediator.conversation_notes
+                        (conversation_id, text)
+                    VALUES ($1, $2)
+                    """,
+                    session_id,
+                    f"[{note.kind}] {note.text}",
+                )
+
+            if emission.session_fields_patch:
+                # Shallow-merge: read current, patch, write back.
+                row = await conn.fetchrow(
+                    "SELECT session_fields FROM mediator.conversations WHERE id = $1",
+                    session_id,
+                )
+                current = dict(row["session_fields"] or {}) if row else {}
+                current.update(emission.session_fields_patch)
+                import json as _json
+                await conn.execute(
+                    "UPDATE mediator.conversations SET session_fields = $2 WHERE id = $1",
+                    session_id,
+                    _json.dumps(current),
+                )
+
+            if emission.route_to_item_id:
+                target = _maybe_uuid(emission.route_to_item_id)
+                if target is not None:
+                    await conn.execute(
+                        "UPDATE mediator.conversations SET current_item_id = $2 WHERE id = $1",
+                        session_id,
+                        target,
+                    )
+
+
+def _maybe_uuid(value: str) -> UUID | None:
+    try:
+        return UUID(value)
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Stub impl.
+# --------------------------------------------------------------------------- #
+
+
+class StubTurnCaller:
+    """Deterministic stub used in dev / tests / no-Anthropic-key local runs."""
+
+    def __init__(self) -> None:
+        self._turn_count = 0
+
+    async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission:
+        self._turn_count += 1
+        items = context.get("items") or []
+        current_id = (context.get("conversation") or {}).get("current_item_id")
+        current_title = "this"
+        next_item_id = None
+        for item in items:
+            if item["id"] == current_id:
+                current_title = item["title"]
+            if item["status"] in ("pending", "active") and str(item["id"]) != str(current_id):
+                next_item_id = str(item["id"])
+                break
+
+        user_text = (request.user_transcript_final or "").strip()
+        utterance = (
+            f"Thanks for sharing that. I hear you saying: \"{user_text[:120]}\". "
+            f"Let's stay with this for a moment before we move on."
+        )
+        coverage: list[CoverageDelta] = []
+        if current_id:
+            coverage.append(
+                CoverageDelta(
+                    item_id=str(current_id),
+                    status="covered" if self._turn_count >= 1 else "active",
+                    evidence_quote=user_text[:200] or "(no transcript)",
+                    summary=f"Stub coverage update for {current_title!r}.",
+                )
+            )
+        notes: list[TurnNote] = [
+            TurnNote(kind="fact", text=f"Turn {self._turn_count}: user said {user_text[:80]!r}.")
+        ]
+        return TurnEmission(
+            utterance=utterance,
+            route_to_item_id=next_item_id,
+            coverage=coverage,
+            notes=notes,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Real impl: Anthropic Haiku 4.5 with prompt-cached agenda.
+# --------------------------------------------------------------------------- #
+
+
+class AnthropicHaikuTurnCaller:
+    """Real Haiku caller; not exercised in the stub-key local run.
+
+    Implementation outline (left intentionally tight so it can be
+    iterated against a real key):
+
+    * Build a system prompt that loads the agenda + last_turns + current
+      item details (prompt-cached via `cache_control: {type:"ephemeral"}`).
+    * Tool schema: a single tool named ``emit_live_turn`` whose JSON
+      schema mirrors :class:`TurnEmission`.
+    * Force tool use; parse the resulting tool_use block; validate via
+      :class:`TurnEmission`; return.
+    """
+
+    def __init__(self, *, model: str = "claude-haiku-4-5-20251001") -> None:
+        self._model = model
+
+    async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission:
+        import json
+        try:
+            import anthropic
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(f"anthropic SDK unavailable: {exc}") from exc
+
+        client = anthropic.AsyncAnthropic()
+        conv = context.get("conversation") or {}
+        items = context.get("items") or []
+        last_turns = context.get("last_turns") or []
+
+        system = [
+            {
+                "type": "text",
+                "text": (
+                    "You are a live-voice mediator-style coach. Always respond with the "
+                    "emit_live_turn tool; never use plain text. The agenda below is the "
+                    "checklist you must drive. Stay grounded, short utterances (<= 60 "
+                    "words), and only mark an item 'covered' when you can quote the user."
+                ),
+            },
+            {
+                "type": "text",
+                "text": f"PREP SUMMARY:\n{conv.get('prep_summary') or '(no prep summary)'}",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": "AGENDA:\n" + json.dumps([{
+                    "id": str(i["id"]),
+                    "title": i["title"],
+                    "status": i["status"],
+                    "priority": i["priority"],
+                    "intent": i.get("intent"),
+                    "ask": i.get("ask"),
+                    "done_when": i.get("done_when"),
+                } for i in items], indent=2),
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        user_content = "RECENT TRANSCRIPT:\n" + "\n".join(
+            f"- [{t['speaker_role']}] {t['text']}" for t in last_turns[-6:]
+        ) + f"\n\nLATEST USER UTTERANCE:\n{request.user_transcript_final}"
+
+        tool = {
+            "name": "emit_live_turn",
+            "description": "Emit exactly one structured turn output.",
+            "input_schema": TurnEmission.model_json_schema(),
+        }
+        resp = await client.messages.create(
+            model=self._model,
+            max_tokens=1024,
+            system=system,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "emit_live_turn"},
+            messages=[{"role": "user", "content": user_content}],
+        )
+        for block in resp.content:
+            if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "emit_live_turn":
+                return TurnEmission.model_validate(block.input)
+        raise RuntimeError("Haiku did not emit a tool_use; check tool_choice settings")

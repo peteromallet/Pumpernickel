@@ -107,3 +107,68 @@ class PrepResult(BaseModel):
     agenda: Agenda
     items_persisted: int
     current_item_id: str  # DB UUID of the row matching first_item_id
+
+
+# --------------------------------------------------------------------------- #
+# Sprint 3 — emit_live_turn schema.
+#
+# Mirrors the shape in docs/live-conversation-mode.md.  Each Haiku call must
+# return exactly one TurnEmission; the orchestrator validates + applies it
+# atomically.
+# --------------------------------------------------------------------------- #
+
+
+class CoverageDelta(BaseModel):
+    """Coverage report for one agenda item produced by this turn."""
+
+    item_id: str
+    status: Literal["pending", "active", "covered", "skipped"]
+    evidence_quote: str | None = Field(default=None, max_length=400)
+    summary: str | None = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def covered_requires_quote(self) -> "CoverageDelta":
+        if self.status == "covered" and not (self.evidence_quote or "").strip():
+            raise ValueError("status=covered requires a non-empty evidence_quote")
+        return self
+
+
+class NewAgendaItem(BaseModel):
+    """A dynamic/thread item Haiku introduced mid-turn."""
+
+    id: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    title: str = Field(..., min_length=1, max_length=200)
+    kind: Literal["dynamic", "thread"] = "dynamic"
+    intent: str | None = Field(default=None, max_length=400)
+    ask: str | None = Field(default=None, max_length=400)
+    done_when: str | None = Field(default=None, max_length=400)
+    priority: ItemPriority = "should"
+    speaker_scope: SpeakerScope = "primary"
+    coverage_evidence_required: CoverageEvidence = "explicit_answer"
+    parent_item_id: str | None = None
+
+
+class TurnNote(BaseModel):
+    """A short session-local fact Haiku wants to remember."""
+
+    kind: Literal["fact", "open_loop", "concern", "decision"]
+    text: str = Field(..., min_length=1, max_length=400)
+
+
+class TurnEmission(BaseModel):
+    """Exactly one structured output per Haiku turn."""
+
+    utterance: str = Field(..., min_length=1, max_length=2000)
+    route_to_item_id: str | None = Field(default=None, description="Next current_item_id")
+    coverage: list[CoverageDelta] = Field(default_factory=list)
+    new_items: list[NewAgendaItem] = Field(default_factory=list)
+    notes: list[TurnNote] = Field(default_factory=list)
+    session_fields_patch: dict[str, object] = Field(default_factory=dict)
+
+
+class TurnRequest(BaseModel):
+    """Inputs to a Haiku turn call."""
+
+    session_id: str
+    user_transcript_final: str = Field(..., min_length=1)
+    last_speaker_role: Literal["primary", "partner"] = "primary"

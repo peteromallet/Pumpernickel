@@ -197,7 +197,18 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] Backend smoke test verified end-to-end (Python websockets client → 80 frames of silence → 2 stub finals persisted to DB).
   - [ ] `conversation_consent_events` row writes from `/api/live/sessions/{id}/consent` (frontend collects consent but the row insert is pending)
   - [ ] `tests/test_no_audio_persistence.py` — assert frames never survive request scope
-- [ ] **Sprint 3 — Haiku bot turns + TTS + review screen** (`emit_live_turn` schema, ElevenLabs Flash TTS, controls footer, non-skippable review; not started)
+- [~] **Sprint 3 — Haiku bot turns + TTS + review screen** (turn loop end-to-end on stub; ElevenLabs + review screen pending)
+  - [x] `emit_live_turn` schema in `app/services/live/schemas.py` — `TurnEmission` with `utterance`, `route_to_item_id`, `coverage[]`, `new_items[]`, `notes[]`, `session_fields_patch`. CoverageDelta enforces "no quote, no coverage" via Pydantic validator.
+  - [x] `app/services/live/turn_loop.py` — `TurnCaller` protocol + `StubTurnCaller` (deterministic) + `AnthropicHaikuTurnCaller` (Haiku 4.5, prompt-cached agenda + tool-forcing). `select_turn_caller()` picks based on `LIVE_VOICE_TURN_PROVIDER` / `ANTHROPIC_API_KEY` presence.
+  - [x] `apply_emission()` — atomic DB write: bumps `conversation_items.status` + coverage fields, inserts `new_items`, writes `conversation_notes`, merges `session_fields_patch`, advances `current_item_id`. All in one `BEGIN…COMMIT`.
+  - [x] WS handler: on every `transcript_final`, loads turn context, calls turn caller, applies emission, persists the bot utterance as a `transcript_turns` row with `speaker_role='bot'`, emits `bot_turn` event to client.
+  - [x] LiveScreen renders `bot_turn` as `"{persona}: {utterance}"` AND speaks it via browser SpeechSynthesis (v0 TTS until ElevenLabs).
+  - [x] Verified end-to-end via Python WS smoke: 3 transcript_finals → 3 bot turns → 6 transcript_turns rows (3 user + 3 bot) → all 3 agenda items advanced to `covered` → 3 notes captured.
+  - [ ] ElevenLabs Flash TTS streaming over WSS (real audio playback)
+  - [ ] Per-turn budget guard (`$2 soft / $4 hard` per session)
+  - [ ] Crisis classifier wrap (`crisis_solo.py` + `text_safety.py`)
+  - [ ] Post-session review screen (4-section editor + write-through to observations/distillations/themes)
+  - [ ] Controls footer wiring: Pause/Repeat/Back-up/Slow-down/Skip semantics
 - [ ] **Sprint 4 — VAD + barge-in + latency polish** (not started)
 - [ ] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring + smoke test pending)
 
