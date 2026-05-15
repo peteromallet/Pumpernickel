@@ -56,7 +56,9 @@ HECTOR_READ_INSTRUCTION = (
     "context is not enough. For durable routine constraints, equipment, "
     "timing, recurring blockers, or tactics that might need recording later, "
     "read existing `get_memories` and/or `get_observations` first. Do not "
-    "write durable state or send user-facing text from this step."
+    "repeat a read tool that already returned enough context or an empty "
+    "result; move on to the response instead. Do not write durable state or "
+    "send user-facing text from this step."
 )
 
 HECTOR_CONSULT_INSTRUCTION = (

@@ -2328,6 +2328,45 @@ class FakePool:
                     seen.add(key)
                     rows.append({"bot_id": bid, "topic_id": tid})
             return rows
+        if compact.startswith("SELECT m.id, m.sender_id AS user_id, m.bot_id, m.topic_id FROM messages m"):
+            max_retries = args[0] if args else 3
+            rows = []
+            for msg in self.messages.values():
+                if msg.get("direction") != "inbound":
+                    continue
+                if msg.get("processing_state") != "raw":
+                    continue
+                sent_at = msg.get("sent_at")
+                if sent_at is not None and sent_at >= datetime.now(UTC) - timedelta(seconds=30):
+                    continue
+                has_prior_turn = any(
+                    msg["id"] in (turn.get("triggering_message_ids") or [])
+                    for turn in self.bot_turns.values()
+                )
+                retryable_failed_raw = (
+                    msg.get("processing_attempts", 0) < max_retries
+                    and (
+                        msg.get("handling_result") == "failed"
+                        or any(
+                            msg["id"] in (turn.get("triggering_message_ids") or [])
+                            and turn.get("failure_reason") is not None
+                            and turn.get("final_output_message_id") is None
+                            and msg.get("processing_attempts", 0) > 0
+                            for turn in self.bot_turns.values()
+                        )
+                    )
+                )
+                if has_prior_turn and not retryable_failed_raw:
+                    continue
+                rows.append(
+                    {
+                        "id": msg["id"],
+                        "user_id": msg.get("sender_id"),
+                        "bot_id": msg.get("bot_id"),
+                        "topic_id": msg.get("topic_id"),
+                    }
+                )
+            return rows
         if (
             compact.startswith("SELECT id FROM messages WHERE id = ANY")
             and "sender_id=$2 OR recipient_id=$2" in compact

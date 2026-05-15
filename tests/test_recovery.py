@@ -122,6 +122,52 @@ async def test_already_marked_crashed_turn_is_not_requeued_again(fake_pool) -> N
     assert coalescer.add_calls == []
 
 
+async def test_failed_raw_message_requeues_to_matching_bot_coalescer(fake_pool) -> None:
+    user = _seed_user(fake_pool)
+    message_id = _seed_message(fake_pool, user)
+    topic_id = get_relationship_topic_id()
+    fake_pool.messages[message_id].update(
+        {
+            "bot_id": "hector",
+            "topic_id": topic_id,
+            "processing_state": "raw",
+            "handling_result": "failed",
+            "processing_attempts": 1,
+            "processing_error": "BoundedLoopExceeded: tool iteration cap exceeded: 6",
+        }
+    )
+    turn_id = uuid4()
+    fake_pool.bot_turns[turn_id] = {
+        "id": turn_id,
+        "triggering_message_ids": [message_id],
+        "user_in_context": user.id,
+        "started_at": datetime.now(UTC) - timedelta(minutes=1),
+        "completed_at": None,
+        "failure_reason": "tool iteration cap exceeded: 6",
+        "reasoning": "",
+        "final_output_message_id": None,
+        "bot_id": "hector",
+        "topic_id": topic_id,
+    }
+    mediator_coalescer = CoalescerRecorder()
+    hector_coalescer = CoalescerRecorder()
+
+    await recover_on_startup(
+        fake_pool,
+        {"mediator": mediator_coalescer, "hector": hector_coalescer},
+    )
+
+    assert mediator_coalescer.add_calls == []
+    assert len(hector_coalescer.add_calls) == 1
+    assert hector_coalescer.add_calls[0][:4] == (
+        user.id,
+        message_id,
+        user,
+        "recovery",
+    )
+    assert hector_coalescer.add_calls[0][4].bot_id == "hector"
+
+
 async def test_turn_that_crashed_after_send_is_not_requeued(fake_pool) -> None:
     user = _seed_user(fake_pool)
     ids = [_seed_message(fake_pool, user)]

@@ -410,6 +410,15 @@ async def run_step(
             max_tool_iterations is not None
             and tool_iteration_count > max_tool_iterations
         ):
+            if ctx.current_step == "read":
+                logger.warning(
+                    "read step tool iteration cap reached; advancing without failing turn "
+                    "turn_id=%s cap=%d",
+                    ctx.turn_id,
+                    max_tool_iterations,
+                    extra=obs_fields(ctx),
+                )
+                return "", messages, tool_call_count
             raise BoundedLoopExceeded(
                 f"tool iteration cap exceeded: {max_tool_iterations}"
             )

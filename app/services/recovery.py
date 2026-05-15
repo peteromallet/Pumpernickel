@@ -14,6 +14,13 @@ from app.services.scope import scope_from_bot_turn_row, scope_from_message_row
 logger = logging.getLogger(__name__)
 
 
+def _coalescer_for_scope(coalescers: Any, bot_id: str) -> Any | None:
+    """Resolve the right bot coalescer while preserving old single-coalescer callers."""
+    if isinstance(coalescers, dict):
+        return coalescers.get(bot_id)
+    return coalescers
+
+
 async def _recovery_scopes(pool: Any) -> dict[str, set[UUID]]:
     """Build a map of bot_id → set(topic_id) for all inbound messages in
     recoverable states (raw/processing/failed).
@@ -124,7 +131,15 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
                 scope.user_id,
             )
             continue
-        await coalescer.add_burst(user.id, message_ids, user, scope=scope)  # pause-check via send_outbound
+        target_coalescer = _coalescer_for_scope(coalescer, scope.bot_id)
+        if target_coalescer is None:
+            logger.warning(
+                "skipping crashed turn recovery for bot_turn_id=%s: no coalescer for bot_id=%s",
+                _row_get(row, "id"),
+                scope.bot_id,
+            )
+            continue
+        await target_coalescer.add_burst(user.id, message_ids, user, scope=scope)  # pause-check via send_outbound
 
     await pool.execute(
         """
@@ -154,6 +169,8 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         retention_cutoff,
     )
 
+    max_retries = settings.inbound_queue_max_retry_attempts
+
     raw_messages = await pool.fetch(
         """
         SELECT m.id, m.sender_id AS user_id, m.bot_id, m.topic_id
@@ -161,12 +178,29 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         WHERE m.direction = 'inbound'
           AND m.processing_state = 'raw'
           AND m.sent_at < now() - interval '30 seconds'
-          AND NOT EXISTS (
+          AND (
+            NOT EXISTS (
               SELECT 1
               FROM bot_turns bt
               WHERE bt.triggering_message_ids @> ARRAY[m.id]
+            )
+            OR (
+              m.processing_attempts < $1
+              AND (
+                m.handling_result = 'failed'
+                OR EXISTS (
+                  SELECT 1
+                  FROM bot_turns bt
+                  WHERE bt.triggering_message_ids @> ARRAY[m.id]
+                    AND bt.failure_reason IS NOT NULL
+                    AND bt.final_output_message_id IS NULL
+                    AND m.processing_attempts > 0
+                )
+              )
+            )
           )
-        """
+        """,
+        max_retries,
     )
     for row in raw_messages:
         try:
@@ -178,7 +212,15 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         if user is None:
             logger.warning("skipping raw message recovery for message_id=%s: missing user_id=%s", row["id"], scope.user_id)
             continue
-        await coalescer.add(user.id, row["id"], user, source="recovery", scope=scope)  # pause-check via send_outbound
+        target_coalescer = _coalescer_for_scope(coalescer, scope.bot_id)
+        if target_coalescer is None:
+            logger.warning(
+                "skipping raw message recovery for message_id=%s: no coalescer for bot_id=%s",
+                row["id"],
+                scope.bot_id,
+            )
+            continue
+        await target_coalescer.add(user.id, row["id"], user, source="recovery", scope=scope)  # pause-check via send_outbound
 
     # ── Recover stale inbound processing rows ──────────────────────────
     stale_processing_recovered = 0
@@ -204,7 +246,6 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         logger.info("recovery: total stale processing recovered=%d", stale_processing_recovered)
 
     # ── Recover retryable inbound failed rows ──────────────────────────
-    max_retries = settings.inbound_queue_max_retry_attempts
     failed_recovered = 0
     failed_scope_map = await _recovery_scopes(pool)
     for bot_id, topic_ids in failed_scope_map.items():

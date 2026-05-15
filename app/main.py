@@ -401,19 +401,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             if not started_ids and not skipped_ids:
                 logger.info("startup diagnostic discord_gateways=none_started")
-        # Recovery worker is mediator-only-aware today; if no mediator
-        # coalescer was built (e.g. discord with no mediator gateway), skip
-        # with a warning rather than crash.
-        # TODO(multi-bot-recovery): make recovery per-bot.
-        mediator_coalescer = app.state.coalescers.get("mediator")
-        if mediator_coalescer is not None:
-            await recover_on_startup(pool, mediator_coalescer)
-            recovery_task = asyncio.create_task(run_recovery_forever(pool, mediator_coalescer))
+        if app.state.coalescers:
+            await recover_on_startup(pool, app.state.coalescers)
+            recovery_task = asyncio.create_task(run_recovery_forever(pool, app.state.coalescers))
             app.state.background_tasks.add(recovery_task)
         else:
             logger.warning(
-                "recovery worker skipped: no mediator coalescer built — "
-                "recovery is not yet multi-bot-aware"
+                "recovery worker skipped: no bot coalescers built"
             )
         if settings.scheduler_enabled:
             await seed_heartbeat(pool, settings=settings)

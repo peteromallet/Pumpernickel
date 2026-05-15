@@ -130,6 +130,40 @@ async def test_run_step_uses_tools_cache_markers_and_records_spend(app_env):
     assert pool.llm_spend_log["text"] == Decimal("0.004815")
 
 
+async def test_read_step_tool_cap_advances_without_failing_turn(app_env):
+    events: list[str] = []
+    requests: list[dict] = []
+    pool = FakePool()
+    ctx = _ctx(pool)
+    responses = [
+        _response(
+            [{"type": "tool_use", "id": "toolu_1", "name": "get_memories", "input": {}}],
+            _usage(100, 0, 0, 20),
+            "tool_use",
+        ),
+        _response(
+            [{"type": "tool_use", "id": "toolu_2", "name": "get_observations", "input": {}}],
+            _usage(100, 0, 0, 20),
+            "tool_use",
+        ),
+    ]
+    client = FakeClient(responses, requests, events)
+
+    assistant_text, _messages, tool_count = await run_step(
+        client,
+        ctx,
+        "system prompt",
+        "context",
+        READ_PHASE_TOOLS,
+        [{"role": "user", "content": "Phase A"}],
+        max_tool_iterations=1,
+    )
+
+    assert assistant_text == ""
+    assert tool_count == 1
+    assert len(requests) == 2
+
+
 async def test_run_step_applies_cache_markers_in_record_step(app_env):
     events: list[str] = []
     requests: list[dict] = []
