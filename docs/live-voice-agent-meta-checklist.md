@@ -206,7 +206,7 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] Verified end-to-end via Python WS smoke: 3 transcript_finals → 3 bot turns → 6 transcript_turns rows (3 user + 3 bot) → all 3 agenda items advanced to `covered` → 3 notes captured.
   - [ ] ElevenLabs Flash TTS streaming over WSS (real audio playback)
   - [ ] Per-turn budget guard (`$2 soft / $4 hard` per session)
-  - [ ] Crisis classifier wrap (`crisis_solo.py` + `text_safety.py`)
+  - [x] Crisis classifier wrap — `app.services.charge.classify_charge` runs on every `transcript_final` (uses Anthropic Haiku when a real key is set, falls back to keyword heuristic when key is a placeholder). On `crisis` charge the regular Haiku turn is skipped; the bot speaks a scripted grounding line with 988 / Samaritans / Lifeline numbers, a `[concern]` note is captured, and the client receives `bot_turn` with `charge='crisis'` so the UI can surface a resource panel.
   - [x] Post-session review screen — backend `synthesize_review()` buckets coverage / transcript / notes into 4 sections; `POST /sessions/{id}/end` finalizes + returns review; `POST /sessions/{id}/review/save` accepts edits, persists coverage_summary patches + note text edits (or deletes), flips `conversations.status` to `synthesized`. React `ReviewScreen.tsx` renders the 4 sections with inline editors + Save / Discard. Verified end-to-end via curl: smoke session → end → 4-section payload → save → status='synthesized'. 2 new pytest cases ([empty, full buckets]). Write-through to observations/distillations/themes is the v1.1 follow-up.
   - [ ] Controls footer wiring: Pause/Repeat/Back-up/Slow-down/Skip semantics
 - [ ] **Sprint 4 — VAD + barge-in + latency polish** (not started)

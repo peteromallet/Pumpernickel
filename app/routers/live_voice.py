@@ -29,8 +29,17 @@ from app.db import get_pool
 from app.services.live.prep import produce_agenda, select_agenda_producer
 from app.services.live.schemas import PrepRequest, TurnRequest
 from app.services.live.stt import select_transcriber
+from app.services.charge import classify_charge
 from app.services.live.synthesis import finalize_session, save_review, synthesize_review
 from app.services.live.turn_loop import apply_emission, load_turn_context, select_turn_caller
+
+_CRISIS_UTTERANCE = (
+    "I'm staying with you. Right now, what matters most is reaching someone who "
+    "can be present with you safely. If you're in the US or Canada, please call or "
+    "text 988. UK / Ireland: Samaritans at 116 123. Australia: Lifeline 13 11 14. "
+    "If you're somewhere else, please reach a local crisis line or emergency services. "
+    "I'm here while you do that."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -548,13 +557,48 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                 }})
 
                 if etype == "final" and (event.get("text") or "").strip():
-                    # Drive a bot turn off the user's final transcript.
+                    # Crisis classifier first — if the user said something
+                    # that meets crisis criteria we drop the coach role
+                    # entirely (per crisis_solo.SOLO_CRISIS_SECTION_V1).
+                    user_text = event["text"]
+                    try:
+                        charge = await classify_charge(pool, user_text)
+                    except Exception:
+                        logger.warning("live_voice: charge classification crashed", exc_info=True)
+                        charge = None
+                    if charge is not None and charge.charge == "crisis":
+                        await pool.execute(
+                            """
+                            INSERT INTO mediator.transcript_turns
+                                (conversation_id, speaker_label, speaker_role, text)
+                            VALUES ($1::uuid, 'bot', 'bot', $2)
+                            """,
+                            session_id,
+                            _CRISIS_UTTERANCE,
+                        )
+                        await pool.execute(
+                            """
+                            INSERT INTO mediator.conversation_notes (conversation_id, text)
+                            VALUES ($1, $2)
+                            """,
+                            session_id,
+                            f"[concern] crisis charge detected: {charge.reason}",
+                        )
+                        await websocket.send_json({
+                            "type": "bot_turn",
+                            "utterance": _CRISIS_UTTERANCE,
+                            "charge": "crisis",
+                            "charge_reason": charge.reason,
+                        })
+                        continue
+
+                    # Drive a regular bot turn off the user's final transcript.
                     try:
                         ctx = await load_turn_context(pool, session_uuid)
                         emission = await turn_caller.call(
                             TurnRequest(
                                 session_id=str(session_uuid),
-                                user_transcript_final=event["text"],
+                                user_transcript_final=user_text,
                             ),
                             ctx,
                         )
