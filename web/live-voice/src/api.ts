@@ -123,3 +123,64 @@ export async function fetchSessionCard(
   );
   return handle<SessionCardPayload>(res);
 }
+
+export interface ReviewItem {
+  item_id: string;
+  title: string;
+  summary?: string;
+  evidence_quote?: string;
+  priority?: string;
+  intent?: string;
+}
+
+export interface ReviewNote {
+  note_id: string;
+  kind: string;
+  text: string;
+}
+
+export interface SessionReview {
+  session_id: string;
+  bot_id?: string;
+  status?: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+  prep_summary?: string | null;
+  what_heard: string[];
+  what_decided: ReviewItem[];
+  still_open: ReviewItem[];
+  what_to_remember: ReviewNote[];
+  is_empty: boolean;
+}
+
+export async function endSession(sessionId: string): Promise<SessionReview> {
+  const res = await fetch(
+    `/api/live/sessions/${encodeURIComponent(sessionId)}/end`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    },
+  );
+  return handle<SessionReview>(res);
+}
+
+export async function saveReview(
+  sessionId: string,
+  body: {
+    keep_items: { item_id: string; summary?: string }[];
+    keep_notes: { note_id: string; text: string }[];
+  },
+): Promise<{ ok: boolean; status: string }> {
+  const res = await fetch(
+    `/api/live/sessions/${encodeURIComponent(sessionId)}/review/save`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  return handle<{ ok: boolean; status: string }>(res);
+}

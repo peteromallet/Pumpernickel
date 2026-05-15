@@ -4,13 +4,15 @@ import { PersonaPicker } from "./components/PersonaPicker";
 import { SessionCard } from "./components/SessionCard";
 import { AgendaCard } from "./components/AgendaCard";
 import { LiveScreen } from "./components/LiveScreen";
-import type { Persona } from "./api";
+import { ReviewScreen } from "./components/ReviewScreen";
+import { endSession, type Persona, type SessionReview } from "./api";
 
 type View =
   | { kind: "picker" }
   | { kind: "session"; persona: Persona }
   | { kind: "card"; persona: Persona; sessionId: string }
-  | { kind: "live"; persona: Persona; sessionId: string };
+  | { kind: "live"; persona: Persona; sessionId: string }
+  | { kind: "review"; persona: Persona; review: SessionReview };
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: "picker" });
@@ -47,7 +49,22 @@ export default function App() {
           <LiveScreen
             persona={view.persona}
             sessionId={view.sessionId}
-            onEnd={() => setView({ kind: "picker" })}
+            onEnd={async () => {
+              try {
+                const review = await endSession(view.sessionId);
+                setView({ kind: "review", persona: view.persona, review });
+              } catch {
+                setView({ kind: "picker" });
+              }
+            }}
+          />
+        )}
+        {view.kind === "review" && (
+          <ReviewScreen
+            persona={view.persona}
+            review={view.review}
+            onSaved={() => setView({ kind: "picker" })}
+            onDiscard={() => setView({ kind: "picker" })}
           />
         )}
       </main>

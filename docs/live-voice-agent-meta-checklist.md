@@ -207,7 +207,7 @@ Privacy/abuse hardening per critique L1+L3:
   - [ ] ElevenLabs Flash TTS streaming over WSS (real audio playback)
   - [ ] Per-turn budget guard (`$2 soft / $4 hard` per session)
   - [ ] Crisis classifier wrap (`crisis_solo.py` + `text_safety.py`)
-  - [ ] Post-session review screen (4-section editor + write-through to observations/distillations/themes)
+  - [x] Post-session review screen — backend `synthesize_review()` buckets coverage / transcript / notes into 4 sections; `POST /sessions/{id}/end` finalizes + returns review; `POST /sessions/{id}/review/save` accepts edits, persists coverage_summary patches + note text edits (or deletes), flips `conversations.status` to `synthesized`. React `ReviewScreen.tsx` renders the 4 sections with inline editors + Save / Discard. Verified end-to-end via curl: smoke session → end → 4-section payload → save → status='synthesized'. 2 new pytest cases ([empty, full buckets]). Write-through to observations/distillations/themes is the v1.1 follow-up.
   - [ ] Controls footer wiring: Pause/Repeat/Back-up/Slow-down/Skip semantics
 - [ ] **Sprint 4 — VAD + barge-in + latency polish** (not started)
 - [ ] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring + smoke test pending)

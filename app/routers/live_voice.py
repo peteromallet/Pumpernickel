@@ -29,6 +29,7 @@ from app.db import get_pool
 from app.services.live.prep import StubAgendaProducer, produce_agenda
 from app.services.live.schemas import PrepRequest, TurnRequest
 from app.services.live.stt import select_transcriber
+from app.services.live.synthesis import finalize_session, save_review, synthesize_review
 from app.services.live.turn_loop import apply_emission, load_turn_context, select_turn_caller
 
 logger = logging.getLogger(__name__)
@@ -333,6 +334,45 @@ async def get_session_card(session_id: UUID, pool: Any = Depends(get_pool)) -> d
             for row in items
         ],
     }
+
+
+@router.post("/api/live/sessions/{session_id}/end")
+async def end_session(session_id: UUID, pool: Any = Depends(get_pool)) -> dict[str, Any]:
+    """Flip the session to review_pending and synthesize the review payload."""
+    if not await _conversations_table_exists(pool):
+        raise HTTPException(status_code=503, detail="live conversations not yet migrated")
+    await finalize_session(pool, session_id)
+    return await synthesize_review(pool, session_id)
+
+
+@router.get("/api/live/sessions/{session_id}/review")
+async def get_review(session_id: UUID, pool: Any = Depends(get_pool)) -> dict[str, Any]:
+    if not await _conversations_table_exists(pool):
+        raise HTTPException(status_code=503, detail="live conversations not yet migrated")
+    return await synthesize_review(pool, session_id)
+
+
+class SaveReviewBody(BaseModel):
+    model_config = {"extra": "ignore"}
+    keep_items: list[dict[str, Any]] = Field(default_factory=list)
+    keep_notes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.post("/api/live/sessions/{session_id}/review/save")
+async def save_review_endpoint(
+    session_id: UUID,
+    body: SaveReviewBody,
+    pool: Any = Depends(get_pool),
+) -> dict[str, Any]:
+    if not await _conversations_table_exists(pool):
+        raise HTTPException(status_code=503, detail="live conversations not yet migrated")
+    await save_review(
+        pool,
+        session_id,
+        keep_items=body.keep_items,
+        keep_notes=body.keep_notes,
+    )
+    return {"ok": True, "status": "synthesized"}
 
 
 @router.get("/api/live/sessions/{session_id}")
