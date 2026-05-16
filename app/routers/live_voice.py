@@ -463,6 +463,50 @@ async def save_review_endpoint(
     return {"ok": True, "status": "synthesized", "counts": counts}
 
 
+@router.post("/api/live/sessions/{session_id}/replay/{turn_id}")
+async def replay_turn(
+    session_id: UUID,
+    turn_id: UUID,
+    pool: Any = Depends(get_pool),
+) -> dict[str, Any]:
+    """Re-run the turn caller against the original user input.
+
+    Useful for debugging: an operator picks a transcript_turns row that
+    was the user's most-recent utterance leading into a bot turn, and
+    this endpoint replays that input through ``select_turn_caller()``
+    with the *current* agenda context (not the at-the-time snapshot).
+    It does NOT mutate any rows — emission is returned to the caller
+    only.  Apply via the WS for live updates.
+    """
+    if not await _conversations_table_exists(pool):
+        raise HTTPException(status_code=503, detail="live conversations not yet migrated")
+    user_turn = await pool.fetchrow(
+        """
+        SELECT text FROM mediator.transcript_turns
+        WHERE id = $1 AND conversation_id = $2 AND speaker_role = 'primary'
+        """,
+        turn_id,
+        session_id,
+    )
+    if user_turn is None:
+        raise HTTPException(status_code=404, detail="user transcript turn not found")
+    ctx = await load_turn_context(pool, session_id)
+    caller = select_turn_caller()
+    try:
+        emission = await caller.call(
+            TurnRequest(session_id=str(session_id), user_transcript_final=user_turn["text"]),
+            ctx,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"replay failed: {exc}") from exc
+    return {
+        "ok": True,
+        "input": user_turn["text"],
+        "emission": emission.model_dump(),
+        "caller": type(caller).__name__,
+    }
+
+
 @router.get("/api/live/sessions/{session_id}/tts/{turn_id}")
 async def stream_tts(session_id: UUID, turn_id: UUID, pool: Any = Depends(get_pool)):
     """Stream mp3 TTS audio for a previously emitted bot turn.
