@@ -27,6 +27,7 @@ from app.bots.registry import BOT_SPECS, _maybe_register_staging_bots
 from app.config import get_settings
 from app.db import get_pool
 from app.services.live.prep import produce_agenda, select_agenda_producer
+from app.services.live.rate_limit import WS_RATE_LIMITER
 from app.services.live.schemas import PrepRequest, TurnRequest
 from app.services.live.stt import select_transcriber
 from app.services.charge import classify_charge
@@ -534,6 +535,23 @@ async def get_session(session_id: UUID, pool: Any = Depends(get_pool)) -> dict[s
 
 @router.websocket("/ws/live/{session_id}")
 async def live_socket(websocket: WebSocket, session_id: str) -> None:
+    # Per-IP rate limit (10/min default). Headers in this order:
+    # X-Forwarded-For (Railway / proxies), client.host fallback.
+    fwd = websocket.headers.get("x-forwarded-for", "")
+    client_ip = fwd.split(",")[0].strip() if fwd else (websocket.client.host if websocket.client else "unknown")
+    if not WS_RATE_LIMITER.allow(client_ip):
+        await websocket.close(code=4429)
+        logger.warning(
+            "live_voice: WS rate-limited",
+            extra={"client_ip": client_ip, "session_id": session_id},
+        )
+        return
+    # Pre-handshake log so we can join events to a conversation_id in any
+    # log shipper that filters on "session_id".
+    logger.info(
+        "live_voice: WS accepted",
+        extra={"session_id": session_id, "client_ip": client_ip},
+    )
     """Sprint 1+2 WS handler.
 
     On connect: stream phase descriptors (``Catching up…`` → ``Thinking…``

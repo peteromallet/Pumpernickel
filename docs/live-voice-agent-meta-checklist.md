@@ -217,7 +217,13 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] 10s silence fallback — `LiveScreen` polls `lastUserActivityRef` every 2s and fires `{type:"silence_prompt", idle_ms}` after 10s of quiet. Backend enqueues a synthesized transcript_final ("(silence — checking in)") so the bot opens a check-in turn via the same downstream loop.
   - [x] Synthetic-client load test harness — `scripts/live_voice_load_smoke.py` opens N WS sessions in parallel, drives the full lifecycle (POST /sessions → consume phases → text_input → wait for bot_turn → end), reports p50/p95/p99 per stage, asserts `p95 ear_to_ear_ms ≤ 2000`. Verified locally: 5/5 sessions, p95 ear_to_ear=337ms (target ≤2000ms) — PASS.
   - [x] Failure-mode UX matrix — WS drop triggers in-place reconnect attempts (1.5s backoff target ≤2s); user sees "Connection dropped — reconnecting (attempt N)…" while it happens. Clean close (code 1000/1001) skips reconnect. STT/connection errors render "Trouble hearing you — type below" with the text-input fallback already in place. TTS failure (SpeechSynthesis unavailable / errors / silent within 250ms) flips a `ttsUnavailable` flag that appends "(voice unavailable)" to bot turns + surfaces a footer hint.
-- [ ] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring + smoke test pending)
+- [~] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring pending)
+  - [x] CORS allowlist — `LIVE_VOICE_CORS_ORIGINS` env (default: localhost:8766, localhost:5173 for vite dev, veas-production.up.railway.app). Methods GET/POST/OPTIONS, headers Authorization/Content-Type/Accept, max_age 600. `allow_credentials=True` because the magic-link JWT will be sent via Authorization header.
+  - [x] WS rate limit — `app/services/live/rate_limit.py` per-IP token bucket. 10/min default (env `LIVE_VOICE_WS_RATE_PER_MIN`). Smoke-verified: 12 rapid WS connections → first 10 succeed, 11th+ rejected with 403.
+  - [x] Log enrichment — WS handler logs `session_id` + `client_ip` via `extra=` on every accept; structured JSON sink picks it up automatically.
+  - [ ] Alarms (p95 latency, daily spend, 5xx, WS disconnect rate)
+  - [ ] Post-deploy smoke against production URL
+  - [ ] Pre-deploy migration job (currently manual)
 
 ### End-to-end with REAL providers (verified in browser, 2026-05-16)
 

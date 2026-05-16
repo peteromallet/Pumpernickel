@@ -445,6 +445,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+
+# CORS allowlist — explicit web origins only.  Env var
+# LIVE_VOICE_CORS_ORIGINS is a comma-separated list; default covers
+# local dev (vite + uvicorn) and the Railway production URL.
+from fastapi.middleware.cors import CORSMiddleware as _CORSMiddleware
+_default_origins = "http://127.0.0.1:8766,http://localhost:8766,http://localhost:5173,https://veas-production.up.railway.app"
+_cors_origins = [
+    o.strip()
+    for o in (os.environ.get("LIVE_VOICE_CORS_ORIGINS") or _default_origins).split(",")
+    if o.strip()
+]
+app.add_middleware(
+    _CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
+    max_age=600,
+)
+
 app.include_router(health.router)
 app.include_router(admin.router)
 app.include_router(whatsapp_router.router)
