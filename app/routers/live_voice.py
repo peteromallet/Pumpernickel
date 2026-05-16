@@ -806,10 +806,13 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                     # new audio segment.
                     continue
                 if kind == "turn_end":
-                    # Client VAD signaled end-of-turn silence. Currently a
-                    # hint only — the StubTranscriber emits on its own
-                    # timer. When real STT is wired we'll forward this as
-                    # an explicit `input_audio_buffer.commit` to OpenAI.
+                    # Client VAD signaled end-of-turn silence. Tell the
+                    # transcriber to commit/flush the audio buffer so
+                    # we get a finalized transcript NOW.
+                    try:
+                        await transcriber.flush()
+                    except Exception:
+                        logger.warning("live_voice: transcriber.flush failed", exc_info=True)
                     continue
                 if kind == "barge_in":
                     # Caller is talking over the bot. Cancel the queued
