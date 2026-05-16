@@ -732,6 +732,23 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                     # spawning more bot turns until the user finishes.
                     await websocket.send_json({"type": "barge_in_acked"})
                     continue
+                if kind == "text_input":
+                    # Browser dev fallback / accessibility path: the user
+                    # typed a message instead of speaking. Treat it as a
+                    # synthesized transcript_final, going through the
+                    # same downstream loop (crisis classifier -> turn
+                    # caller -> persist -> emit).
+                    text = (payload.get("text") or "").strip()
+                    if not text:
+                        continue
+                    fake_event = {"type": "final", "text": text, "ts": 0}
+                    try:
+                        transcriber.events.put_nowait(fake_event)
+                    except Exception:
+                        # Fall back to forwarding directly if the queue
+                        # is full or transcriber is paused.
+                        logger.warning("live_voice: failed to enqueue text_input", exc_info=True)
+                    continue
                 await websocket.send_json({"type": "echo", "payload": payload})
         finally:
             forwarder_task.cancel()

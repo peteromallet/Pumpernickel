@@ -17,6 +17,42 @@ interface PhaseEvent {
 
 type Status = "consent" | "connecting" | "open" | "live" | "closed" | "error";
 
+function TextInputFallback({
+  disabled,
+  onSend,
+}: {
+  disabled: boolean;
+  onSend: (text: string) => void;
+}) {
+  const [value, setValue] = useState("");
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    onSend(trimmed);
+    setValue("");
+  }
+  return (
+    <form onSubmit={handleSubmit} className="mt-4 flex items-center gap-2">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="Type if you can't speak right now…"
+        disabled={disabled}
+        className="flex-1 rounded-md border border-white/10 bg-veas-bg/60 px-3 py-2 text-sm text-white placeholder:text-veas-muted focus:border-veas-accent focus:outline-none focus:ring-1 focus:ring-veas-accent/60 disabled:cursor-not-allowed disabled:opacity-50"
+      />
+      <button
+        type="submit"
+        disabled={disabled || !value.trim()}
+        className="rounded-md border border-white/10 px-3 py-2 text-sm text-white hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Send
+      </button>
+    </form>
+  );
+}
+
 export function LiveScreen({ persona, sessionId, onEnd }: Props) {
   const [events, setEvents] = useState<PhaseEvent[]>([]);
   const [status, setStatus] = useState<Status>("consent");
@@ -312,6 +348,16 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
             )}
           </div>
         </div>
+
+        <TextInputFallback
+          disabled={status !== "live"}
+          onSend={(text) => {
+            const ws = wsRef.current;
+            if (ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "text_input", text }));
+            }
+          }}
+        />
 
         <div className="mt-6 grid grid-cols-3 gap-2">
           <button
