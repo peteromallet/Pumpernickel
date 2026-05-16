@@ -298,9 +298,15 @@ class WhisperBufferedTranscriber:
         num_samples = len(pcm_blob) // 2
         wav_bytes = _wav_header(num_samples, self._sample_rate) + pcm_blob
 
+        # Model picker:
+        #   LIVE_VOICE_WHISPER_MODEL=gpt-4o-mini-transcribe → lower
+        #     hallucination rate, cheaper.
+        #   LIVE_VOICE_WHISPER_MODEL=gpt-4o-transcribe → top quality.
+        #   default whisper-1 (broadest compat).
+        model = os.environ.get("LIVE_VOICE_WHISPER_MODEL") or "whisper-1"
         files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
         data = {
-            "model": os.environ.get("LIVE_VOICE_WHISPER_MODEL") or "whisper-1",
+            "model": model,
             "response_format": "json",
             "temperature": "0",
             # Force English unless the operator overrides — kills the

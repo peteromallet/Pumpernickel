@@ -37,7 +37,18 @@ export interface MicSession {
 }
 
 export interface MicOpenOptions {
+  /**
+   * Called for every audible frame (RMS >= `silenceDropThreshold`).
+   * Quiet frames are dropped on the client to save Whisper cost and
+   * silence-bucket time on the server — the UI still sees them via
+   * `onAllFrames` for the frame counter.
+   */
   onFrame: (pcm: ArrayBuffer, meta: MicFrameMeta) => void;
+  /**
+   * Called for *every* captured frame regardless of energy. Use this
+   * for UI counters / waveforms; do NOT send these to the server.
+   */
+  onAllFrames?: (meta: MicFrameMeta) => void;
   onError?: (err: Error) => void;
   /**
    * VAD transitions (energy-threshold based).  Fires when RMS crosses the
@@ -50,6 +61,12 @@ export interface MicOpenOptions {
   vadThreshold?: number; // default 0.012
   vadActiveFrames?: number; // default 2 (debounce activation)
   turnEndMs?: number; // default 600
+  /**
+   * Frames with RMS below this threshold are NOT delivered to `onFrame`.
+   * Default 0.005 (background room noise) — clean quiet voice still gets
+   * through because real speech RMS is typically > 0.02.
+   */
+  silenceDropThreshold?: number;
 }
 
 function floatToInt16(input: Float32Array): Int16Array {
@@ -85,12 +102,14 @@ function computeRms(samples: Float32Array): number {
 
 export async function openMic({
   onFrame,
+  onAllFrames,
   onError,
   onVoiceState,
   targetSampleRate = 16000,
   vadThreshold = 0.012,
   vadActiveFrames = 2,
   turnEndMs = 600,
+  silenceDropThreshold = 0.005,
 }: MicOpenOptions): Promise<MicSession> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error("MediaDevices.getUserMedia is not available in this browser.");
@@ -150,14 +169,21 @@ export async function openMic({
         }
       }
 
-      onFrame(buffer, {
+      const meta: MicFrameMeta = {
         frameIndex,
         bytes: pcm.byteLength,
         totalBytes,
         sampleRate: targetSampleRate,
         durationMs: (resampled.length / targetSampleRate) * 1000,
         rms,
-      });
+      };
+      onAllFrames?.(meta);
+      // Energy pre-gate: drop frames below silenceDropThreshold so the
+      // server only ever sees audible PCM. Cuts Whisper cost + silence-
+      // gate false positives at the source.
+      if (rms >= silenceDropThreshold) {
+        onFrame(buffer, meta);
+      }
     } catch (err) {
       onError?.(err instanceof Error ? err : new Error(String(err)));
     }

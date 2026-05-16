@@ -326,7 +326,11 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
         const ws = wsRef.current;
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         ws.send(pcm);
-        setFrameCount((c) => c + 1);
+      },
+      onAllFrames: () => {
+        // Increment counter for every captured frame, dropped or sent,
+        // so the UI matches what the mic actually sees.
+        if (!cancelled) setFrameCount((c) => c + 1);
       },
       onError: (err) => {
         if (!cancelled) setMicError(err.message);

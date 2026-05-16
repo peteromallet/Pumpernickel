@@ -463,6 +463,71 @@ async def save_review_endpoint(
     return {"ok": True, "status": "synthesized", "counts": counts}
 
 
+@router.get("/api/live/ops/metrics")
+async def ops_metrics(pool: Any = Depends(get_pool)) -> dict[str, Any]:
+    """Operator-facing metrics snapshot the briefing's alarms can scrape.
+
+    Returns:
+      * `p50/p95/p99` for each latency stage in the last 5 minutes
+      * `spend_usd_today` summed across all sessions started today
+      * `error_rate_5m`: 5xx as a fraction of all WS bot_turn attempts
+        (placeholder — needs a counter; returns 0 until we track it)
+      * `ws_disconnect_rate_5m`: same placeholder
+      * `active_sessions`: count of conversations in 'live' status
+
+    The Railway/Datadog/etc. alarm config triggers when:
+      * `latency.ear_to_ear.p95 > 2000` for 5min  (briefing SLO)
+      * `spend_usd_today > 80 * daily_cap`        (operator-set cap)
+      * `error_rate_5m > 0.01` for 5min
+      * `ws_disconnect_rate_5m > 0.05` for 5min
+    """
+    if not await _conversations_table_exists(pool):
+        raise HTTPException(status_code=503, detail="live conversations not yet migrated")
+    latency_rows = await pool.fetch(
+        """
+        SELECT stage,
+               percentile_cont(0.50) WITHIN GROUP (ORDER BY elapsed_ms) AS p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_ms) AS p95,
+               percentile_cont(0.99) WITHIN GROUP (ORDER BY elapsed_ms) AS p99,
+               count(*) AS samples
+        FROM mediator.live_session_latency
+        WHERE created_at >= now() - interval '5 minutes'
+        GROUP BY stage
+        """,
+    )
+    latency = {
+        r["stage"]: {
+            "p50": int(r["p50"] or 0),
+            "p95": int(r["p95"] or 0),
+            "p99": int(r["p99"] or 0),
+            "samples": int(r["samples"] or 0),
+        }
+        for r in latency_rows
+    }
+    spend_row = await pool.fetchrow(
+        """
+        SELECT COALESCE(SUM(spend_usd_cents), 0) AS total
+        FROM mediator.conversations
+        WHERE started_at::date = (now() at time zone 'utc')::date
+        """,
+    )
+    active_count = await pool.fetchval(
+        "SELECT count(*) FROM mediator.conversations WHERE status IN ('live', 'prepping', 'ready')"
+    )
+    return {
+        "latency_ms": latency,
+        "spend_usd_today": (int(spend_row["total"]) if spend_row else 0) / 100.0,
+        "active_sessions": int(active_count or 0),
+        "error_rate_5m": 0.0,
+        "ws_disconnect_rate_5m": 0.0,
+        "thresholds": {
+            "p95_ear_to_ear_ms": 2000,
+            "error_rate_5m": 0.01,
+            "ws_disconnect_rate_5m": 0.05,
+        },
+    }
+
+
 @router.post("/api/live/sessions/{session_id}/replay/{turn_id}")
 async def replay_turn(
     session_id: UUID,

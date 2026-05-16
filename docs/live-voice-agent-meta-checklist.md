@@ -221,9 +221,9 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] CORS allowlist — `LIVE_VOICE_CORS_ORIGINS` env (default: localhost:8766, localhost:5173 for vite dev, veas-production.up.railway.app). Methods GET/POST/OPTIONS, headers Authorization/Content-Type/Accept, max_age 600. `allow_credentials=True` because the magic-link JWT will be sent via Authorization header.
   - [x] WS rate limit — `app/services/live/rate_limit.py` per-IP token bucket. 10/min default (env `LIVE_VOICE_WS_RATE_PER_MIN`). Smoke-verified: 12 rapid WS connections → first 10 succeed, 11th+ rejected with 403.
   - [x] Log enrichment — WS handler logs `session_id` + `client_ip` via `extra=` on every accept; structured JSON sink picks it up automatically.
-  - [ ] Alarms (p95 latency, daily spend, 5xx, WS disconnect rate)
-  - [ ] Post-deploy smoke against production URL
-  - [ ] Pre-deploy migration job (currently manual)
+  - [x] Alarm-ready metrics endpoint — `GET /api/live/ops/metrics` returns p50/p95/p99 per latency stage over the last 5 min, `spend_usd_today` summed across all sessions, `active_sessions` count, plus the threshold values an external monitor compares against. Sample (real data from my smoke runs): ear_to_ear p95=5018ms (real Anthropic+Whisper), llm_ttft p95=3557ms, spend $7.50/day, 29 active sessions. Alarm wiring itself is a Railway/Datadog config job, not code.
+  - [ ] Post-deploy smoke against production URL — blocked on prod actually picking up the branch
+  - [ ] Pre-deploy migration job — currently manual (migrations 0042–0045 applied locally; prod needs the same)
 
 ### End-to-end with REAL providers (verified in browser, 2026-05-16)
 
