@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -9,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from resident_chat_runtime.diagnostics import build_startup_diagnostics
 from resident_chat_runtime.env import EnvSetting, read_env_settings
 
@@ -16,7 +18,7 @@ from app.config import Settings, get_settings
 from app.bots.ids import MEDIATOR_BOT_ID
 from app.db import db_lifespan
 from app.models.user import User
-from app.routers import admin, health, whatsapp as whatsapp_router
+from app.routers import admin, auth_magic_link, health, live_voice, whatsapp as whatsapp_router
 from app.services import agentic, discord, hooks, whatsapp
 from app.services.agentic import run_agentic_turn, run_agentic_turn_with_metadata
 from app.services.debouncer import BurstCoalescer
@@ -443,6 +445,53 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+
+# CORS allowlist — explicit web origins only.  Env var
+# LIVE_VOICE_CORS_ORIGINS is a comma-separated list; default covers
+# local dev (vite + uvicorn) and the Railway production URL.
+from fastapi.middleware.cors import CORSMiddleware as _CORSMiddleware
+_default_origins = "http://127.0.0.1:8766,http://localhost:8766,http://localhost:5173,https://veas-production.up.railway.app"
+_cors_origins = [
+    o.strip()
+    for o in (os.environ.get("LIVE_VOICE_CORS_ORIGINS") or _default_origins).split(",")
+    if o.strip()
+]
+app.add_middleware(
+    _CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
+    max_age=600,
+)
+
 app.include_router(health.router)
 app.include_router(admin.router)
 app.include_router(whatsapp_router.router)
+app.include_router(live_voice.router)
+app.include_router(auth_magic_link.router)
+
+# Serve the React build for the live-voice UI at /live, but only if the build
+# exists.  Local dev that hasn't run `vite build` yet should still boot.
+_LIVE_UI_DIST = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "web",
+    "live-voice",
+    "dist",
+)
+try:
+    if os.path.isdir(_LIVE_UI_DIST):
+        app.mount(
+            "/live",
+            StaticFiles(directory=_LIVE_UI_DIST, html=True),
+            name="live-ui",
+        )
+        logger.info("mounted live-voice UI at /live (dist=%s)", _LIVE_UI_DIST)
+    else:
+        logger.info(
+            "live-voice UI dist not found at %s — skipping /live mount "
+            "(run `vite build` in web/live-voice to enable)",
+            _LIVE_UI_DIST,
+        )
+except Exception:
+    logger.exception("failed to mount live-voice UI; continuing without /live")
