@@ -732,6 +732,22 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                     # spawning more bot turns until the user finishes.
                     await websocket.send_json({"type": "barge_in_acked"})
                     continue
+                if kind == "silence_prompt":
+                    # Frontend's 10s silence fallback — feed a gentle
+                    # check-in through the same downstream loop.  The
+                    # bot will produce a regular turn off this prompt
+                    # (no special-case scripted line; let Haiku/stub
+                    # respond in-character).
+                    fake_event = {
+                        "type": "final",
+                        "text": "(silence — checking in)",
+                        "ts": 0,
+                    }
+                    try:
+                        transcriber.events.put_nowait(fake_event)
+                    except Exception:
+                        pass
+                    continue
                 if kind == "text_input":
                     # Browser dev fallback / accessibility path: the user
                     # typed a message instead of speaking. Treat it as a

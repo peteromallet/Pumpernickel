@@ -65,6 +65,8 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicSession | null>(null);
   const botSpeakingRef = useRef(false);
+  const lastUserActivityRef = useRef<number>(0);
+  const silenceTimerRef = useRef<number | null>(null);
 
   function pushEvent(text: string, kind: PhaseEvent["kind"] = "info") {
     setEvents((prev) => [...prev, { ts: Date.now(), text, kind }]);
@@ -157,6 +159,29 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
     };
   }, [sessionId, consent]);
 
+  // 10s silence fallback: after a quiet stretch with no voice_active
+  // OR transcript_final in 10 seconds, ping the backend so the bot can
+  // open a gentle "are you still there?" turn.
+  useEffect(() => {
+    if (status !== "live") return;
+    silenceTimerRef.current = window.setInterval(() => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (botSpeakingRef.current) return;
+      const idleMs = Date.now() - (lastUserActivityRef.current || Date.now());
+      if (idleMs >= 10_000) {
+        ws.send(JSON.stringify({ type: "silence_prompt", idle_ms: idleMs }));
+        lastUserActivityRef.current = Date.now(); // reset so we don't spam
+      }
+    }, 2000);
+    return () => {
+      if (silenceTimerRef.current !== null) {
+        clearInterval(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+    };
+  }, [status]);
+
   // Open the mic once the WS is live AND consent is granted.
   useEffect(() => {
     if (status !== "live" || !consent || micRef.current) return;
@@ -175,6 +200,7 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
       onVoiceState: (state) => {
         if (cancelled) return;
         setVoice(state);
+        lastUserActivityRef.current = Date.now();
         const ws = wsRef.current;
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         if (state === "active") {

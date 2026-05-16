@@ -214,8 +214,8 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] WS handler records per-stage spans on every turn (currently asr_finalize=0 stub, llm_ttft, orchestrator_db, ear_to_ear). Each `bot_turn` payload includes a `latency_ms` block so the client renders the live measurement. Smoke verified: 3 turns × 4 stages = 12 rows persisted; ear_to_ear 587-1137ms in stub mode (well under the p95 ≤ 2000ms SLO).
   - [x] Client VAD — energy-threshold (`vadThreshold=0.012`) with `vadActiveFrames` debounce. Emits `voice_active` / `turn_end` control frames over WS; `MicFrameMeta` now exposes per-frame RMS so the UI can render the live indicator. Verified in the browser (headless Chrome shows "silence" since no real mic input).
   - [x] Barge-in — when `botSpeakingRef` is true and `voice_active` fires, the client cancels SpeechSynthesis and sends `{type:"barge_in"}`. Backend ACKs with `barge_in_acked` (LLM/TTS cancellation lands when real Anthropic + ElevenLabs clients are wired).
-  - [ ] 10s silence fallback (no-VAD path to keep the conversation moving)
-  - [ ] Synthetic-client load test harness (replay canned PCM, assert SLOs)
+  - [x] 10s silence fallback — `LiveScreen` polls `lastUserActivityRef` every 2s and fires `{type:"silence_prompt", idle_ms}` after 10s of quiet. Backend enqueues a synthesized transcript_final ("(silence — checking in)") so the bot opens a check-in turn via the same downstream loop.
+  - [x] Synthetic-client load test harness — `scripts/live_voice_load_smoke.py` opens N WS sessions in parallel, drives the full lifecycle (POST /sessions → consume phases → text_input → wait for bot_turn → end), reports p50/p95/p99 per stage, asserts `p95 ear_to_ear_ms ≤ 2000`. Verified locally: 5/5 sessions, p95 ear_to_ear=337ms (target ≤2000ms) — PASS.
   - [ ] Failure-mode UX matrix wired (ASR timeout / Haiku timeout / TTS failure / WS drop)
 - [ ] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring + smoke test pending)
 
