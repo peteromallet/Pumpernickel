@@ -184,7 +184,7 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] React `AgendaCard.tsx` wired to `/api/live/sessions/{id}/card`; renders prep_summary + items grouped by theme with priority badges (MUST / SHOULD / OPTIONAL); back / start-conversation controls
   - [x] App flow: persona pick → start form → agenda card → live screen, all verified via Chrome extension against the local stack (postgres@54322 + uvicorn@8766)
   - [ ] Streamed phase descriptors over WSS (`Catching up…` → `Thinking about focus…` → `Getting ready…`) — currently a single ready-stub phase fires on socket open
-  - [x] Real Anthropic Opus producer wired (`AnthropicOpusAgendaProducer` with prompt-cached user/themes/distillations + tool-forced `compose_agenda`). `select_agenda_producer()` picks based on `LIVE_VOICE_PREP_PROVIDER` / real `ANTHROPIC_API_KEY` — stays on stub locally because the key is `sk-ant-local-stub`.
+  - [x] Real Anthropic Opus producer wired (`AnthropicOpusAgendaProducer` with prompt-cached user/themes/distillations + tool-forced `compose_agenda`). With the real key layered in via `/tmp/real-keys.env`, the producer generates personalized 5-item agendas (2 must / 3 should) referencing the user by name and the steering text content. End-to-end verified.
 - [~] **Sprint 2 — Transcript-only live + consent** (UI + transport done; STT integration pending)
   - [x] WSS now streams phase descriptors on connect (`Catching up…` → `Thinking…` → `Getting ready…` → `ready`)
   - [x] `ConsentGate.tsx` pre-mic screen ("Just me" / "Me and a partner" + partner label + acknowledgement). Mic does not open until consent is given.
