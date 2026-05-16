@@ -219,6 +219,19 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] Failure-mode UX matrix — WS drop triggers in-place reconnect attempts (1.5s backoff target ≤2s); user sees "Connection dropped — reconnecting (attempt N)…" while it happens. Clean close (code 1000/1001) skips reconnect. STT/connection errors render "Trouble hearing you — type below" with the text-input fallback already in place. TTS failure (SpeechSynthesis unavailable / errors / silent within 250ms) flips a `ttsUnavailable` flag that appends "(voice unavailable)" to bot turns + surfaces a footer hint.
 - [ ] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring + smoke test pending)
 
+### End-to-end with REAL providers (verified in browser, 2026-05-16)
+
+| Provider | Impl | Verified |
+|---|---|---|
+| Opus prep | `AnthropicOpusAgendaProducer` (`claude-opus-4-7`) | ✅ 6-item personalized agenda referencing Peter by name, 2 must + 4 should, all with intent/ask/done_when |
+| Haiku turns | `AnthropicHaikuTurnCaller` (`claude-haiku-4-5-20251001`) | ✅ Coach-quality replies; landed on agenda items correctly; even caught a Whisper hallucination and asked the user to clarify |
+| STT | `WhisperBufferedTranscriber` (`whisper-1`) | ✅ Real browser mic → 300 frames → flushed on VAD turn_end → real transcripts (incl. picking up background "Thank you for watching" + hallucinated Russian subtitles, expected Whisper artifacts) |
+| TTS | `StubTtsProvider` → browser SpeechSynthesis fallback | ⚠️ Still stub (no `ELEVENLABS_API_KEY` configured); UI shows "Voice playback unavailable — bot turns will show as text." |
+| Charge | `app.services.charge.classify_charge` real Haiku | ✅ Running on every transcript_final |
+| Auth | Magic-link DM (R5) | ✅ |
+
+Local stack at `http://127.0.0.1:8766/live/`. All keys layered in via `.env.local` (gitignored).
+
 ### Briefing checklist parity (status against `~/Downloads/live-voice-agent-briefing.md`)
 
 | Phase | Item | Status |
