@@ -209,7 +209,13 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] Crisis classifier wrap — `app.services.charge.classify_charge` runs on every `transcript_final` (uses Anthropic Haiku when a real key is set, falls back to keyword heuristic when key is a placeholder). On `crisis` charge the regular Haiku turn is skipped; the bot speaks a scripted grounding line with 988 / Samaritans / Lifeline numbers, a `[concern]` note is captured, and the client receives `bot_turn` with `charge='crisis'` so the UI can surface a resource panel.
   - [x] Post-session review screen — backend `synthesize_review()` buckets coverage / transcript / notes into 4 sections; `POST /sessions/{id}/end` finalizes + returns review; `POST /sessions/{id}/review/save` accepts edits, persists coverage_summary patches + note text edits (or deletes), flips `conversations.status` to `synthesized`. React `ReviewScreen.tsx` renders the 4 sections with inline editors + Save / Discard. Verified end-to-end via curl: smoke session → end → 4-section payload → save → status='synthesized'. 2 new pytest cases ([empty, full buckets]). Write-through to observations/distillations/themes is the v1.1 follow-up.
   - [ ] Controls footer wiring: Pause/Repeat/Back-up/Slow-down/Skip semantics
-- [ ] **Sprint 4 — VAD + barge-in + latency polish** (not started)
+- [~] **Sprint 4 — VAD + barge-in + latency polish** (latency persistence in; VAD + barge-in still pending)
+  - [x] Migration `0044_live_session_latency` — FORCE RLS, deny_anon, owner_scoped policies. Stage CHECK in `(asr_finalize, orchestrator_db, llm_ttft, tts_first_byte, ear_to_ear)`.
+  - [x] WS handler records per-stage spans on every turn (currently asr_finalize=0 stub, llm_ttft, orchestrator_db, ear_to_ear). Each `bot_turn` payload includes a `latency_ms` block so the client renders the live measurement. Smoke verified: 3 turns × 4 stages = 12 rows persisted; ear_to_ear 587-1137ms in stub mode (well under the p95 ≤ 2000ms SLO).
+  - [ ] Client VAD (Silero or energy threshold) + 10s silence fallback
+  - [ ] Barge-in: client cancel + orchestrator cancel in-flight LLM/TTS
+  - [ ] Synthetic-client load test harness (replay canned PCM, assert SLOs)
+  - [ ] Failure-mode UX matrix wired (ASR timeout / Haiku timeout / TTS failure / WS drop)
 - [ ] **Sprint 5 — Railway deploy + smoke** (deploy initiated; production verification + alarm wiring + smoke test pending)
 
 ### Briefing checklist parity (status against `~/Downloads/live-voice-agent-briefing.md`)

@@ -527,9 +527,27 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
 
         turn_caller = select_turn_caller()
 
+        async def record_latency(conv_id: str, turn_index: int, stage: str, ms: int) -> None:
+            try:
+                await pool.execute(
+                    """
+                    INSERT INTO mediator.live_session_latency
+                        (conversation_id, turn_index, stage, elapsed_ms)
+                    VALUES ($1::uuid, $2, $3, $4)
+                    """,
+                    conv_id,
+                    turn_index,
+                    stage,
+                    int(max(0, ms)),
+                )
+            except Exception:
+                logger.warning("live_voice: failed to record latency span", exc_info=True)
+
         async def forward_events() -> None:
+            from time import perf_counter
             from uuid import UUID as _UUID
             session_uuid = _UUID(session_id)
+            turn_index = 0
             while True:
                 event = await transcriber.events.get()
                 etype = event.get("type")
@@ -557,6 +575,9 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                 }})
 
                 if etype == "final" and (event.get("text") or "").strip():
+                    turn_index += 1
+                    ear_to_ear_start = perf_counter()
+                    asr_finalize_ms = 0
                     # Crisis classifier first — if the user said something
                     # that meets crisis criteria we drop the coach role
                     # entirely (per crisis_solo.SOLO_CRISIS_SECTION_V1).
@@ -593,6 +614,7 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                         continue
 
                     # Drive a regular bot turn off the user's final transcript.
+                    llm_start = perf_counter()
                     try:
                         ctx = await load_turn_context(pool, session_uuid)
                         emission = await turn_caller.call(
@@ -608,6 +630,8 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                             "message": str(exc),
                         })
                         continue
+                    llm_ttft_ms = int((perf_counter() - llm_start) * 1000)
+                    db_start = perf_counter()
                     try:
                         await apply_emission(pool, session_uuid, emission)
                     except Exception:
@@ -624,11 +648,23 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                         )
                     except Exception:
                         logger.warning("live_voice: failed to persist bot turn", exc_info=True)
+                    db_ms = int((perf_counter() - db_start) * 1000)
+                    ear_to_ear_ms = int((perf_counter() - ear_to_ear_start) * 1000)
+                    # Fire-and-forget latency persistence.
+                    await record_latency(session_id, turn_index, "asr_finalize", asr_finalize_ms)
+                    await record_latency(session_id, turn_index, "llm_ttft", llm_ttft_ms)
+                    await record_latency(session_id, turn_index, "orchestrator_db", db_ms)
+                    await record_latency(session_id, turn_index, "ear_to_ear", ear_to_ear_ms)
                     await websocket.send_json({
                         "type": "bot_turn",
                         "utterance": emission.utterance,
                         "route_to_item_id": emission.route_to_item_id,
                         "notes": [n.model_dump() for n in emission.notes],
+                        "latency_ms": {
+                            "llm_ttft": llm_ttft_ms,
+                            "orchestrator_db": db_ms,
+                            "ear_to_ear": ear_to_ear_ms,
+                        },
                     })
 
         forwarder_task = asyncio.create_task(forward_events())
