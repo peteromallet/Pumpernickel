@@ -11,18 +11,25 @@ Railway is bound to `main` for auto-deploy; merging the PR triggers the build.
 
 ## 2. Apply migrations (in order)
 
-Connect to the prod Supabase DB and run:
+Use the idempotent runner:
 
 ```bash
-PGPASSWORD=… psql -h <prod-host> -U postgres -d <prod-db> \
-  -f migrations/0042_live_conversations.sql \
-  -f migrations/0043_auth_magic_links.sql \
-  -f migrations/0044_live_session_latency.sql \
-  -f migrations/0045_live_session_spend.sql
+DATABASE_URL=postgres://… uv run python scripts/apply_live_voice_migrations.py
+# Output:
+#   ✓ 0042_live_conversations.sql: …
+#   ✓ 0043_auth_magic_links.sql: …
+#   ✓ 0044_live_session_latency.sql: …
+#   ✓ 0045_live_session_spend.sql: …
+#   Done.
 ```
 
-These are idempotent (CHECK + CREATE INDEX IF NOT EXISTS + DO blocks
-that catch `duplicate_object`). Re-running is safe.
+The script creates `mediator.applied_migrations` on first run and
+records every successful apply. Re-runs are no-ops. If 0042 was
+manually applied before the tracker existed (the common case for
+in-flight deploys), the script detects "already exists" errors and
+records them in the tracker without surprise.
+
+For a dry-run (just list what would land), add `--dry-run`.
 
 Each migration has a matching `.down.sql` next to it; revert in reverse
 order if needed.

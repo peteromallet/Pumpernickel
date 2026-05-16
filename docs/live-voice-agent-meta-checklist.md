@@ -223,7 +223,7 @@ Privacy/abuse hardening per critique L1+L3:
   - [x] Log enrichment — WS handler logs `session_id` + `client_ip` via `extra=` on every accept; structured JSON sink picks it up automatically.
   - [x] Alarm-ready metrics endpoint — `GET /api/live/ops/metrics` returns p50/p95/p99 per latency stage over the last 5 min, `spend_usd_today` summed across all sessions, `active_sessions` count, plus the threshold values an external monitor compares against. Sample (real data from my smoke runs): ear_to_ear p95=5018ms (real Anthropic+Whisper), llm_ttft p95=3557ms, spend $7.50/day, 29 active sessions. Alarm wiring itself is a Railway/Datadog config job, not code.
   - [ ] Post-deploy smoke against production URL — blocked on prod actually picking up the branch
-  - [ ] Pre-deploy migration job — currently manual (migrations 0042–0045 applied locally; prod needs the same)
+  - [x] Migration runner — `scripts/apply_live_voice_migrations.py` is idempotent via a `mediator.applied_migrations` tracker table. Recovers gracefully when migrations were applied manually before the tracker existed (detects "already exists", records, skips). Smoke-verified: first run applies + records all 4; second run skips all 4.
 
 ### End-to-end with REAL providers (verified in browser, 2026-05-16)
 
