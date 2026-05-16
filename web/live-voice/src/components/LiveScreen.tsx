@@ -15,6 +15,12 @@ interface PhaseEvent {
   kind: "phase" | "ack" | "echo" | "info" | "error";
 }
 
+interface TranscriptLine {
+  ts: number;
+  speaker: "user" | "bot";
+  text: string;
+}
+
 type Status = "consent" | "connecting" | "open" | "live" | "closed" | "error";
 
 function speakViaSpeechSynthesis(
@@ -106,6 +112,9 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
   const [ttsUnavailable, setTtsUnavailable] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [spend, setSpend] = useState<{ cents: number; cap: number } | null>(null);
+  const [showActivity, setShowActivity] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const micRef = useRef<MicSession | null>(null);
   const botSpeakingRef = useRef(false);
@@ -179,12 +188,20 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
         } else if (parsed?.type === "transcript_final") {
           kind = "phase";
           text = `you: ${parsed.text}`;
+          setTranscript((prev) => [
+            ...prev.slice(-40),
+            { ts: Date.now(), speaker: "user", text: parsed.text },
+          ]);
         } else if (parsed?.type === "transcript_error") {
           kind = "error";
           text = `STT error: ${parsed.message ?? "unknown"}`;
         } else if (parsed?.type === "bot_turn") {
           kind = "phase";
           text = `${persona.display_name}: ${parsed.utterance}`;
+          setTranscript((prev) => [
+            ...prev.slice(-40),
+            { ts: Date.now(), speaker: "bot", text: parsed.utterance },
+          ]);
           // Try ElevenLabs Flash via /tts/{turn_id} first; the backend
           // returns audio/mpeg when a real key is set, or an empty
           // stream when on the stub.  Empty stream -> we fall back to
@@ -242,9 +259,11 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
         } else if (parsed?.type === "budget_soft_warned") {
           kind = "info";
           text = `Heads-up: this session has spent $${(parsed.cents / 100).toFixed(2)} of the $${(parsed.hard_cap_cents / 100).toFixed(2)} cap.`;
+          setSpend({ cents: parsed.cents, cap: parsed.hard_cap_cents });
         } else if (parsed?.type === "budget_hard_capped") {
           kind = "error";
           text = `This session has hit its $${(parsed.hard_cap_cents / 100).toFixed(2)} cost cap — bot turns are paused. End and save when you're ready.`;
+          setSpend({ cents: parsed.cents, cap: parsed.hard_cap_cents });
         } else {
           text = parsed.label ?? parsed.phase ?? parsed.text ?? JSON.stringify(parsed);
         }
@@ -444,13 +463,29 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
               </p>
             )}
           </div>
-          <span className="inline-flex items-center gap-2 rounded-full bg-white/5 px-3 py-1 text-xs text-white">
-            <span
-              className={`h-2 w-2 rounded-full ${statusColor[status]}`}
-              aria-hidden
-            />
-            {statusLabel[status]}
-          </span>
+          <div className="flex items-center gap-2">
+            {spend && (
+              <span
+                className={`rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider ${
+                  spend.cents >= spend.cap
+                    ? "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                    : spend.cents >= spend.cap / 2
+                      ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                      : "bg-white/5 text-veas-muted border border-white/10"
+                }`}
+                title={`Session spend / cap`}
+              >
+                ${(spend.cents / 100).toFixed(2)} / ${(spend.cap / 100).toFixed(2)}
+              </span>
+            )}
+            <span className="inline-flex items-center gap-2 rounded-full bg-white/5 px-3 py-1 text-xs text-white">
+              <span
+                className={`h-2 w-2 rounded-full ${statusColor[status]}`}
+                aria-hidden
+              />
+              {statusLabel[status]}
+            </span>
+          </div>
         </header>
 
         <div className="rounded-md border border-white/5 bg-veas-bg/60 px-4 py-3 text-sm">
@@ -536,35 +571,71 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
 
         <div className="mt-6">
           <h3 className="text-xs uppercase tracking-widest text-veas-muted">
-            Activity
+            Transcript
           </h3>
-          <div className="mt-2 max-h-72 min-h-[8rem] overflow-y-auto rounded-md border border-white/5 bg-veas-bg/40 p-3 text-sm">
-            {events.length === 0 ? (
-              <p className="text-veas-muted">Waiting for events…</p>
+          <div className="mt-2 max-h-80 min-h-[10rem] overflow-y-auto rounded-md border border-white/5 bg-veas-bg/40 p-3 text-sm">
+            {transcript.length === 0 ? (
+              <p className="text-veas-muted">No turns yet.</p>
             ) : (
-              <ul className="space-y-2">
-                {events.map((e, i) => (
-                  <li
-                    key={i}
-                    className={`font-mono text-xs ${
-                      e.kind === "error"
-                        ? "text-rose-300"
-                        : e.kind === "phase"
-                          ? "text-white"
-                          : e.kind === "ack"
-                            ? "text-veas-muted/60"
-                            : "text-slate-200"
-                    }`}
-                  >
-                    <span className="text-veas-muted">
-                      {new Date(e.ts).toLocaleTimeString()}
-                    </span>{" "}
-                    {e.text}
+              <ul className="space-y-3">
+                {transcript.map((t, i) => (
+                  <li key={i} className={`flex ${t.speaker === "user" ? "justify-end" : "justify-start"}`}>
+                    <div
+                      className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
+                        t.speaker === "user"
+                          ? "bg-veas-accent/20 text-white"
+                          : "bg-white/5 text-white"
+                      }`}
+                    >
+                      <p className="text-[10px] uppercase tracking-wider text-veas-muted">
+                        {t.speaker === "user" ? "you" : persona.display_name}
+                      </p>
+                      <p className="mt-0.5 whitespace-pre-wrap leading-relaxed">{t.text}</p>
+                    </div>
                   </li>
                 ))}
               </ul>
             )}
           </div>
+        </div>
+
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setShowActivity((s) => !s)}
+            className="text-[11px] text-veas-muted hover:text-white"
+          >
+            {showActivity ? "Hide" : "Show"} activity ({events.length})
+          </button>
+          {showActivity && (
+            <div className="mt-2 max-h-60 overflow-y-auto rounded-md border border-white/5 bg-veas-bg/30 p-3 text-xs">
+              {events.length === 0 ? (
+                <p className="text-veas-muted">Waiting for events…</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {events.map((e, i) => (
+                    <li
+                      key={i}
+                      className={`font-mono text-[11px] ${
+                        e.kind === "error"
+                          ? "text-rose-300"
+                          : e.kind === "phase"
+                            ? "text-white"
+                            : e.kind === "ack"
+                              ? "text-veas-muted/60"
+                              : "text-slate-200"
+                      }`}
+                    >
+                      <span className="text-veas-muted">
+                        {new Date(e.ts).toLocaleTimeString()}
+                      </span>{" "}
+                      {e.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
         <p className="mt-4 text-[11px] text-veas-muted">
