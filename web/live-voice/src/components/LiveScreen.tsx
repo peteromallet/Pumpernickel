@@ -253,6 +253,11 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
           if (ttsUnavailable && !text.endsWith("(voice unavailable)")) {
             text = `${text} (voice unavailable)`;
           }
+        } else if (parsed?.type === "back_up_acked") {
+          kind = "info";
+          text = parsed.rewound_item_id
+            ? "Rewound to previous focus area."
+            : `Couldn't rewind: ${parsed.detail ?? "nothing covered yet"}`;
         } else if (parsed?.type === "bot_turn_error") {
           kind = "error";
           text = `Bot turn failed: ${parsed.message ?? "unknown"}`;
@@ -386,6 +391,13 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "advance" }));
+    }
+  }
+
+  function handleBackUp() {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "back_up" }));
     }
   }
 
@@ -543,7 +555,7 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
           }}
         />
 
-        <div className="mt-6 grid grid-cols-3 gap-2">
+        <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-4">
           <button
             type="button"
             onClick={handlePauseToggle}
@@ -559,6 +571,15 @@ export function LiveScreen({ persona, sessionId, onEnd }: Props) {
             className="rounded-md border border-white/10 px-3 py-2 text-sm text-white hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Advance
+          </button>
+          <button
+            type="button"
+            onClick={handleBackUp}
+            disabled={status !== "live"}
+            className="rounded-md border border-white/10 px-3 py-2 text-sm text-white hover:border-white/30 disabled:cursor-not-allowed disabled:opacity-50"
+            title="Rewind the most recently covered item — 'that's not what I meant'"
+          >
+            Back up
           </button>
           <button
             type="button"

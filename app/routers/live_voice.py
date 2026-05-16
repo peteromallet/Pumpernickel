@@ -817,6 +817,51 @@ async def live_socket(websocket: WebSocket, session_id: str) -> None:
                     # spawning more bot turns until the user finishes.
                     await websocket.send_json({"type": "barge_in_acked"})
                     continue
+                if kind == "back_up":
+                    # "That's not what I meant." Rewind the most recently
+                    # covered conversation_item back to 'active' so the
+                    # next bot turn re-explores it.
+                    async with pool.acquire() as conn:
+                        async with conn.transaction():
+                            target = await conn.fetchrow(
+                                """
+                                SELECT id FROM mediator.conversation_items
+                                WHERE conversation_id = $1::uuid
+                                  AND status = 'covered'
+                                  AND covered_at IS NOT NULL
+                                ORDER BY covered_at DESC
+                                LIMIT 1
+                                """,
+                                session_id,
+                            )
+                            if target is None:
+                                await websocket.send_json({
+                                    "type": "back_up_acked",
+                                    "rewound_item_id": None,
+                                    "detail": "nothing covered yet",
+                                })
+                                continue
+                            await conn.execute(
+                                """
+                                UPDATE mediator.conversation_items
+                                SET status = 'active',
+                                    coverage_evidence_quote = NULL,
+                                    coverage_summary = NULL,
+                                    covered_at = NULL
+                                WHERE id = $1
+                                """,
+                                target["id"],
+                            )
+                            await conn.execute(
+                                "UPDATE mediator.conversations SET current_item_id = $2 WHERE id = $1::uuid",
+                                session_id,
+                                target["id"],
+                            )
+                    await websocket.send_json({
+                        "type": "back_up_acked",
+                        "rewound_item_id": str(target["id"]),
+                    })
+                    continue
                 if kind == "silence_prompt":
                     # Frontend's 10s silence fallback — feed a gentle
                     # check-in through the same downstream loop.  The
