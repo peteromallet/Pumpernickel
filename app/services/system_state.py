@@ -96,6 +96,64 @@ async def resume(pool: Any, *, now: datetime | None = None) -> None:
     )
 
 
+async def is_recovery_v2_killed(pool: Any) -> bool:
+    """Return True when the recovery-v2 kill switch is engaged.
+
+    Reads ``system_state.value->>'on'`` for ``key='recovery_v2_kill'``; the row
+    is absent until an operator engages the switch.  Recovery-v2 inbound paths
+    (raw / stale-processing / retryable-failed) are skipped when this returns
+    True; legacy invariants (scheduled_jobs reconciliation, bot_turn
+    crash-marking, retention-expiry sweeps) are NOT gated.
+    """
+    value = await pool.fetchval(
+        "SELECT value FROM system_state WHERE key = 'recovery_v2_kill'"
+    )
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return bool(value.get("on"))
+    # asyncpg returns jsonb as str unless a codec is registered.
+    if isinstance(value, str):
+        import json
+
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return False
+        return bool(parsed.get("on")) if isinstance(parsed, dict) else False
+    return False
+
+
+async def recovery_v2_kill(pool: Any, *, now: datetime | None = None) -> None:
+    """Engage the recovery-v2 kill switch (UPSERT with on=true)."""
+    now = now or _utc_now()
+    await pool.execute(
+        """
+        INSERT INTO system_state (key, value, updated_at)
+        VALUES ('recovery_v2_kill', '{"on": true}'::jsonb, $1)
+        ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value,
+            updated_at = EXCLUDED.updated_at
+        """,
+        now,
+    )
+
+
+async def recovery_v2_clear_kill(pool: Any, *, now: datetime | None = None) -> None:
+    """Disengage the recovery-v2 kill switch (UPSERT with on=false)."""
+    now = now or _utc_now()
+    await pool.execute(
+        """
+        INSERT INTO system_state (key, value, updated_at)
+        VALUES ('recovery_v2_kill', '{"on": false}'::jsonb, $1)
+        ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value,
+            updated_at = EXCLUDED.updated_at
+        """,
+        now,
+    )
+
+
 async def supersede_pending_user_facing_jobs(pool: Any, *, now: datetime | None = None) -> None:
     now = now or _utc_now()
     await pool.execute(

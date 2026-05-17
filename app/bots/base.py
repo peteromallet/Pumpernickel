@@ -40,6 +40,9 @@ class WriteScopes:
     require_reason_for_cross_topic: bool = False
 
 
+_ALLOWED_PROVIDERS: frozenset[str] = frozenset({"anthropic", "deepseek"})
+
+
 @dataclass(frozen=True)
 class BotSpec:
     """All bot-specific choices consumed by the common adaptive turn runner."""
@@ -59,6 +62,21 @@ class BotSpec:
     bot_spec_version: str = "1.1.0"
     hot_context_builder_version: str = "1.0.0"
     tool_schema_version: str = "1.0.0"
+    # Project A2: per-bot LLM provider chain (primary, fallbacks...).
+    # The chain resolver in app.services.agentic combines this with the
+    # case-folded deepseek_enabled_user_names allowlist to demote DeepSeek
+    # off the chain for users not in the allowlist.
+    provider_chain: tuple[str, ...] = ("deepseek", "anthropic")
+
+    def __post_init__(self) -> None:
+        for entry in self.provider_chain:
+            if entry not in _ALLOWED_PROVIDERS:
+                raise ValueError(
+                    f"BotSpec.provider_chain contains unsupported provider "
+                    f"{entry!r}; allowed: {sorted(_ALLOWED_PROVIDERS)}"
+                )
+        if not self.provider_chain:
+            raise ValueError("BotSpec.provider_chain must not be empty")
 
     def render_system_prompt(
         self,

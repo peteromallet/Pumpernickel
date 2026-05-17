@@ -110,7 +110,12 @@ class TrackingPool(FakePool):
         ):
             # Silent-turns hot-context block. No silent turns in fake state.
             return []
-        if "FROM bot_turns bt" in compact and "LEFT JOIN tool_calls" in compact:
+        if "FROM v_bot_actions" in compact or (
+            "FROM bot_turns bt" in compact and "LEFT JOIN tool_calls" in compact
+        ):
+            # Post-Project-B refactor: the query now reads from
+            # mediator.v_bot_actions (migration 0043). Keep the legacy
+            # substring as a fallback in case a test stubs the old SQL.
             self.mark("read:get_bot_actions")
             return [
                 {

@@ -272,6 +272,13 @@ async def test_run_step_can_record_deepseek_priced_usage(app_env, monkeypatch):
 
 
 async def test_deepseek_failure_falls_back_to_anthropic(app_env, monkeypatch):
+    """When a provider_chain=('deepseek','anthropic') is passed and DeepSeek
+    raises a transient error, the chain advances to Anthropic after one retry.
+
+    With Project A2 the fallback behaviour is opt-in via the explicit
+    ``provider_chain`` kwarg; the legacy hard-coded ``provider="deepseek"``
+    path no longer cascades automatically (length-1 chain).
+    """
     events: list[str] = []
     requests: list[dict] = []
     pool = TrackingPool(events)
@@ -282,9 +289,14 @@ async def test_deepseek_failure_falls_back_to_anthropic(app_env, monkeypatch):
         events,
     )
     monkeypatch.setattr(agentic.anthropic, "AsyncAnthropic", lambda api_key: fallback)
+    monkeypatch.setattr(
+        agentic, "DeepSeekClient", lambda: FailingClient(events)
+    )
+    # Reset the per-bot fallback breaker so unrelated tests don't pre-trip it.
+    agentic._FALLBACK_BREAKER.reset()
 
     assistant_text, _, tool_count = await run_step(
-        FailingClient(events),
+        None,
         ctx,
         "system",
         "context",
@@ -302,13 +314,12 @@ async def test_deepseek_failure_falls_back_to_anthropic(app_env, monkeypatch):
                 ],
             },
         ],
-        model="deepseek-chat",
-        provider="deepseek",
+        provider_chain=("deepseek", "anthropic"),
     )
 
     assert assistant_text == "fallback reply"
     assert tool_count == 0
-    assert events.count("deepseek_call") == 2
+    assert events.count("deepseek_call") == 1
     assert events.count("client_call") == 1
     assert requests[0]["messages"][1]["content"] == [
         {"type": "text", "text": "keep me"}

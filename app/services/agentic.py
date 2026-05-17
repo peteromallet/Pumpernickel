@@ -2,29 +2,48 @@
 
 from __future__ import annotations
 
+import asyncio
+import email.utils
 import hashlib
 import json
 import logging
 import re
+import time
+from collections import deque
 from datetime import UTC, datetime
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 from uuid import UUID
 
 import anthropic
+
+# Defensive imports for Anthropic SDK exception classes.  Anthropic >= 0.40
+# exports RateLimitError and APIStatusError; future SDK renames must not
+# break module import.  When absent, isinstance(...) calls against the
+# empty-tuple sentinels short-circuit to False and the status-code path
+# (getattr(exc, "status_code", None)) is used instead.
+try:  # pragma: no cover - exercised whenever Anthropic SDK is present
+    from anthropic import APIStatusError as _AnthropicAPIStatusError
+except ImportError:  # pragma: no cover
+    _AnthropicAPIStatusError = ()  # type: ignore[assignment]
+try:  # pragma: no cover
+    from anthropic import RateLimitError as _AnthropicRateLimitError
+except ImportError:  # pragma: no cover
+    _AnthropicRateLimitError = ()  # type: ignore[assignment]
 
 from app.bots.registry import get_bot_spec, primary_topic_id_for
 from app.config import get_settings
 from app.models.user import User, claim_onboarding_welcome
 from app.services import discord, hooks, system_state
 from app.services.deepseek import DeepSeekClient
+from app.services.system_state import is_recovery_v2_killed
 from app.services.hot_context import build_hot_context, render_hot_context
 from app.services.hot_context_solo import (
     build_hot_context_solo,
     render_hot_context_solo,
 )
-from app.services import inbound_queue
+from app.services import inbound_queue, metrics
 from app.services.messaging import send_outbound, sent_contents_for_turn
 from app.services.partner_sharing import get_partner_share
 from app.services.spend import is_under_cap, record_llm_cost
@@ -78,6 +97,61 @@ class BoundedLoopExceeded(Exception):
     def __init__(self, message: str = "bounded_loop_exceeded") -> None:
         super().__init__(message)
         self.failure_reason = message
+
+
+# ── Project A2 provider-chain exceptions ─────────────────────────────────────
+# All four assign ``failure_reason`` on the instance so that the outer turn
+# failure handler at the bottom of ``_run_agentic`` resolves
+# ``getattr(exc, "failure_reason", "crashed")`` to the per-instance attribute
+# instead of the class-level default ``"llm_timeout"`` on LLMPhaseError.
+class ProviderFallbackKilled(LLMPhaseError):
+    def __init__(self) -> None:
+        super().__init__("provider_fallback_killed")
+        self.failure_reason = "provider_fallback_killed"
+
+
+class SameProviderFallbackNoop(LLMPhaseError):
+    def __init__(self) -> None:
+        super().__init__("same_provider_fallback_noop")
+        self.failure_reason = "same_provider_fallback_noop"
+
+
+class FallbackBreakerOpen(LLMPhaseError):
+    def __init__(self, bot_id: str) -> None:
+        super().__init__(f"fallback_breaker_open bot_id={bot_id}")
+        self.failure_reason = "fallback_breaker_open"
+
+
+class RespondCapNoOutput(LLMPhaseError):
+    def __init__(self) -> None:
+        super().__init__("respond_cap_no_output")
+        self.failure_reason = "respond_cap_no_output"
+
+
+class UnsupportedChainAnthropicToDeepseek(LLMPhaseError):
+    """Configuration error: cannot fall back from Anthropic-shaped messages
+    to a DeepSeek provider hop.  Per-instance failure_reason so the outer
+    handler routes through FAILURE_REASON_TO_CLASS to ``"infra_bug"``."""
+
+    def __init__(self) -> None:
+        super().__init__("unsupported_chain_anthropic_to_deepseek")
+        self.failure_reason = "unsupported_chain_anthropic_to_deepseek"
+
+
+class _PostSendPhaseCapExceeded(BoundedLoopExceeded):
+    """Internal control-flow marker for post-send (record/schedule) cap.
+
+    NEVER propagated to the outer turn-failure handler; caught locally inside
+    ``_run_agentic`` so the run continues with the next plan step and
+    ``bot_turns.failure_reason`` stays NULL.  Not registered in
+    ``FAILURE_REASON_TO_CLASS``.
+    """
+
+    def __init__(self, step: str, cap: int, tool_iteration_count: int) -> None:
+        super().__init__(f"post_send_phase_cap_exceeded step={step}")
+        self.step = step
+        self.cap = cap
+        self.tool_iteration_count = tool_iteration_count
 
 
 REACTION_DIRECTIVE_RE = re.compile(
@@ -299,6 +373,265 @@ def _llm_client_and_model_for_user(user: User) -> tuple[Any, str, str]:
     return client, settings.conversational_model, "anthropic"
 
 
+_ProviderErrorClass = Literal[
+    "rate_limited", "overloaded", "transient", "bad_request"
+]
+
+
+def _exc_status_code(exc: Exception) -> int | None:
+    """Best-effort status-code extraction across Anthropic SDK + httpx errors."""
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        try:
+            return int(status)
+        except (TypeError, ValueError):  # pragma: no cover
+            pass
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status = getattr(response, "status_code", None)
+        if status is not None:
+            try:
+                return int(status)
+            except (TypeError, ValueError):  # pragma: no cover
+                pass
+    return None
+
+
+def _exc_retry_after(exc: Exception) -> int | None:
+    """Parse Retry-After (delta-seconds or HTTP-date) from an exception response.
+
+    Returns the integer seconds-from-now, or None if absent/unparseable.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get("retry-after")
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    # Try integer seconds first.
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        pass
+    # Fall back to HTTP-date.
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    delta = (parsed - datetime.now(UTC)).total_seconds()
+    if delta < 0:
+        return 0
+    return int(delta)
+
+
+def _classify_provider_error(
+    exc: Exception, provider: str
+) -> tuple[_ProviderErrorClass, int | None]:
+    """Classify a provider exception into a coarse category + Retry-After.
+
+    Routing:
+      429        -> rate_limited
+      529        -> overloaded
+      408/5xx    -> transient
+      400/422    -> bad_request
+      other      -> transient (conservative; one provider-level retry then
+                    advance to next hop)
+    """
+    status = _exc_status_code(exc)
+    retry_after = _exc_retry_after(exc)
+    # Anthropic SDK exception class checks (when truthy) for extra signal.
+    if _AnthropicRateLimitError and isinstance(exc, _AnthropicRateLimitError):
+        if retry_after is None:
+            retry_after = 2
+        return "rate_limited", retry_after
+    if status == 429:
+        if retry_after is None:
+            retry_after = 2
+        return "rate_limited", retry_after
+    if status == 529:
+        if retry_after is None:
+            retry_after = 2
+        return "overloaded", retry_after
+    if status in (408, 500, 502, 503, 504):
+        return "transient", retry_after
+    if status in (400, 422):
+        return "bad_request", retry_after
+    return "transient", retry_after
+
+
+def _clamp_retry_after(retry_after_s: int | None, cap: int) -> int | None:
+    """Clamp Retry-After: None or >cap means skip the wait and advance."""
+    if retry_after_s is None:
+        return None
+    if retry_after_s < 0:
+        return 0
+    if retry_after_s > cap:
+        return None
+    return retry_after_s
+
+
+class _FallbackBreaker:
+    """Per-bot fallback-rate circuit breaker.
+
+    Keeps a bounded deque of ``(monotonic_timestamp, fell_back)`` samples per
+    bot_id; trims entries older than the configured window.  Opens when the
+    sample count >= min_samples AND the observed fall-back rate >= threshold.
+
+    Scope is per-process (in-memory).  Per SD-006 + the plan, this is an
+    accepted tradeoff for the current single-instance Railway deployment;
+    the breaker is a degraded-mode signal, not a correctness invariant.  If
+    a second incident proves per-process scope inadequate, persisted/shared
+    state can be revisited in A3 per SD-009.
+    """
+
+    def __init__(self) -> None:
+        self._samples: dict[str, deque[tuple[float, bool]]] = {}
+
+    def _prune(self, bot_id: str, window_seconds: int) -> deque[tuple[float, bool]]:
+        dq = self._samples.setdefault(bot_id, deque())
+        cutoff = time.monotonic() - window_seconds
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+        return dq
+
+    def record(self, bot_id: str, fell_back: bool) -> None:
+        settings = get_settings()
+        dq = self._prune(bot_id, settings.provider_fallback_breaker_window_seconds)
+        dq.append((time.monotonic(), fell_back))
+
+    def is_open(self, bot_id: str) -> bool:
+        settings = get_settings()
+        dq = self._prune(bot_id, settings.provider_fallback_breaker_window_seconds)
+        if len(dq) < settings.provider_fallback_breaker_min_samples:
+            return False
+        rate = sum(1 for _, fell_back in dq if fell_back) / len(dq)
+        return rate >= settings.provider_fallback_breaker_threshold
+
+    def reset(self, bot_id: str | None = None) -> None:
+        """Test helper: clear samples for a bot or all bots."""
+        if bot_id is None:
+            self._samples.clear()
+        else:
+            self._samples.pop(bot_id, None)
+
+
+_FALLBACK_BREAKER = _FallbackBreaker()
+
+
+def _build_provider_client(provider: str) -> Any:
+    settings = get_settings()
+    if provider == "deepseek":
+        return DeepSeekClient()
+    if provider == "anthropic":
+        return anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key.get_secret_value()
+        )
+    raise ValueError(f"_build_provider_client: unknown provider {provider!r}")
+
+
+def _provider_model(provider: str, model_for_provider: dict[str, str] | None) -> str:
+    settings = get_settings()
+    if model_for_provider and provider in model_for_provider:
+        return model_for_provider[provider]
+    if provider == "deepseek":
+        return settings.deepseek_conversational_model
+    return settings.conversational_model
+
+
+def _dedupe_chain(chain: tuple[str, ...]) -> tuple[str, ...]:
+    """Collapse consecutive duplicate providers in the chain."""
+    out: list[str] = []
+    for entry in chain:
+        if not out or out[-1] != entry:
+            out.append(entry)
+    return tuple(out)
+
+
+def _resolve_provider_chain(
+    bot_spec: Any, user: User, settings: Any
+) -> tuple[str, ...]:
+    """Resolve the effective provider chain for (bot, user).
+
+    Combines ``bot_spec.provider_chain`` with the case-folded
+    ``deepseek_enabled_user_names`` allowlist: if the user is NOT in the
+    allowlist, ``deepseek`` is dropped from the chain.  Casefold semantics
+    are preserved exactly from the legacy lookup at
+    ``_deepseek_user_names``.
+
+    The returned chain is non-empty; if the dedupe/demotion would leave it
+    empty (no providers configured), falls back to ``("anthropic",)``.
+    """
+    raw_chain = getattr(bot_spec, "provider_chain", None) or ("anthropic",)
+    user_allowed = user.name.strip().casefold() in _deepseek_user_names(settings)
+    filtered = tuple(
+        provider
+        for provider in raw_chain
+        if provider != "deepseek" or user_allowed
+    )
+    if not filtered:
+        return ("anthropic",)
+    return filtered
+
+
+async def _attempt_provider_call(
+    *,
+    client: Any,
+    provider: str,
+    ctx: TurnContext,
+    system: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    model: str,
+    max_tokens: int,
+) -> Any:
+    """Single provider call.  Spend-cap guarded.  Records cost on success."""
+    settings = get_settings()
+    if not await is_under_cap(ctx.pool, "text"):
+        raise SpendCapExceeded("text LLM spend cap exceeded")
+    # Anthropic cannot consume DeepSeek-native blocks; strip them at the boundary.
+    payload_messages = (
+        _anthropic_safe_messages(messages) if provider == "anthropic" else messages
+    )
+    response = await client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=payload_messages,
+        tools=tools,
+    )
+    if provider == "deepseek":
+        input_price = settings.deepseek_input_usd_per_mtok
+        output_price = settings.deepseek_output_usd_per_mtok
+    else:
+        input_price = settings.anthropic_input_usd_per_mtok
+        output_price = settings.anthropic_output_usd_per_mtok
+    await _record_response_cost(
+        ctx.pool,
+        _attr(response, "usage", {}),
+        input_price=input_price,
+        output_price=output_price,
+    )
+    return response
+
+
+# Canonical InternalMessage IR (app/llm/internal_message.py) is available
+# but disabled by default. When a third provider lands, set
+# provider_use_canonical_ir=True and route conversions through
+# internal_message rather than _anthropic_safe_messages. The sanitize
+# boundary stays the default to avoid destabilizing A2's tested fallback.
 async def _create_message_with_retry(
     client: Any,
     *,
@@ -308,69 +641,156 @@ async def _create_message_with_retry(
     messages: list[dict[str, Any]],
     model: str | None = None,
     provider: str = "anthropic",
+    provider_chain: tuple[str, ...] | None = None,
+    model_for_provider: dict[str, str] | None = None,
     max_tokens: int = 1200,
-) -> Any:
+) -> tuple[Any, str]:
+    """Provider-chain aware message creation with Retry-After + breaker.
+
+    Iterates over a deduped provider chain.  Per hop: ONE primary attempt;
+    on rate_limited/overloaded with a clamp-able Retry-After, sleeps then
+    does ONE retry on the same provider before advancing.  Before each
+    fallback advance, consults ``is_recovery_v2_killed`` (kill switch) and
+    the per-bot fallback breaker.
+
+    Behavior notes:
+    - Flipping ``recovery_v2_killed`` post-A2 forces single-provider mode
+      with no fallback, no breaker bypass, and no Retry-After sleeps beyond
+      the existing one-retry-per-provider pattern.
+    - Total in-step wall-time bound per call is approximately
+      ``len(deduped_chain) * (provider_call_timeout + retry_after_cap)``;
+      with default settings (chain length 2, timeout 120, cap 30) this is
+      worst-case ~300s but typically << 1s in the happy path.
+    - SameProviderFallbackNoop is raised only when the ORIGINAL pre-dedup
+      chain length was > 1 AND the dedupe collapsed it to length 1, since
+      that indicates a misconfigured-but-intentful fallback.  A genuine
+      length-1 spec (e.g. consult_perspective passing provider="anthropic")
+      falls through to the underlying error normally.
+
+    Returns
+    -------
+    tuple[Any, str]
+        (response, effective_provider).  Callers may use
+        ``effective_provider`` to pin subsequent in-step iterations to the
+        same provider.
+    """
     settings = get_settings()
+    # Back-compat: when no provider_chain supplied, derive one from provider=.
+    if provider_chain is None:
+        raw_chain: tuple[str, ...] = (provider,)
+    else:
+        raw_chain = tuple(provider_chain)
+    if not raw_chain:
+        raise LLMPhaseError("empty provider_chain")
+    deduped_chain = _dedupe_chain(raw_chain)
+    pre_dedup_was_multi = len(raw_chain) > 1
+    if pre_dedup_was_multi and len(deduped_chain) == 1:
+        raise SameProviderFallbackNoop()
+
+    # Reject Anthropic-then-DeepSeek which cannot work after sanitization.
+    for i in range(len(deduped_chain) - 1):
+        if deduped_chain[i] == "anthropic" and deduped_chain[i + 1] == "deepseek":
+            raise UnsupportedChainAnthropicToDeepseek()
+
+    bot_id = ctx.bot_id or "unknown"
+    retry_after_cap = settings.provider_retry_after_cap_seconds
     last_error: Exception | None = None
-    for attempt in range(2):
-        if not await is_under_cap(ctx.pool, "text"):
-            raise SpendCapExceeded("text LLM spend cap exceeded")
-        try:
-            response = await client.messages.create(
-                model=model or settings.conversational_model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-                tools=tools,
-            )
-        except Exception as exc:  # Anthropic SDK transient subclasses vary by version.
-            last_error = exc
-            if attempt == 0:
-                logger.warning(
-                    "%s message create failed; retrying once: %s",
-                    provider,
-                    exc,
-                    extra=obs_fields(ctx),
-                )
-                continue
-            if provider == "deepseek":
-                logger.warning(
-                    "deepseek failed twice; falling back to anthropic for this step: %s",
-                    exc,
-                    extra=obs_fields(ctx),
-                )
-                fallback_client = anthropic.AsyncAnthropic(
-                    api_key=settings.anthropic_api_key.get_secret_value()
-                )
-                response = await fallback_client.messages.create(
-                    model=settings.conversational_model,
-                    max_tokens=max_tokens,
-                    system=system,
-                    messages=_anthropic_safe_messages(messages),
-                    tools=tools,
-                )
-                await _record_response_cost(
-                    ctx.pool,
-                    _attr(response, "usage", {}),
-                    input_price=settings.anthropic_input_usd_per_mtok,
-                    output_price=settings.anthropic_output_usd_per_mtok,
-                )
-                return response
-            raise LLMPhaseError(str(exc)) from exc
-        if provider == "deepseek":
-            input_price = settings.deepseek_input_usd_per_mtok
-            output_price = settings.deepseek_output_usd_per_mtok
+    fell_back = False
+
+    for hop_index, hop_provider in enumerate(deduped_chain):
+        # Reuse the caller-provided client only when it matches the first hop
+        # AND the caller didn't pin via provider_chain.  Otherwise build fresh.
+        if (
+            hop_index == 0
+            and client is not None
+            and provider_chain is None
+            and hop_provider == provider
+        ):
+            hop_client = client
         else:
-            input_price = settings.anthropic_input_usd_per_mtok
-            output_price = settings.anthropic_output_usd_per_mtok
-        await _record_response_cost(
-            ctx.pool,
-            _attr(response, "usage", {}),
-            input_price=input_price,
-            output_price=output_price,
+            hop_client = _build_provider_client(hop_provider)
+        hop_model = _provider_model(hop_provider, model_for_provider) if (
+            model is None or hop_index > 0
+        ) else model
+
+        for attempt_index in (0, 1):
+            try:
+                response = await _attempt_provider_call(
+                    client=hop_client,
+                    provider=hop_provider,
+                    ctx=ctx,
+                    system=system,
+                    tools=tools,
+                    messages=messages,
+                    model=hop_model,
+                    max_tokens=max_tokens,
+                )
+                _FALLBACK_BREAKER.record(bot_id, fell_back)
+                return response, hop_provider
+            except SpendCapExceeded:
+                raise
+            except (LLMPhaseError, SameProviderFallbackNoop,
+                    UnsupportedChainAnthropicToDeepseek, ProviderFallbackKilled,
+                    FallbackBreakerOpen):
+                raise
+            except Exception as exc:
+                last_error = exc
+                error_class, retry_after_s = _classify_provider_error(
+                    exc, hop_provider
+                )
+                logger.warning(
+                    "%s provider call failed (hop=%d/%d, attempt=%d, class=%s): %s",
+                    hop_provider,
+                    hop_index + 1,
+                    len(deduped_chain),
+                    attempt_index,
+                    error_class,
+                    exc,
+                    extra=obs_fields(ctx),
+                )
+                if attempt_index == 0 and error_class in {
+                    "rate_limited",
+                    "overloaded",
+                }:
+                    clamped = _clamp_retry_after(retry_after_s, retry_after_cap)
+                    if clamped is not None:
+                        await asyncio.sleep(clamped)
+                        continue  # ONE retry on the same provider
+                # Either we already retried once, or the class doesn't
+                # warrant a same-provider retry — advance to the next hop.
+                break
+
+        # Out of attempts on this hop — try to advance to the next hop.
+        if hop_index + 1 >= len(deduped_chain):
+            # Final hop exhausted; map to LLMPhaseError so the outer handler
+            # routes to retryable_pre_send via FAILURE_REASON_TO_CLASS.
+            _FALLBACK_BREAKER.record(bot_id, fell_back)
+            raise LLMPhaseError(str(last_error or f"{hop_provider} failed"))
+
+        # Before falling back: kill switch then breaker.
+        if await is_recovery_v2_killed(ctx.pool):
+            _FALLBACK_BREAKER.record(bot_id, fell_back)
+            raise ProviderFallbackKilled()
+        if _FALLBACK_BREAKER.is_open(bot_id):
+            _FALLBACK_BREAKER.record(bot_id, fell_back)
+            raise FallbackBreakerOpen(bot_id)
+        fell_back = True
+        # A3 work item 6: fallback hop is about to fire — emit one
+        # provider_fallback_invoked observation labelled with the (from, to)
+        # pair, the current phase, and the bot.
+        next_hop_provider = deduped_chain[hop_index + 1]
+        metrics.incr(
+            "provider_fallback_invoked",
+            **{
+                "from": hop_provider,
+                "to": next_hop_provider,
+                "phase": str(ctx.current_step or "unknown"),
+                "bot": bot_id,
+            },
         )
-        return response
-    raise LLMPhaseError(str(last_error or f"{provider} message create failed"))
+
+    # Unreachable: the loop either returns or raises.
+    raise LLMPhaseError(str(last_error or "provider chain exhausted"))
 
 
 def _anthropic_safe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -406,11 +826,13 @@ async def run_step(
     seed_messages: list[dict[str, Any]],
     model: str | None = None,
     provider: str = "anthropic",
+    provider_chain: tuple[str, ...] | None = None,
+    model_for_provider: dict[str, str] | None = None,
     max_tokens: int = 1200,
     max_tool_iterations: int | None = None,
 ) -> tuple[str, list[dict[str, Any]], int]:
     settings = get_settings()
-    if client is None:
+    if client is None and provider_chain is None:
         if provider == "deepseek":
             client = DeepSeekClient()
             model = model or settings.deepseek_conversational_model
@@ -425,9 +847,14 @@ async def run_step(
     tool_call_count = 0
     tool_iteration_count = 0
     consecutive_recoverable_errors = 0
+    # Active chain shrinks to (effective_provider,) once a fallback has occurred
+    # so subsequent iterations of THIS run_step don't mix provider-native shapes.
+    active_chain: tuple[str, ...] | None = (
+        tuple(provider_chain) if provider_chain is not None else None
+    )
 
     while True:
-        response = await _create_message_with_retry(
+        response, effective_provider = await _create_message_with_retry(
             client,
             ctx=ctx,
             system=system,
@@ -435,8 +862,14 @@ async def run_step(
             messages=messages,
             model=model,
             provider=provider,
+            provider_chain=active_chain,
+            model_for_provider=model_for_provider,
             max_tokens=max_tokens,
         )
+        if active_chain is not None and effective_provider != active_chain[0]:
+            # Pin to the provider that actually returned for the rest of THIS
+            # run_step invocation so message shapes don't mix.
+            active_chain = (effective_provider,)
         content_blocks = [
             _block_to_dict(block) for block in (_attr(response, "content", []) or [])
         ]
@@ -457,15 +890,84 @@ async def run_step(
             max_tool_iterations is not None
             and tool_iteration_count > max_tool_iterations
         ):
-            if ctx.current_step == "read":
+            current_step = ctx.current_step
+            if current_step in {"read", "consult"}:
+                # Read / consult are pre-send context-gathering phases.  The
+                # spec only named ``read`` explicitly; ``consult`` is treated
+                # identically because both must not fail a turn.
                 logger.warning(
-                    "read step tool iteration cap reached; advancing without failing turn "
+                    "%s step tool iteration cap reached; advancing without failing turn "
                     "turn_id=%s cap=%d",
+                    current_step,
                     ctx.turn_id,
                     max_tool_iterations,
                     extra=obs_fields(ctx),
                 )
                 return "", messages, tool_call_count
+            if current_step == "respond":
+                # Respond cap: prefer an early-stop on any prior user-visible
+                # send.  Otherwise attempt ONE Anthropic-only emergency hop.
+                if ctx.sent_message_parts:
+                    logger.warning(
+                        "respond step tool iteration cap reached but prior "
+                        "send_message_part output exists; treating as success "
+                        "turn_id=%s cap=%d",
+                        ctx.turn_id,
+                        max_tool_iterations,
+                        extra=obs_fields(ctx),
+                    )
+                    return "", messages, tool_call_count
+                logger.warning(
+                    "respond step tool iteration cap reached with no prior "
+                    "user-visible output; attempting Anthropic-only emergency "
+                    "fallback hop turn_id=%s cap=%d",
+                    ctx.turn_id,
+                    max_tool_iterations,
+                    extra=obs_fields(ctx),
+                )
+                try:
+                    emergency_response, _ = await _create_message_with_retry(
+                        None,
+                        ctx=ctx,
+                        system=system,
+                        tools=tools,
+                        messages=messages,
+                        model=_provider_model("anthropic", model_for_provider),
+                        provider="anthropic",
+                        provider_chain=("anthropic",),
+                        model_for_provider=model_for_provider,
+                        max_tokens=max_tokens,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "respond emergency fallback hop failed: %s",
+                        exc,
+                        extra=obs_fields(ctx),
+                    )
+                    raise RespondCapNoOutput() from exc
+                emergency_blocks = [
+                    _block_to_dict(block)
+                    for block in (_attr(emergency_response, "content", []) or [])
+                ]
+                messages.append({"role": "assistant", "content": emergency_blocks})
+                emergency_text = "\n".join(
+                    str(block.get("text", "")).strip()
+                    for block in emergency_blocks
+                    if block.get("type") == "text"
+                    and str(block.get("text", "")).strip()
+                )
+                if emergency_text:
+                    return emergency_text, messages, tool_call_count
+                raise RespondCapNoOutput()
+            if current_step in {"record", "schedule"}:
+                # Post-send caps are turn-survivable.  Surface a local marker
+                # that ``_run_agentic`` catches; do NOT mutate
+                # ``bot_turns.failure_reason`` or inbound rows.
+                raise _PostSendPhaseCapExceeded(
+                    step=current_step,
+                    cap=max_tool_iterations,
+                    tool_iteration_count=tool_iteration_count,
+                )
             raise BoundedLoopExceeded(
                 f"tool iteration cap exceeded: {max_tool_iterations}"
             )
@@ -841,25 +1343,11 @@ async def _record_turn_final_output(
 def _failure_class_for(failure_reason: str) -> str:
     """Map a failure_reason string to a durable-queue failure class.
 
-    Categories (must match exactly for inbound-queue-hardening consumption):
-    - tool_validation_recoverable_exhausted
-    - tool_infra_transient
-    - model_policy_or_instruction_failure
-    - database_unexpected
+    Delegates to the 3-class taxonomy defined in
+    ``app.services.inbound_queue.FAILURE_REASON_TO_CLASS``.  Unknown reasons
+    fall through to ``"infra_bug"`` (the recovery-v2 safest default).
     """
-    if failure_reason == "tool_validation_recoverable_exhausted":
-        return "tool_validation_recoverable_exhausted"
-    if failure_reason in ("llm_timeout",):
-        return "tool_infra_transient"
-    if failure_reason in (
-        "spend_cap",
-        "newer_inbound_before_final_send",
-    ):
-        return "model_policy_or_instruction_failure"
-    if failure_reason in ("crashed", "crashed_after_send"):
-        return "database_unexpected"
-    # Any unknown failure_reason → database_unexpected (safest default)
-    return "database_unexpected"
+    return inbound_queue.FAILURE_REASON_TO_CLASS.get(failure_reason, "infra_bug")
 
 
 async def _fail_turn(
@@ -1034,7 +1522,19 @@ async def _run_agentic(
         active_pool, bot_spec
     )
     selected_prompt_version = prompt_version or settings.system_prompt_version
-    llm_client, conversational_model, llm_provider = _llm_client_and_model_for_user(user)
+    # Resolve the per-bot provider chain (bot_spec + per-user allowlist gate).
+    resolved_chain = _resolve_provider_chain(bot_spec, user, settings)
+    # First-hop model for the turn-open log + the back-compat conversational_model.
+    first_hop_provider = resolved_chain[0]
+    conversational_model = _provider_model(first_hop_provider, None)
+    llm_provider = first_hop_provider
+    model_for_provider = {
+        "anthropic": settings.conversational_model,
+        "deepseek": settings.deepseek_conversational_model,
+    }
+    # We no longer hold a single llm_client; _create_message_with_retry builds
+    # provider clients per-hop.  Pass ``None`` and let it construct as needed.
+    llm_client: Any = None
     send_typing_indicator = not bool(
         trigger_metadata and trigger_metadata.get("pacing")
     )
@@ -1163,7 +1663,7 @@ async def _run_agentic(
                 "triggering_message_count": len(triggering_message_ids),
                 "user_in_context": user.id,
                 "model_version": conversational_model,
-                "llm_provider": llm_provider,
+                "llm_provider": "->".join(resolved_chain),
                 "system_prompt_version": selected_prompt_version,
                 "bot_id": scope.bot_id,
                 "topic_id": str(primary_topic_id) if primary_topic_id else None,
@@ -1259,8 +1759,27 @@ async def _run_agentic(
                     messages,
                     model=conversational_model,
                     provider=llm_provider,
+                    provider_chain=resolved_chain,
+                    model_for_provider=model_for_provider,
                     max_tool_iterations=STEP_ITERATION_CAPS.get(ctx.current_step, 4),
                 )
+            except _PostSendPhaseCapExceeded as cap_exc:
+                # Post-send cap (record / schedule).  Audit-events only; do
+                # NOT touch bot_turns.failure_reason or inbound rows so the
+                # turn continues to look like a successful 'replied' turn.
+                await record_turn_event(
+                    active_pool,
+                    turn_id,
+                    "phase_cap.post_send_exceeded",
+                    step=ctx.current_step,
+                    severity="warning",
+                    metadata={
+                        "cap": cap_exc.cap,
+                        "tool_iteration_count": cap_exc.tool_iteration_count,
+                    },
+                )
+                step_text = ""
+                step_tool_count = 0
             except Exception as exc:
                 await record_turn_event(
                     active_pool,
@@ -1563,7 +2082,8 @@ async def _run_agentic(
             elif provider_send_failed:
                 # Provider failed and no user-visible delivery occurred at all.
                 # Mark as failed for retry (not terminal 'replied').
-                failure_class = _failure_class_for("provider_send_failed")
+                failure_reason = "provider_send_failed"
+                failure_class = _failure_class_for(failure_reason)
                 error_detail = (
                     f"provider_send_failed"
                     f" [failure_class={failure_class}, retryable=true]"
@@ -1575,6 +2095,8 @@ async def _run_agentic(
                     handled_by_turn_id=turn_id,
                     bot_id=scope.bot_id,
                     topic_id=primary_topic_id,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
                 )
                 return
             elif assistant_text and not responded_to_user:
@@ -1770,6 +2292,8 @@ async def _run_agentic(
                     handled_by_turn_id=turn_id,
                     bot_id=scope.bot_id,
                     topic_id=primary_topic_id,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
                 )
         raise
 

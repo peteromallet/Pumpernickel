@@ -217,12 +217,16 @@ async def handle_image(
             {"error": "vision_failed", "detail": type(exc).__name__},
             message_id,
         )
+        failure_reason = "vision_failed"
+        failure_class = inbound_queue.FAILURE_REASON_TO_CLASS.get(failure_reason, "infra_bug")
         await inbound_queue.fail_messages(
             pool,
             [message_id],
             processing_error=f"vision_failed: {type(exc).__name__}",
             bot_id=scope.bot_id,
             topic_id=scope.topic_id,
+            failure_class=failure_class,
+            failure_reason=failure_reason,
         )
         if not paused:
             await send_outbound(

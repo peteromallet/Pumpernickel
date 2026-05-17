@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from typing import Any
@@ -66,23 +67,12 @@ def _maybe_register_staging_bots() -> None:
             - HECTOR_ONLY_TOOLS
             - _PREGNANCY_ONLY_TOOLS
         )
-        from app.bots.mediator import MediatorBotSpec
-
-        BOT_SPECS[MEDIATOR_BOT_ID] = MediatorBotSpec(
-            bot_id=MEDIATOR_BOT_ID,
-            prompt_renderer=MEDIATOR_BOT.prompt_renderer,
-            step_instructions=MEDIATOR_BOT.step_instructions,
-            skeleton_overrides=MEDIATOR_BOT.skeleton_overrides,
-            display_name=MEDIATOR_BOT.display_name,
-            primary_topic_slug=MEDIATOR_BOT.primary_topic_slug,
-            participants_shape=MEDIATOR_BOT.participants_shape,
-            read_scopes=MEDIATOR_BOT.read_scopes,
-            write_scopes=MEDIATOR_BOT.write_scopes,
-            cross_topic_policy=MEDIATOR_BOT.cross_topic_policy,
+        # dataclasses.replace propagates ALL fields (including
+        # provider_chain) from the source MEDIATOR_BOT, so future BotSpec
+        # additions don't need a parallel listing here.
+        BOT_SPECS[MEDIATOR_BOT_ID] = dataclasses.replace(
+            MEDIATOR_BOT,
             tool_allowlist=mediator_allowlist,
-            bot_spec_version=MEDIATOR_BOT.bot_spec_version,
-            hot_context_builder_version=MEDIATOR_BOT.hot_context_builder_version,
-            tool_schema_version=MEDIATOR_BOT.tool_schema_version,
         )
 
 
@@ -126,8 +116,9 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
         return
 
     display_name = row["display_name"]
-    # Reconstruct MediatorBotSpec with DB display_name + hardcoded defaults
-    from app.bots.mediator import MediatorBotSpec, MEDIATOR_STEP_INSTRUCTIONS
+    # Reconstruct mediator spec via dataclasses.replace so provider_chain and
+    # any future BotSpec fields are propagated automatically.
+    from app.bots.mediator import MEDIATOR_STEP_INSTRUCTIONS
 
     from app.services.tools.registry import HECTOR_ONLY_TOOLS, TOOL_DISPATCH
 
@@ -135,11 +126,12 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
         "set_pregnancy_edd", "correct_pregnancy_edd", "end_pregnancy",
     })
 
-    rebuilt = MediatorBotSpec(
-        bot_id=MEDIATOR_BOT_ID,
-        prompt_renderer=MEDIATOR_BOT.prompt_renderer,
+    # Use dataclasses.replace so every field on MEDIATOR_BOT — including
+    # provider_chain and any future BotSpec additions — survives the rebuild
+    # without requiring a parallel field list here.
+    rebuilt = dataclasses.replace(
+        MEDIATOR_BOT,
         step_instructions=MEDIATOR_STEP_INSTRUCTIONS,
-        skeleton_overrides=MEDIATOR_BOT.skeleton_overrides,
         display_name=display_name,
         primary_topic_slug="relationship",
         participants_shape="dyad",
@@ -153,12 +145,9 @@ async def populate_mediator_spec_from_db(pool: Any) -> None:
             require_reason_for_cross_topic=True,
         ),
         cross_topic_policy="peek",
-        tool_allowlist=frozenset(TOOL_DISPATCH.keys()) - HECTOR_ONLY_TOOLS - _PREGNANCY_ONLY_TOOLS,
-        # Preserve version fields so anything the in-code MEDIATOR_BOT
-        # already had set survives the rebuild.
-        bot_spec_version=MEDIATOR_BOT.bot_spec_version,
-        hot_context_builder_version=MEDIATOR_BOT.hot_context_builder_version,
-        tool_schema_version=MEDIATOR_BOT.tool_schema_version,
+        tool_allowlist=(
+            frozenset(TOOL_DISPATCH.keys()) - HECTOR_ONLY_TOOLS - _PREGNANCY_ONLY_TOOLS
+        ),
     )
     BOT_SPECS[MEDIATOR_BOT_ID] = rebuilt
     logger.info(

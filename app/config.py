@@ -103,6 +103,42 @@ class Settings(BaseSettings):
     # Inbound queue: maximum retry attempts for failed messages before they
     # are marked terminal (no further automatic retry).
     inbound_queue_max_retry_attempts: int = Field(default=3, ge=0, le=50)
+    # Recovery-v2 retry backoff base (seconds): scheduled retry delay for a
+    # ``retryable_pre_send`` failure on its first attempt; subsequent attempts
+    # double via SET-time CASE in inbound_queue.fail_messages, capped below.
+    recovery_v2_retry_base_seconds: int = 15
+    # Recovery-v2 retry backoff cap (seconds): maximum scheduled retry delay
+    # regardless of attempt count.
+    recovery_v2_retry_cap_seconds: int = 600
+    # ── Project A2 provider robustness ─────────────────────────────────
+    # Maximum Retry-After value (seconds) the provider chain will honour
+    # in-band before advancing to the next provider hop.  Values above this
+    # cap are treated as "skip wait, advance to fallback".
+    provider_retry_after_cap_seconds: int = 30
+    # Sliding window (seconds) for the per-bot fallback-rate circuit breaker.
+    provider_fallback_breaker_window_seconds: int = 300
+    # Fallback rate (fell_back / samples) that trips the breaker open.
+    provider_fallback_breaker_threshold: float = 0.5
+    # Minimum sample count before the breaker is allowed to trip open.
+    provider_fallback_breaker_min_samples: int = 10
+    # Per-call provider timeout (seconds).  Applied to the DeepSeek HTTPX
+    # client and used as a soft assumption for Anthropic.  Kept at the same
+    # default as the previous hard-coded DeepSeek timeout (120s) so existing
+    # latency profiles are unchanged.
+    provider_call_timeout_seconds: int = 120
+    # ── Project C feature flags (off by default) ───────────────────────
+    # When True, routes provider message conversions through the canonical
+    # IR in app/llm/internal_message.py instead of A2's sanitize-on-boundary
+    # path (``_anthropic_safe_messages``).  Kept OFF until a third provider
+    # makes the abstraction load-bearing.  See Project C, C1.
+    provider_use_canonical_ir: bool = False
+    # When True, claim/complete/fail mutator helpers in
+    # app/services/inbound_queue.py also write rows to the
+    # ``mediator.inbound_handling_attempts`` ledger (Project C, C2).  Read
+    # paths (recovery / retry sweepers) are unchanged and continue to
+    # consult ``messages.next_retry_at`` + ``messages.failure_class``.
+    # Flip OFF to revert to messages-only writes without a redeploy.
+    ledger_dual_write_enabled: bool = False
     heartbeat_interval_hours: int = 24
     anthropic_input_usd_per_mtok: float = 3.0  # Cache creation is 1.25x input.
     anthropic_output_usd_per_mtok: float = 15.0  # Cache reads are 0.10x input.

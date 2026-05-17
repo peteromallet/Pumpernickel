@@ -51,7 +51,9 @@ class DeepSeekMessages:
         if settings.deepseek_thinking_enabled:
             payload["thinking"] = {"type": "enabled"}
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(
+            timeout=settings.provider_call_timeout_seconds
+        ) as client:
             response = await client.post(
                 f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
                 headers={

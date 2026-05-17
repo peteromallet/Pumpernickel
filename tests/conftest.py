@@ -2243,6 +2243,10 @@ class FakePool:
             "SELECT paused_at FROM system_state WHERE key = 'global_pause'"
         ):
             return self.system_state["global_pause"].get("paused_at")
+        if compact.startswith(
+            "SELECT value FROM system_state WHERE key = 'recovery_v2_kill'"
+        ):
+            return self.system_state.get("recovery_v2_kill", {}).get("value")
         if compact.startswith("SELECT paused FROM user_bot_state WHERE user_id"):
             # S2a: per-(user,bot) pause read path — always not paused in tests
             return None
@@ -2307,6 +2311,8 @@ class FakePool:
                 msg["processing_started_at"] = datetime.now(UTC)
                 msg["processing_attempts"] = msg.get("processing_attempts", 0) + 1
                 msg["processing_error"] = None
+                # Recovery-v2: claim NULLs the retry pointer via writer marker.
+                msg["next_retry_at"] = None
                 claimed.append({"id": msg_id})
             return claimed
         # ── 0041: _recovery_scopes query ─────────────────────────────────
@@ -2338,6 +2344,13 @@ class FakePool:
                     continue
                 sent_at = msg.get("sent_at")
                 if sent_at is not None and sent_at >= datetime.now(UTC) - timedelta(seconds=30):
+                    continue
+                # Recovery-v2: respect next_retry_at gate and terminal classes.
+                fclass = msg.get("failure_class")
+                if fclass in ("terminal_post_send", "infra_bug"):
+                    continue
+                nra = msg.get("next_retry_at")
+                if nra is not None and nra > datetime.now(UTC):
                     continue
                 has_prior_turn = any(
                     msg["id"] in (turn.get("triggering_message_ids") or [])
@@ -2934,6 +2947,36 @@ class FakePool:
                         }
                     )
             return rows
+        if (
+            compact.startswith(
+                "SELECT id, triggering_message_ids, user_in_context AS user_id"
+            )
+            and "FROM bot_turns" in compact
+            and "failure_reason = 'crashed'" in compact
+        ):
+            # Recovery-v2: SELECT crashed bot_turns for re-dispatch.
+            rows = []
+            cutoff = datetime.now(UTC) - timedelta(minutes=5)
+            for turn in self.bot_turns.values():
+                if turn.get("failure_reason") != "crashed":
+                    continue
+                if turn.get("completed_at") is not None:
+                    continue
+                if turn.get("final_output_message_id") is not None:
+                    continue
+                started_at = turn.get("started_at")
+                if started_at is not None and started_at >= cutoff:
+                    continue
+                rows.append(
+                    {
+                        "id": turn["id"],
+                        "triggering_message_ids": turn["triggering_message_ids"],
+                        "user_id": turn.get("user_in_context"),
+                        "bot_id": turn.get("bot_id"),
+                        "topic_id": turn.get("topic_id"),
+                    }
+                )
+            return rows
         if compact.startswith("WITH due AS"):
             now, limit, heartbeat_only, worker_id = args
             rows = []
@@ -3091,9 +3134,24 @@ class FakePool:
                 )
             rows.sort(key=lambda row: row["created_at"], reverse=True)
             return rows[:5]
-        if "FROM bot_turns" in compact:
+        if "FROM v_bot_actions" in compact or "FROM bot_turns" in compact:
+            # Project B work item 3: the real query is `SELECT ... FROM
+            # v_bot_actions WHERE bot_id = $1 AND ...`.  Args[0] is the
+            # caller's bot_id; we honour the bot-scoping filter here so
+            # FakePool tests get the same semantics as Postgres.
+            bot_filter = args[0] if args else None
             rows = []
             for turn in self.bot_turns.values():
+                # If the FakePool turn was seeded without a bot_id (legacy
+                # tests pre-date the v_bot_actions refactor), don't drop
+                # it — production turns always have bot_id NOT NULL.
+                turn_bot_id = turn.get("bot_id")
+                if (
+                    bot_filter is not None
+                    and turn_bot_id is not None
+                    and turn_bot_id != bot_filter
+                ):
+                    continue
                 trigger = self.messages.get(turn.get("triggered_by_message_id"))
                 outbound = self.messages.get(turn.get("final_output_message_id"))
                 audit_events = [
@@ -3119,6 +3177,12 @@ class FakePool:
                         "turn_id": turn["id"],
                         "triggering_content": (
                             trigger.get("content") if trigger else None
+                        ),
+                        "triggering_handling_result": (
+                            trigger.get("handling_result") if trigger else None
+                        ),
+                        "triggering_processing_error": (
+                            trigger.get("processing_error") if trigger else None
                         ),
                         "final_outbound_content": (
                             outbound.get("content") if outbound else None
@@ -3421,6 +3485,8 @@ class FakePool:
             return "SET"
         if compact == "SELECT 1":
             return "SELECT 1"
+        if compact.startswith("SELECT set_config("):
+            return "SELECT 1"
         if (
             compact.startswith("INSERT INTO system_state")
             and "paused_at = EXCLUDED.paused_at" in compact
@@ -3442,6 +3508,19 @@ class FakePool:
                 paused_by_user_id=None,
                 updated_at=now,
             )
+            return "INSERT 0 1"
+        if (
+            compact.startswith("INSERT INTO system_state")
+            and "'recovery_v2_kill'" in compact
+        ):
+            # Engage / disengage the recovery-v2 kill switch.
+            now = args[0]
+            value = {"on": "true" in compact.split("VALUES")[1].split("ON CONFLICT")[0]}
+            self.system_state["recovery_v2_kill"] = {
+                "key": "recovery_v2_kill",
+                "value": value,
+                "updated_at": now,
+            }
             return "INSERT 0 1"
         if compact.startswith("INSERT INTO llm_spend_log"):
             provider, dollars = args
@@ -3611,6 +3690,9 @@ class FakePool:
                     msg["handling_result"] = handling_result
                     msg["handled_at"] = datetime.now(UTC)
                     msg["handled_by_turn_id"] = handled_by_turn_id
+                    # Recovery-v2: complete_messages NULLs both lifecycle cols.
+                    msg["next_retry_at"] = None
+                    msg["failure_class"] = None
                     count += 1
             return f"UPDATE {count}"
         # fail_messages → failed + error
@@ -3621,6 +3703,9 @@ class FakePool:
             topic_id_arg = args[2]
             processing_error = args[3]
             handled_by_turn_id = args[4] if len(args) > 4 else None
+            failure_class = args[5] if len(args) > 5 else None
+            backoff_base = args[6] if len(args) > 6 else None
+            backoff_cap = args[7] if len(args) > 7 else None
             count = 0
             for message_id in message_ids:
                 if message_id in self.messages:
@@ -3637,6 +3722,24 @@ class FakePool:
                     if handled_by_turn_id is not None:
                         msg["handled_by_turn_id"] = handled_by_turn_id
                         msg["handled_at"] = datetime.now(UTC)
+                    # Recovery-v2 lifecycle columns: failure_class + backoff.
+                    if failure_class is not None:
+                        msg["failure_class"] = failure_class
+                        if (
+                            failure_class == "retryable_pre_send"
+                            and backoff_base is not None
+                            and backoff_cap is not None
+                        ):
+                            attempts = msg.get("processing_attempts", 0)
+                            seconds = min(
+                                float(backoff_base) * (2 ** max(attempts - 1, 0)),
+                                float(backoff_cap),
+                            )
+                            msg["next_retry_at"] = datetime.now(UTC) + timedelta(
+                                seconds=seconds
+                            )
+                        else:
+                            msg["next_retry_at"] = None
                     count += 1
             return f"UPDATE {count}"
         # defer_messages (0041 queue helper with direction='inbound' guard)
@@ -3753,6 +3856,13 @@ class FakePool:
                         continue
                     max_retries = args[2] if len(args) > 2 and isinstance(args[2], int) else 3
                     if msg.get("processing_attempts", 0) >= max_retries:
+                        continue
+                    # Recovery-v2: skip terminal classes + honour next_retry_at gate.
+                    fclass = msg.get("failure_class")
+                    if fclass in ("terminal_post_send", "infra_bug"):
+                        continue
+                    nra = msg.get("next_retry_at")
+                    if nra is not None and nra > datetime.now(UTC):
                         continue
                     msg["processing_state"] = "raw"
                     msg["processing_started_at"] = None
@@ -4201,3 +4311,34 @@ async def async_client(app_env: None, fake_asyncpg: None) -> AsyncIterator[Async
             transport=transport, base_url="http://testserver"
         ) as client:
             yield client
+
+
+# ---------------------------------------------------------------------------
+# Project B.1: real-Postgres fixtures (see tests/fixtures/postgres.py).
+#
+# Tests opt in with ``pytestmark = pytest.mark.postgres`` and request the
+# ``pg_pool`` / ``pg_dsn`` fixtures.  The fixtures auto-skip on hosts that
+# have neither Docker nor ``TEST_DATABASE_URL`` set.
+# ---------------------------------------------------------------------------
+
+from tests.fixtures.postgres import (  # noqa: E402  (re-export at end of conftest)
+    pg_dsn as pg_dsn,
+    pg_pool as pg_pool,
+    _pg_container as _pg_container,
+)
+
+# Project B.2: scenario fixtures (replied / silent / failed_pre_send turns).
+# See tests/fixtures/scenarios.py for the seeding details.
+from tests.fixtures.scenarios import (  # noqa: E402  (re-export at end of conftest)
+    replied_turn as replied_turn,
+    silent_turn as silent_turn,
+    failed_pre_send_turn as failed_pre_send_turn,
+)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "postgres: test requires a real Postgres instance "
+        "(provisioned via Docker locally or the CI services container).",
+    )
