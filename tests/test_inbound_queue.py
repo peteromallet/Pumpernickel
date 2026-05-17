@@ -277,7 +277,7 @@ async def test_complete_messages_applies_to_any_inbound_row_in_scope():
 # ── failure marking ──────────────────────────────────────────────────
 
 
-async def test_fail_messages_with_processing_error():
+async def test_fail_messages_with_processing_error(app_env):
     """fail_messages marks rows failed with error metadata."""
     pool = FakePool()
     bot_id = "mediator"
@@ -298,6 +298,8 @@ async def test_fail_messages_with_processing_error():
         handled_by_turn_id=turn_id,
         bot_id=bot_id,
         topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="llm_timeout",
     )
     m = pool.messages[mid]
     assert m["processing_state"] == "failed"
@@ -305,7 +307,7 @@ async def test_fail_messages_with_processing_error():
     assert m["handled_by_turn_id"] == turn_id
 
 
-async def test_fail_messages_null_turn_id_crash_before_turn():
+async def test_fail_messages_null_turn_id_crash_before_turn(app_env):
     """fail_messages handles null turn_id for crash-before-turn scenarios."""
     pool = FakePool()
     bot_id = "mediator"
@@ -324,12 +326,14 @@ async def test_fail_messages_null_turn_id_crash_before_turn():
         handled_by_turn_id=None,
         bot_id=bot_id,
         topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="crashed",
     )
     m = pool.messages[mid]
     assert m["processing_state"] == "failed"
 
 
-async def test_fail_messages_applies_to_any_inbound_row_in_scope():
+async def test_fail_messages_applies_to_any_inbound_row_in_scope(app_env):
     """fail_messages trusts the caller to pass appropriate rows; no state filter."""
     pool = FakePool()
     bot_id = "mediator"
@@ -346,6 +350,8 @@ async def test_fail_messages_applies_to_any_inbound_row_in_scope():
         handled_by_turn_id=uuid4(),
         bot_id=bot_id,
         topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="crashed",
     )
     assert pool.messages[mid]["processing_state"] == "failed"
     assert pool.messages[mid]["processing_error"] == "error"
@@ -493,7 +499,7 @@ async def test_recover_retryable_failed_default_max():
 # ── direction guard ──────────────────────────────────────────────────
 
 
-async def test_direction_guard_on_all_helpers():
+async def test_direction_guard_on_all_helpers(app_env):
     """All queue helpers enforce direction='inbound'."""
     pool = FakePool()
     bot_id = "mediator"
@@ -521,6 +527,8 @@ async def test_direction_guard_on_all_helpers():
         handled_by_turn_id=uuid4(),
         bot_id=bot_id,
         topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="crashed",
     )
     assert pool.messages[out_id].get("processing_error") is None
 
@@ -688,7 +696,7 @@ async def test_newer_inbound_withheld():
     assert m["handling_result"] == "withheld_newer_inbound"
 
 
-async def test_provider_send_failure_marked_failed():
+async def test_provider_send_failure_marked_failed(app_env):
     """Provider send failure marks message as failed."""
     pool = FakePool()
     bot_id = "mediator"
@@ -709,6 +717,8 @@ async def test_provider_send_failure_marked_failed():
         handled_by_turn_id=turn_id,
         bot_id=bot_id,
         topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="provider_send_failed",
     )
     m = pool.messages[mid]
     assert m["processing_state"] == "failed"
@@ -795,7 +805,7 @@ async def test_fully_unclaimable_nonempty_trigger_list_returns_zero():
 # ── media preprocessing scenarios ────────────────────────────────────
 
 
-async def test_media_preprocessing_failure_marks_failed():
+async def test_media_preprocessing_failure_marks_failed(app_env):
     """Media preprocessing failure marks message as failed."""
     pool = FakePool()
     bot_id = "mediator"
@@ -814,6 +824,8 @@ async def test_media_preprocessing_failure_marks_failed():
         handled_by_turn_id=uuid4(),
         bot_id=bot_id,
         topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="transcription_failed",
     )
     m = pool.messages[mid]
     assert m["processing_state"] == "failed"
@@ -935,3 +947,367 @@ async def test_recovery_stale_processing_scoped():
     assert pool.messages[mid_a]["processing_state"] == "raw"
     # bot_b row should remain processing
     assert pool.messages[mid_b]["processing_state"] == "processing"
+
+
+# ── recovery-v2 lifecycle: writer-marker call sequence + backoff ─────
+
+
+class _SequenceConn:
+    """FakeConnection wrapper that records the (sql) sequence on the parent
+    pool, plus a marker for whether the call happened inside ``transaction()``.
+
+    Used to assert that ``fail_messages`` / ``complete_messages`` /
+    ``claim_messages_for_turn`` execute ``set_config('app.lifecycle_writer',
+    'inbound_queue', true)`` on the SAME connection IMMEDIATELY before the
+    UPDATE, within the same transaction.
+    """
+
+    def __init__(self, pool, log, conn_id):
+        self._pool = pool
+        self._log = log
+        self._conn_id = conn_id
+        self._in_tx = False
+
+    def transaction(self):
+        return _SequenceTx(self)
+
+    async def execute(self, sql, *args):
+        self._log.append((self._conn_id, self._in_tx, " ".join(sql.split())))
+        return await self._pool.execute(sql, *args)
+
+    async def fetch(self, sql, *args):
+        self._log.append((self._conn_id, self._in_tx, " ".join(sql.split())))
+        return await self._pool.fetch(sql, *args)
+
+    async def fetchrow(self, sql, *args):
+        self._log.append((self._conn_id, self._in_tx, " ".join(sql.split())))
+        return await self._pool.fetchrow(sql, *args)
+
+    async def fetchval(self, sql, *args):
+        self._log.append((self._conn_id, self._in_tx, " ".join(sql.split())))
+        return await self._pool.fetchval(sql, *args)
+
+
+class _SequenceTx:
+    def __init__(self, conn):
+        self._conn = conn
+
+    async def __aenter__(self):
+        self._conn._in_tx = True
+        return None
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self._conn._in_tx = False
+        return False
+
+
+class _SequenceAcquire:
+    def __init__(self, pool, log, conn_id):
+        self._pool = pool
+        self._log = log
+        self._conn_id = conn_id
+
+    async def __aenter__(self):
+        return _SequenceConn(self._pool, self._log, self._conn_id)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class SequenceFakePool(FakePool):
+    """FakePool subclass that captures every execute/fetch call on its
+    acquired connections, tagged with conn_id and in-transaction marker."""
+
+    def __init__(self):
+        super().__init__()
+        self.call_log: list[tuple[int, bool, str]] = []
+        self._next_conn_id = 0
+
+    def acquire(self):
+        self._next_conn_id += 1
+        return _SequenceAcquire(self, self.call_log, self._next_conn_id)
+
+
+async def test_fail_messages_persists_failure_class_and_renders_case_backoff(app_env):
+    """fail_messages persists failure_class, renders SET-time CASE backoff,
+    and emits set_config writer-marker immediately before the UPDATE on the
+    same connection within a transaction."""
+    pool = SequenceFakePool()
+    bot_id = "mediator"
+    topic_id = uuid4()
+    mid = _seed_msg(
+        pool,
+        bot_id=bot_id,
+        topic_id=topic_id,
+        processing_state="processing",
+        processing_started_at=datetime.now(UTC),
+        processing_attempts=1,
+    )
+
+    await fail_messages(
+        pool, [mid],
+        processing_error="provider_send_failed: 502",
+        handled_by_turn_id=uuid4(),
+        bot_id=bot_id,
+        topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="provider_send_failed",
+    )
+
+    # Persisted lifecycle columns on the row
+    m = pool.messages[mid]
+    assert m["failure_class"] == "retryable_pre_send"
+    assert m["next_retry_at"] is not None
+
+    # Writer-marker call sequence: set_config → UPDATE on same conn within tx,
+    # with no other calls between them.
+    update_idx = next(
+        i for i, (_cid, _tx, sql) in enumerate(pool.call_log)
+        if sql.startswith("UPDATE messages") and "failure_class" in sql
+    )
+    setcfg_idx = update_idx - 1
+    setcfg = pool.call_log[setcfg_idx]
+    update = pool.call_log[update_idx]
+    assert setcfg[2].startswith("SELECT set_config(")
+    assert "'app.lifecycle_writer'" in setcfg[2]
+    assert "'inbound_queue'" in setcfg[2]
+    # Same connection
+    assert setcfg[0] == update[0]
+    # Inside a transaction
+    assert setcfg[1] is True and update[1] is True
+
+    # SET-time CASE expression is rendered in the UPDATE SQL
+    assert "CASE" in update[2]
+    assert "'retryable_pre_send'" in update[2]
+    assert "next_retry_at" in update[2]
+    assert "processing_attempts" in update[2]
+
+
+async def test_fail_messages_rejects_unknown_failure_class(app_env):
+    """fail_messages raises ValueError for any class outside FAILURE_CLASSES."""
+    pool = FakePool()
+    topic_id = uuid4()
+    mid = _seed_msg(
+        pool,
+        bot_id="mediator",
+        topic_id=topic_id,
+        processing_state="processing",
+        processing_started_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(ValueError, match="unknown failure_class"):
+        await fail_messages(
+            pool, [mid],
+            processing_error="bad",
+            handled_by_turn_id=None,
+            bot_id="mediator",
+            topic_id=topic_id,
+            failure_class="not_a_real_class",
+            failure_reason="provider_send_failed",
+        )
+
+
+async def test_complete_messages_clears_next_retry_at_and_failure_class(app_env):
+    """complete_messages NULLs both lifecycle columns via the mutator path."""
+    pool = FakePool()
+    bot_id = "mediator"
+    topic_id = uuid4()
+    mid = _seed_msg(
+        pool,
+        bot_id=bot_id,
+        topic_id=topic_id,
+        processing_state="processing",
+        processing_started_at=datetime.now(UTC),
+    )
+    pool.messages[mid]["failure_class"] = "retryable_pre_send"
+    pool.messages[mid]["next_retry_at"] = datetime.now(UTC) + timedelta(seconds=30)
+
+    await complete_messages(
+        pool, [mid],
+        handling_result="replied",
+        handled_by_turn_id=uuid4(),
+        bot_id=bot_id,
+        topic_id=topic_id,
+    )
+    m = pool.messages[mid]
+    assert m["processing_state"] == "processed"
+    assert m["failure_class"] is None
+    assert m["next_retry_at"] is None
+
+
+async def test_claim_messages_for_turn_clears_next_retry_at(app_env):
+    """claim_messages_for_turn NULLs next_retry_at when re-claiming a row."""
+    pool = FakePool()
+    bot_id = "mediator"
+    topic_id = uuid4()
+    mid = _seed_msg(
+        pool,
+        bot_id=bot_id,
+        topic_id=topic_id,
+        processing_state="raw",
+    )
+    pool.messages[mid]["next_retry_at"] = datetime.now(UTC) - timedelta(seconds=60)
+
+    claimed = await claim_messages_for_turn(
+        pool, [mid], bot_id=bot_id, topic_id=topic_id
+    )
+    assert claimed == [mid]
+    assert pool.messages[mid]["next_retry_at"] is None
+
+
+async def test_fail_messages_backoff_grows_to_cap(app_env, monkeypatch):
+    """SET-time CASE backoff: attempts=1→base, attempts=2→2*base, attempts large→cap."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("RECOVERY_V2_RETRY_BASE_SECONDS", "10")
+    monkeypatch.setenv("RECOVERY_V2_RETRY_CAP_SECONDS", "120")
+    get_settings.cache_clear()
+    base = get_settings().recovery_v2_retry_base_seconds
+    cap = get_settings().recovery_v2_retry_cap_seconds
+
+    async def _fail_with_attempts(attempts: int) -> float:
+        pool = FakePool()
+        topic_id = uuid4()
+        mid = _seed_msg(
+            pool,
+            bot_id="mediator",
+            topic_id=topic_id,
+            processing_state="processing",
+            processing_started_at=datetime.now(UTC),
+            processing_attempts=attempts,
+        )
+        before = datetime.now(UTC)
+        await fail_messages(
+            pool, [mid],
+            processing_error="x",
+            handled_by_turn_id=None,
+            bot_id="mediator",
+            topic_id=topic_id,
+            failure_class="retryable_pre_send",
+            failure_reason="provider_send_failed",
+        )
+        nra = pool.messages[mid]["next_retry_at"]
+        return (nra - before).total_seconds()
+
+    delay1 = await _fail_with_attempts(1)
+    delay2 = await _fail_with_attempts(2)
+    delay_huge = await _fail_with_attempts(20)
+
+    # Tolerate scheduling jitter on either side of the expected delay.
+    assert abs(delay1 - base) < 2
+    assert abs(delay2 - 2 * base) < 2
+    assert abs(delay_huge - cap) < 2
+
+    get_settings.cache_clear()
+
+
+async def test_schema_acceptance_lifecycle_columns_present(app_env):
+    """SD-004 schema acceptance: a single message row exposes processing_state,
+    failure_class, next_retry_at, processing_attempts, handled_by_turn_id."""
+    pool = FakePool()
+    topic_id = uuid4()
+    turn_id = uuid4()
+    mid = _seed_msg(
+        pool,
+        bot_id="mediator",
+        topic_id=topic_id,
+        processing_state="processing",
+        processing_started_at=datetime.now(UTC),
+        processing_attempts=2,
+    )
+
+    await fail_messages(
+        pool, [mid],
+        processing_error="timeout",
+        handled_by_turn_id=turn_id,
+        bot_id="mediator",
+        topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason="llm_timeout",
+    )
+    m = pool.messages[mid]
+    expected = {
+        "processing_state",
+        "failure_class",
+        "next_retry_at",
+        "processing_attempts",
+        "handled_by_turn_id",
+    }
+    missing = expected - set(m.keys())
+    assert missing == set(), f"missing lifecycle columns: {missing}"
+    assert m["processing_state"] == "failed"
+    assert m["failure_class"] == "retryable_pre_send"
+    assert m["next_retry_at"] is not None
+    assert m["processing_attempts"] == 2
+    assert m["handled_by_turn_id"] == turn_id
+
+
+# ── Project A2: failure_reason mapping for provider-chain reasons ─────────
+
+
+def test_a2_provider_chain_failure_reasons_map_to_retryable_pre_send(app_env):
+    """All four new A2 provider-chain failure reasons map to retryable_pre_send."""
+    from app.services.inbound_queue import FAILURE_REASON_TO_CLASS
+
+    for reason in (
+        "provider_fallback_killed",
+        "same_provider_fallback_noop",
+        "fallback_breaker_open",
+        "respond_cap_no_output",
+    ):
+        assert FAILURE_REASON_TO_CLASS[reason] == "retryable_pre_send", reason
+
+
+def test_a2_unsupported_chain_maps_to_infra_bug(app_env):
+    """unsupported_chain_anthropic_to_deepseek is a config bug → infra_bug."""
+    from app.services.inbound_queue import FAILURE_REASON_TO_CLASS
+
+    assert (
+        FAILURE_REASON_TO_CLASS["unsupported_chain_anthropic_to_deepseek"]
+        == "infra_bug"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_reason",
+    [
+        "provider_fallback_killed",
+        "same_provider_fallback_noop",
+        "fallback_breaker_open",
+        "respond_cap_no_output",
+    ],
+)
+async def test_a2_fail_messages_sets_next_retry_at_for_provider_reasons(
+    app_env, failure_reason
+):
+    """fail_messages(failure_class=retryable_pre_send, failure_reason=<A2>)
+    sets next_retry_at to a non-NULL backoff timestamp."""
+    pool = FakePool()
+    bot_id = "mediator"
+    topic_id = uuid4()
+    turn_id = uuid4()
+    mid = _seed_msg(
+        pool,
+        processing_state="processing",
+        bot_id=bot_id,
+        topic_id=topic_id,
+        processing_started_at=datetime.now(UTC),
+        processing_attempts=1,
+        handled_by_turn_id=turn_id,
+    )
+
+    await fail_messages(
+        pool,
+        [mid],
+        processing_error=f"A2: {failure_reason}",
+        handled_by_turn_id=turn_id,
+        bot_id=bot_id,
+        topic_id=topic_id,
+        failure_class="retryable_pre_send",
+        failure_reason=failure_reason,
+    )
+
+    m = pool.messages[mid]
+    assert m["processing_state"] == "failed"
+    assert m["failure_class"] == "retryable_pre_send"
+    assert m["next_retry_at"] is not None

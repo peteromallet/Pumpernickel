@@ -1,0 +1,36 @@
+base_branch: main
+merge_policy: review
+
+milestones:
+  - label: veas-full-migration
+    idea: .megaplan/briefs/agentkit-migration/veas-full-migration.md
+    branch: megaplan/agentkit-migration
+    profile: thoughtful
+    robustness: standard
+    vendor: codex
+    depth: high
+    with_feedback: true
+    deepseek_provider: direct
+    phase_model:
+      - feedback=codex:low
+    notes: >
+      Full Veas mediator-bot migration to agentkit. Replaces _run_agentic
+      with agentkit.loop + StepPlan, claim/coalesce/defer/audit/router with
+      agentkit primitives. Mediator prompt, charge logic, and escalation
+      gates stay app-local. Requires agentkit v0.2.0. Shadow mode for 24h,
+      eval-suite parity ≥95%, then per-bot rollout at 1h intervals, then
+      7-day soak before deletion. Highest-risk milestone — Veas is in prod.
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+
+driver:
+  stall_threshold: 5
+  max_iterations: 120
+  phase_timeout: 3600
+  status_timeout: 60
+  on_escalate: abort
+  robustness: standard
+  auto_approve: true

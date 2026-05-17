@@ -5,6 +5,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
@@ -19,8 +20,10 @@ from app.models.user import User
 from app.routers import admin, health, whatsapp as whatsapp_router
 from app.services import agentic, discord, hooks, whatsapp
 from app.services.agentic import run_agentic_turn, run_agentic_turn_with_metadata
+from app.services.coalescer_registry import CoalescerRegistry
 from app.services.debouncer import BurstCoalescer
 from app.services.pacer import DiscordPacer, PacedSendKind, PacingDecision
+from app.services.metrics_sweep import run_metrics_sweep_forever
 from app.services.recovery import recover_on_startup, run_recovery_forever
 from app.services.scheduled_job_handlers import ScheduledJobHandlers, seed_weekly_reflections
 from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
@@ -248,7 +251,7 @@ def _install_bot_coalescer(
     mediator's DiscordClient when a non-mediator gateway dispatches a turn.
     """
     coalescer, pacer = _build_coalescer_for_bot(pool, settings, bot_id=bot_id)
-    app.state.coalescers[bot_id] = coalescer
+    app.state.coalescer_registry.register(bot_id, coalescer)
     if pacer is not None:
         app.state.discord_pacers[bot_id] = pacer
     return coalescer
@@ -286,10 +289,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # transports we build a mediator coalescer eagerly; for discord we
         # build one per bot inside the gateway loop so the glue closures
         # capture the right bot_id (no leaks to the mediator client).
-        app.state.coalescers: dict[str, BurstCoalescer] = {}
+        # ``app.state.coalescers`` is a read-only MappingProxyType view of
+        # ``app.state.coalescer_registry.installed`` retained as a compat
+        # shim for tests and call sites that read by bot_id; all writes go
+        # through ``registry.register()``.
+        app.state.coalescer_registry = CoalescerRegistry()
+        app.state.coalescers = MappingProxyType(app.state.coalescer_registry.installed)
         app.state.discord_pacers: dict[str, DiscordPacer] = {}
         if not _discord_provider_enabled(settings):
             _install_bot_coalescer(app, pool, settings, bot_id=MEDIATOR_BOT_ID)
+            # Non-discord (whatsapp / mediator-only) transports have no
+            # gateway loop to flip readiness; mark ready immediately after
+            # install so recovery-v2 is enabled on whatsapp-only deploys.
+            app.state.coalescer_registry.mark_ready(MEDIATOR_BOT_ID)
         app.state.background_tasks: set[asyncio.Task] = set()
         if settings.messaging_provider.strip().lower() == "discord":
             # ── Per-bot gateway registration ──────────────────────────
@@ -380,6 +392,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
                 task = asyncio.create_task(gateway.run_forever())
                 app.state.background_tasks.add(task)
+                # Mark this bot ready once its transport task is launched.
+                # ``run_forever`` connects asynchronously inside the task, but
+                # from the startup loop's perspective the wiring is complete
+                # (coalescer installed + gateway dispatched).  Recovery-v2's
+                # ``CoalescerRegistry.is_ready()`` gate flips True only after
+                # every expected bot reaches this point.
+                app.state.coalescer_registry.mark_ready(bot_id)
                 logger.info("started discord gateway for bot_id=%s", bot_id)
 
             # ── Summary diagnostics after registration ──────────────────
@@ -401,14 +420,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             if not started_ids and not skipped_ids:
                 logger.info("startup diagnostic discord_gateways=none_started")
-        if app.state.coalescers:
-            await recover_on_startup(pool, app.state.coalescers)
-            recovery_task = asyncio.create_task(run_recovery_forever(pool, app.state.coalescers))
+        # Project C, C2 reconciliation: gated by the same
+        # ``ledger_dual_write_enabled`` flag that gates the dual-write itself.
+        # No-op when disabled.  Runs BEFORE recover_on_startup so any
+        # synthesized 'catch_up' rows are in place if recovery flips a
+        # row's state on this same boot.
+        try:
+            from app.services.inbound_queue import reconcile_ledger_active_attempts
+
+            await reconcile_ledger_active_attempts(pool)
+        except Exception:
+            logger.exception("ledger reconciliation failed; continuing startup")
+        if app.state.coalescer_registry.installed:
+            await recover_on_startup(pool, app.state.coalescer_registry)
+            recovery_task = asyncio.create_task(
+                run_recovery_forever(pool, app.state.coalescer_registry)
+            )
             app.state.background_tasks.add(recovery_task)
         else:
             logger.warning(
                 "recovery worker skipped: no bot coalescers built"
             )
+        # A3 work item 6: periodic metrics sweep (terminal-without-outbound
+        # gauge + attempt-age latency observations).  Independent of recovery
+        # so a recovery-loop crash does not silence observability.
+        metrics_sweep_task = asyncio.create_task(run_metrics_sweep_forever(pool))
+        app.state.background_tasks.add(metrics_sweep_task)
         if settings.scheduler_enabled:
             await seed_heartbeat(pool, settings=settings)
             await seed_weekly_reflections(pool)

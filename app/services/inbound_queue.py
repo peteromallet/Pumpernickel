@@ -32,9 +32,22 @@ Once a row reaches a terminal state it MUST NOT be retried or re-enqueued.
 All helpers in this module include ``direction='inbound'`` guards.
 Outbound rows are never touched by these functions.
 
+Lifecycle-column writer invariant (recovery-v2)
+-----------------------------------------------
+``claim_messages_for_turn``, ``complete_messages``, and ``fail_messages`` are
+the SOLE legitimate mutators of ``messages.next_retry_at`` and
+``messages.failure_class``.  Migration 0042 installs a BEFORE UPDATE row
+trigger (mediator.assert_lifecycle_columns_writer) that RAISEs unless the
+mutating transaction has set the txn-local GUC
+``app.lifecycle_writer = 'inbound_queue'`` via
+``set_config('app.lifecycle_writer', 'inbound_queue', true)`` on the same
+connection.  Any ad-hoc UPDATE elsewhere that touches those columns will
+fail loudly at write time.
+
 Design decisions
 ----------------
-See SD-001 through SD-007 in the durable-inbound-queue-hardening brief.
+See SD-001 through SD-007 in the durable-inbound-queue-hardening brief and
+SD-A1-T1 through SD-A1-T8 in the agent-reliability cleanup brief.
 
 - claim_messages_for_turn uses an atomic CTE (UPDATE ... WHERE ... RETURNING)
   to prevent two workers from claiming the same row.
@@ -53,7 +66,167 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from app.config import get_settings
+from app.services import metrics
+
 logger = logging.getLogger(__name__)
+
+
+_SET_LIFECYCLE_WRITER_SQL = (
+    "SELECT set_config('app.lifecycle_writer', 'inbound_queue', true)"
+)
+
+
+# ── ledger dual-write (Project C, C2) ────────────────────────────────────────
+#
+# When ``settings.ledger_dual_write_enabled`` is True, the claim / complete /
+# fail helpers ALSO write rows to ``mediator.inbound_handling_attempts``.
+# The read path (recovery / retry sweepers) is unchanged — it still reads
+# ``messages.next_retry_at`` + ``messages.failure_class``.  The flag is the
+# kill switch: flip OFF to revert to messages-only writes without a redeploy.
+#
+# Failure isolation: the ledger write happens on the SAME connection inside
+# the SAME transaction as the messages UPDATE.  If the ledger insert raises
+# (table missing on stale environments, unique-index violation, etc.) the
+# whole transaction rolls back, leaving messages unchanged.  That's the safe
+# behaviour: better to fail loudly than to silently drift the two stores.
+
+
+def _ledger_dual_write_enabled() -> bool:
+    """Read the ``ledger_dual_write_enabled`` flag without imposing a
+    Settings load on call sites that didn't already need one.
+
+    The pre-C1 fast paths (``claim_messages_for_turn`` /
+    ``complete_messages``) don't otherwise touch ``get_settings()``, and
+    forcing one would break tests that exercise those helpers without a
+    full app env.  This wrapper returns False on any settings-load
+    failure, which is the same default as a successful load with the
+    flag unset.
+    """
+    try:
+        settings = get_settings()
+    except Exception:
+        return False
+    return bool(getattr(settings, "ledger_dual_write_enabled", False))
+
+
+async def _ledger_open_active(
+    conn: Any,
+    *,
+    message_id: UUID,
+    bot_id: str,
+    topic_id: UUID,
+    attempt_number: int,
+    created_by: str,
+    bot_turn_id: UUID | None = None,
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO inbound_handling_attempts
+            (message_id, bot_turn_id, bot_id, topic_id, attempt_number,
+             status, created_by, started_at)
+        VALUES ($1, $2, $3, $4, $5, 'active', $6, now())
+        """,
+        message_id,
+        bot_turn_id,
+        bot_id,
+        topic_id,
+        attempt_number,
+        created_by,
+    )
+
+
+async def _ledger_mark_succeeded(
+    conn: Any,
+    *,
+    message_id: UUID,
+    bot_turn_id: UUID | None,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE inbound_handling_attempts
+        SET status        = 'succeeded',
+            completed_at  = now(),
+            bot_turn_id   = COALESCE($2, bot_turn_id),
+            failure_class = NULL,
+            failure_reason = NULL,
+            next_retry_at = NULL
+        WHERE message_id = $1
+          AND status = 'active'
+        """,
+        message_id,
+        bot_turn_id,
+    )
+
+
+async def _ledger_mark_failed(
+    conn: Any,
+    *,
+    message_id: UUID,
+    failure_class: str,
+    failure_reason: str | None,
+    bot_turn_id: UUID | None,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE inbound_handling_attempts
+        SET status         = 'failed',
+            completed_at   = now(),
+            failure_class  = $2,
+            failure_reason = $3,
+            bot_turn_id    = COALESCE($4, bot_turn_id),
+            next_retry_at  = (
+                SELECT m.next_retry_at FROM messages m WHERE m.id = $1
+            )
+        WHERE message_id = $1
+          AND status = 'active'
+        """,
+        message_id,
+        failure_class,
+        failure_reason,
+        bot_turn_id,
+    )
+
+
+
+
+# ── failure-class taxonomy (recovery-v2, SD-A1-T5/T7) ────────────────────────
+
+# The three durable failure classes recorded on messages.failure_class.
+FAILURE_CLASSES: frozenset[str] = frozenset({
+    "retryable_pre_send",
+    "terminal_post_send",
+    "infra_bug",
+})
+
+# Map from a turn's failure_reason string to a durable failure_class.
+# Live mapping covers reasons emitted by the current code paths
+# (provider_send_failed, llm_timeout, tool_validation_recoverable_exhausted,
+# crashed, transcription_failed, vision_failed).  Forward-compat entries
+# (spend_cap, newer_inbound_before_final_send, crashed_after_send) are
+# included for future use; do NOT fabricate test call sites for them.
+# Anything not present here (including ``"unknown"``) maps to ``infra_bug``
+# via dict.get(reason, "infra_bug") at the call site.
+FAILURE_REASON_TO_CLASS: dict[str, str] = {
+    # ── live (currently emitted by inbound/turn machinery) ──────────────
+    "provider_send_failed": "retryable_pre_send",
+    "llm_timeout": "retryable_pre_send",
+    "tool_validation_recoverable_exhausted": "retryable_pre_send",
+    "crashed": "retryable_pre_send",
+    "transcription_failed": "retryable_pre_send",
+    "vision_failed": "retryable_pre_send",
+    # ── Project A2 provider-chain failure reasons ──────────────────────
+    "provider_fallback_killed": "retryable_pre_send",
+    "same_provider_fallback_noop": "retryable_pre_send",
+    "fallback_breaker_open": "retryable_pre_send",
+    "respond_cap_no_output": "retryable_pre_send",
+    # Anthropic→DeepSeek is a genuine configuration bug, not user-recoverable.
+    "unsupported_chain_anthropic_to_deepseek": "infra_bug",
+    # ── forward-compat (dead today; do NOT fabricate test call sites) ──
+    "spend_cap": "retryable_pre_send",
+    "newer_inbound_before_final_send": "retryable_pre_send",
+    "crashed_after_send": "terminal_post_send",
+}
 
 
 def _utc_now() -> datetime:
@@ -89,29 +262,53 @@ async def claim_messages_for_turn(
     if not message_ids:
         return []
 
-    rows = await pool.fetch(
-        """
-        WITH claimed AS (
-            UPDATE messages
-            SET processing_state      = 'processing',
-                processing_started_at = now(),
-                processing_attempts   = processing_attempts + 1,
-                processing_error      = NULL
-            WHERE id = ANY($1::uuid[])
-              AND direction = 'inbound'
-              AND processing_state IN ('raw', 'deferred')
-              AND (processing_started_at IS NULL
-                   OR processing_started_at < now() - interval '5 minutes')
-              AND bot_id = $2
-              AND topic_id = $3
-            RETURNING id
-        )
-        SELECT id FROM claimed
-        """,
-        message_ids,
-        bot_id,
-        topic_id,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(_SET_LIFECYCLE_WRITER_SQL)
+            rows = await conn.fetch(
+                """
+                WITH claimed AS (
+                    UPDATE messages
+                    SET processing_state      = 'processing',
+                        processing_started_at = now(),
+                        processing_attempts   = processing_attempts + 1,
+                        processing_error      = NULL,
+                        next_retry_at         = NULL
+                    WHERE id = ANY($1::uuid[])
+                      AND direction = 'inbound'
+                      AND processing_state IN ('raw', 'deferred')
+                      AND (processing_started_at IS NULL
+                           OR processing_started_at < now() - interval '5 minutes')
+                      AND bot_id = $2
+                      AND topic_id = $3
+                    RETURNING id
+                )
+                SELECT id FROM claimed
+                """,
+                message_ids,
+                bot_id,
+                topic_id,
+            )
+            if rows and _ledger_dual_write_enabled():
+                # Fetch the post-increment attempt numbers via a small read.
+                attempt_rows = await conn.fetch(
+                    "SELECT id, processing_attempts FROM messages "
+                    "WHERE id = ANY($1::uuid[])",
+                    [row["id"] for row in rows],
+                )
+                attempts_by_id = {
+                    r["id"]: int(r["processing_attempts"] or 1)
+                    for r in attempt_rows
+                }
+                for row in rows:
+                    await _ledger_open_active(
+                        conn,
+                        message_id=row["id"],
+                        bot_id=bot_id,
+                        topic_id=topic_id,
+                        attempt_number=attempts_by_id.get(row["id"], 1),
+                        created_by="live",
+                    )
     claimed = [row["id"] for row in rows]
     unclaimed = len(message_ids) - len(claimed)
     if unclaimed:
@@ -121,6 +318,14 @@ async def claim_messages_for_turn(
             unclaimed,
             bot_id,
             str(topic_id),
+        )
+    # A3 work item 6: emit one inbound_attempts_started increment per claimed
+    # row so the started/completed ratio reflects attempt counts, not batches.
+    if claimed:
+        metrics.incr(
+            "inbound_attempts_started",
+            value=len(claimed),
+            bot=bot_id,
         )
     return claimed
 
@@ -149,24 +354,36 @@ async def complete_messages(
     if not message_ids:
         return 0
 
-    result = await pool.execute(
-        """
-        UPDATE messages
-        SET processing_state   = 'processed',
-            handling_result    = $4,
-            handled_at         = now(),
-            handled_by_turn_id = $5
-        WHERE id = ANY($1::uuid[])
-          AND direction = 'inbound'
-          AND bot_id = $2
-          AND topic_id = $3
-        """,
-        message_ids,
-        bot_id,
-        topic_id,
-        handling_result,
-        handled_by_turn_id,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(_SET_LIFECYCLE_WRITER_SQL)
+            result = await conn.execute(
+                """
+                UPDATE messages
+                SET processing_state   = 'processed',
+                    handling_result    = $4,
+                    handled_at         = now(),
+                    handled_by_turn_id = $5,
+                    next_retry_at      = NULL,
+                    failure_class      = NULL
+                WHERE id = ANY($1::uuid[])
+                  AND direction = 'inbound'
+                  AND bot_id = $2
+                  AND topic_id = $3
+                """,
+                message_ids,
+                bot_id,
+                topic_id,
+                handling_result,
+                handled_by_turn_id,
+            )
+            if _ledger_dual_write_enabled():
+                for mid in message_ids:
+                    await _ledger_mark_succeeded(
+                        conn,
+                        message_id=mid,
+                        bot_turn_id=handled_by_turn_id,
+                    )
     # asyncpg execute returns a string like "UPDATE N" — parse the count
     updated = _parse_update_count(result)
     if updated:
@@ -176,6 +393,16 @@ async def complete_messages(
             handling_result,
             bot_id,
             str(topic_id),
+        )
+        # A3 work item 6: completion is a "success" terminal class.  SD-002
+        # only defines 3 failure classes (retryable_pre_send / terminal_post_send /
+        # infra_bug); ``success`` is the sentinel label used here to keep the
+        # started/completed ratio interpretable.
+        metrics.incr(
+            "inbound_attempts_completed",
+            value=updated,
+            bot=bot_id,
+            failure_class="success",
         )
     return updated
 
@@ -190,6 +417,8 @@ async def fail_messages(
     handled_by_turn_id: UUID | None = None,
     bot_id: str,
     topic_id: UUID,
+    failure_class: str,
+    failure_reason: str | None,
 ) -> int:
     """Mark inbound messages as failed with an error description.
 
@@ -197,38 +426,95 @@ async def fail_messages(
     a turn_id is provided (i.e. the turn existed and completed enough to
     record the failure).  Otherwise the row stays in 'failed' for future
     sweeper recovery.
+
+    ``failure_class`` is required and must be one of :data:`FAILURE_CLASSES`.
+    ``next_retry_at`` is computed in-SQL as an exponential backoff for
+    ``retryable_pre_send`` rows (base/cap from
+    ``recovery_v2_retry_base_seconds`` / ``recovery_v2_retry_cap_seconds``)
+    and NULL for terminal classes.  ``failure_reason`` is currently passed
+    through for caller context only; the durable class is what the row
+    trigger and retry sweeper read.
     """
+    if failure_class not in FAILURE_CLASSES:
+        raise ValueError(
+            f"unknown failure_class: {failure_class!r}; "
+            f"expected one of {sorted(FAILURE_CLASSES)}"
+        )
     if not message_ids:
         return 0
 
-    result = await pool.execute(
-        """
-        UPDATE messages
-        SET processing_state   = 'failed',
-            processing_error   = $4,
-            handling_result    = 'failed',
-            handled_by_turn_id = COALESCE($5, handled_by_turn_id),
-            handled_at         = CASE WHEN $5 IS NOT NULL THEN now()
-                                      ELSE handled_at END
-        WHERE id = ANY($1::uuid[])
-          AND direction = 'inbound'
-          AND bot_id = $2
-          AND topic_id = $3
-        """,
-        message_ids,
-        bot_id,
-        topic_id,
-        processing_error,
-        handled_by_turn_id,
-    )
+    settings = get_settings()
+    backoff_base_seconds = settings.recovery_v2_retry_base_seconds
+    backoff_cap_seconds = settings.recovery_v2_retry_cap_seconds
+    dual_write = bool(getattr(settings, "ledger_dual_write_enabled", False))
+    # ``fail_messages`` already requires settings for the backoff knobs, so
+    # the dual-write flag piggy-backs on that existing settings access.
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(_SET_LIFECYCLE_WRITER_SQL)
+            result = await conn.execute(
+                """
+                UPDATE messages
+                SET processing_state   = 'failed',
+                    processing_error   = $4,
+                    handling_result    = 'failed',
+                    handled_by_turn_id = COALESCE($5, handled_by_turn_id),
+                    handled_at         = CASE WHEN $5 IS NOT NULL THEN now()
+                                              ELSE handled_at END,
+                    failure_class      = $6,
+                    next_retry_at      = CASE
+                        WHEN $6 = 'retryable_pre_send'
+                        THEN now() + (
+                            LEAST(
+                                $7::numeric * power(2, GREATEST(processing_attempts - 1, 0)),
+                                $8::numeric
+                            ) || ' seconds'
+                        )::interval
+                        ELSE NULL
+                    END
+                WHERE id = ANY($1::uuid[])
+                  AND direction = 'inbound'
+                  AND bot_id = $2
+                  AND topic_id = $3
+                """,
+                message_ids,
+                bot_id,
+                topic_id,
+                processing_error,
+                handled_by_turn_id,
+                failure_class,
+                backoff_base_seconds,
+                backoff_cap_seconds,
+            )
+            if dual_write:
+                for mid in message_ids:
+                    await _ledger_mark_failed(
+                        conn,
+                        message_id=mid,
+                        failure_class=failure_class,
+                        failure_reason=failure_reason,
+                        bot_turn_id=handled_by_turn_id,
+                    )
     updated = _parse_update_count(result)
     if updated:
         logger.debug(
-            "fail_messages: updated=%d error=%s bot_id=%s topic_id=%s",
+            "fail_messages: updated=%d error=%s bot_id=%s topic_id=%s "
+            "failure_class=%s failure_reason=%s",
             updated,
             processing_error[:120],
             bot_id,
             str(topic_id),
+            failure_class,
+            failure_reason,
+        )
+        # A3 work item 6: per-failure-class attempt-completed counter.
+        # ``failure_class`` is one of the SD-002 three.
+        metrics.incr(
+            "inbound_attempts_completed",
+            value=updated,
+            bot=bot_id,
+            failure_class=failure_class,
         )
     return updated
 
@@ -249,19 +535,22 @@ async def defer_messages(
     if not message_ids:
         return 0
 
-    result = await pool.execute(
-        """
-        UPDATE messages
-        SET processing_state = 'deferred'
-        WHERE id = ANY($1::uuid[])
-          AND direction = 'inbound'
-          AND bot_id = $2
-          AND topic_id = $3
-        """,
-        message_ids,
-        bot_id,
-        topic_id,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(_SET_LIFECYCLE_WRITER_SQL)
+            result = await conn.execute(
+                """
+                UPDATE messages
+                SET processing_state = 'deferred'
+                WHERE id = ANY($1::uuid[])
+                  AND direction = 'inbound'
+                  AND bot_id = $2
+                  AND topic_id = $3
+                """,
+                message_ids,
+                bot_id,
+                topic_id,
+            )
     updated = _parse_update_count(result)
     if updated:
         logger.debug(
@@ -378,6 +667,11 @@ async def recover_retryable_failed(
     Rows that have exceeded the retry cap are left in ``failed`` for manual
     inspection (they are terminal for automatic recovery).
     """
+    # Recovery-v2 ordering: this UPDATE flips ``failed`` rows back to ``raw``
+    # but does NOT clear ``next_retry_at`` / ``failure_class`` — the subsequent
+    # ``claim_messages_for_turn`` is the sole mutator that NULLs them via the
+    # writer-marker path. The trigger is column-scoped so this flip-to-raw is
+    # harmless.
     result = await pool.execute(
         """
         UPDATE messages
@@ -390,6 +684,9 @@ async def recover_retryable_failed(
               AND processing_attempts < $3
               AND bot_id = $1
               AND topic_id = $2
+              AND (next_retry_at IS NULL OR next_retry_at <= now())
+              AND (failure_class IS NULL
+                   OR failure_class NOT IN ('terminal_post_send', 'infra_bug'))
             LIMIT $4
         )
         """,
@@ -409,6 +706,70 @@ async def recover_retryable_failed(
             max_retries,
         )
     return updated
+
+
+# ── ledger reconciliation (Project C, C2) ────────────────────────────────────
+
+
+async def reconcile_ledger_active_attempts(pool: Any) -> int:
+    """Synthesise missing 'active' ledger rows for in-flight messages.
+
+    Walks rows in ``messages`` where ``processing_state = 'processing'``
+    that have no ``active`` entry in ``inbound_handling_attempts`` and
+    inserts one (``created_by='catch_up'``).  Idempotent: existing active
+    rows are not touched; the partial unique index would refuse a
+    duplicate anyway.
+
+    Returns the number of attempts opened.  No-op when
+    ``ledger_dual_write_enabled`` is False — the flag is the kill switch.
+    """
+    settings = get_settings()
+    if not getattr(settings, "ledger_dual_write_enabled", False):
+        return 0
+
+    inserted = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch(
+                """
+                SELECT m.id, m.bot_id, m.topic_id,
+                       m.processing_attempts, m.handled_by_turn_id
+                FROM messages m
+                WHERE m.direction = 'inbound'
+                  AND m.processing_state = 'processing'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM inbound_handling_attempts a
+                      WHERE a.message_id = m.id AND a.status = 'active'
+                  )
+                """
+            )
+            for row in rows:
+                try:
+                    await _ledger_open_active(
+                        conn,
+                        message_id=row["id"],
+                        bot_id=row["bot_id"] or "unknown",
+                        topic_id=row["topic_id"],
+                        attempt_number=int(row["processing_attempts"] or 1),
+                        created_by="catch_up",
+                        bot_turn_id=row.get("handled_by_turn_id"),
+                    )
+                    inserted += 1
+                except Exception:
+                    logger.exception(
+                        "reconcile_ledger_active_attempts: insert failed "
+                        "message_id=%s",
+                        row["id"],
+                    )
+    if inserted:
+        logger.info(
+            "reconcile_ledger_active_attempts: inserted=%d catch_up rows", inserted
+        )
+        metrics.incr(
+            "ledger_reconcile_catch_up_opened",
+            value=inserted,
+        )
+    return inserted
 
 
 # ── internal helpers ─────────────────────────────────────────────────────────
