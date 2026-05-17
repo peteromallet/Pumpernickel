@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import os
+
+print("VEAS_VERSION=hector-reliability-chain-deploy-2026-05-17", flush=True)
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
