@@ -142,7 +142,7 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
         calls.append((ctx.current_step, seed_messages, fake_pool.messages[message_id]["processing_state"], ctx.trigger_metadata))
         assert "## You" in hot_context_rendered
         if ctx.current_step == "read":
-            assert fake_pool.messages[message_id]["processing_state"] == "raw"
+            assert fake_pool.messages[message_id]["processing_state"] == "processing"
             return "reason note", [{"role": "assistant", "content": "reason note"}], 2
         if ctx.current_step == "respond":
             return "I hear you.", [{"role": "assistant", "content": "reply note"}], 0
@@ -166,7 +166,7 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
             "charge": None,
             "deleted_at": None,
         }
-        return out_id
+        return {"status": "sent", "message_id": out_id, "visible_to_user": True, "provider_message_id": None}
 
     monkeypatch.setattr(agentic, "run_step", fake_run_step)
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
@@ -179,7 +179,7 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
     assert "## Recent messages" in turn["prompt_snapshot"]
     assert fake_pool.messages[message_id]["processing_state"] == "processed"
     assert [call[0] for call in calls] == ["read", "respond", "record", "schedule"]
-    assert calls[0][2] == "raw"
+    assert calls[0][2] == "processing"
     assert [call[3].get("kind", "inbound") for call in calls] == ["inbound"] * 4
     assert all("job_id" not in call[3].get("context", {}) for call in calls)
     assert turn["tool_call_count"] == 5
@@ -215,6 +215,7 @@ async def test_run_agentic_uses_scope_for_rosi_identity(fake_pool, app_env, monk
     user = User(uuid4(), "Alice", "456", "UTC")
     fake_pool.users[user.id] = {"id": user.id, "name": user.name, "phone": user.phone, "timezone": user.timezone}
     message_id = uuid4()
+    scope = _rosi_scope_for(user)
     fake_pool.messages[message_id] = {
         "id": message_id,
         "direction": "inbound",
@@ -232,8 +233,9 @@ async def test_run_agentic_uses_scope_for_rosi_identity(fake_pool, app_env, monk
         "media_analysis": None,
         "edit_history": None,
         "edited_at": None,
+        "bot_id": scope.bot_id,
+        "topic_id": scope.topic_id,
     }
-    scope = _rosi_scope_for(user)
     seen_contexts = []
     sent = []
 
@@ -283,7 +285,7 @@ async def test_run_agentic_uses_scope_for_rosi_identity(fake_pool, app_env, monk
             "bot_id": kwargs["scope"].bot_id,
             "topic_id": kwargs["scope"].topic_id,
         }
-        return out_id
+        return {"status": "sent", "message_id": out_id, "visible_to_user": True, "provider_message_id": None}
 
     monkeypatch.setattr(agentic, "partner_of", forbidden_partner_of)
     monkeypatch.setattr(agentic, "build_hot_context_solo", fake_build_hot_context_solo)
@@ -376,7 +378,7 @@ async def test_run_agentic_turn_with_metadata_seeds_compact_pacing_context(fake_
             "charge": None,
             "deleted_at": None,
         }
-        return out_id
+        return {"status": "sent", "message_id": out_id, "visible_to_user": True, "provider_message_id": None}
 
     monkeypatch.setattr(agentic, "run_step", fake_run_step)
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
@@ -486,7 +488,7 @@ async def test_run_agentic_records_outbound_before_record_step(fake_pool, app_en
             "charge": None,
             "deleted_at": None,
         }
-        return out_id
+        return {"status": "sent", "message_id": out_id, "visible_to_user": True, "provider_message_id": None}
 
     monkeypatch.setattr(agentic, "run_step", fake_run_step)
     monkeypatch.setattr(agentic, "send_outbound", fake_send)
@@ -932,7 +934,7 @@ async def test_run_agentic_can_react_alongside_reply(fake_pool, app_env, monkeyp
             "charge": None,
             "deleted_at": None,
         }
-        return out_id
+        return {"status": "sent", "message_id": out_id, "visible_to_user": True, "provider_message_id": None}
 
     monkeypatch.setattr(agentic, "run_step", fake_run_step)
     monkeypatch.setattr(agentic.discord, "add_reaction", fake_add_reaction)
@@ -993,7 +995,7 @@ async def test_text_cap_defers_original_messages_and_sends_notice_once(fake_pool
             "charge": None,
             "deleted_at": None,
         }
-        return out_id
+        return {"status": "sent", "message_id": out_id, "visible_to_user": True, "provider_message_id": None}
 
     monkeypatch.setattr(agentic, "run_step", fake_run_step)
     monkeypatch.setattr(agentic, "send_outbound", fake_send)

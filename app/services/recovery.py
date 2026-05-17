@@ -197,13 +197,19 @@ async def _recover_v2_inbound(
         )
         return
 
-    # Re-dispatch crashed turn-triggering message bursts back through the
-    # coalescer.  ``_recover_legacy_invariants`` has already flipped the
-    # bot_turn ``failure_reason`` to ``crashed``; we now pick the row up and
-    # hand the triggering ids to the matching bot coalescer.
+    # ── Crashed-turn passive release ────────────────────────────────
+    # Release any messages still owned by a crashed bot_turn back to
+    # 'raw' so the raw-message branch below picks them up.  The turn is
+    # marked terminal (completed_at + failure_reason) in the same atomic
+    # CTE.  Pickup is delegated to the raw-message branch
+    # (recovery.py:259-323); the 5-minute crash-detection latency is
+    # enforced by the SELECT WHERE started_at < now() - interval '5 minutes'.
+    #
+    # Column semantics: clears messages.bot_turn_id (in-flight ownership)
+    # but leaves messages.handled_by_turn_id untouched (historical handler).
     crashed = await pool.fetch(
         """
-        SELECT id, triggering_message_ids, user_in_context AS user_id, bot_id, topic_id
+        SELECT id, triggering_message_ids, bot_id
         FROM bot_turns
         WHERE failure_reason = 'crashed'
           AND completed_at IS NULL
@@ -211,47 +217,60 @@ async def _recover_v2_inbound(
           AND started_at < now() - interval '5 minutes'
         """
     )
+    _RECOVERY_LIFECYCLE_WRITER_SQL = (
+        "SELECT set_config('app.lifecycle_writer', 'recovery', true)"
+    )
     for row in crashed:
+        turn_id = row["id"]
         message_ids = row["triggering_message_ids"]
         if not message_ids:
             continue
         try:
-            scope = scope_from_bot_turn_row(row)
-        except ValueError as exc:
-            logger.warning(
-                "skipping crashed turn recovery for bot_turn_id=%s: %s",
-                _row_get(row, "id"),
-                exc,
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(_RECOVERY_LIFECYCLE_WRITER_SQL)
+                    result = await conn.fetchval(
+                        """
+                        WITH released AS (
+                            UPDATE messages
+                            SET processing_state      = 'raw',
+                                bot_turn_id           = NULL,
+                                processing_started_at = NULL
+                            WHERE bot_turn_id = $1
+                              AND processing_state IN ('processing', 'deferred')
+                            RETURNING id
+                        ),
+                        turn_done AS (
+                            UPDATE bot_turns
+                            SET completed_at   = COALESCE(completed_at, now()),
+                                failure_reason = COALESCE(failure_reason, 'crashed')
+                            WHERE id = $1
+                            RETURNING id
+                        )
+                        SELECT count(*) FROM released
+                        """,
+                        turn_id,
+                    )
+        except Exception:
+            logger.exception(
+                "recovery: crashed-turn release failed for bot_turn_id=%s",
+                turn_id,
             )
             continue
-        user = await fetch_user_by_id(pool, scope.user_id)
-        if user is None:
-            logger.warning(
-                "skipping crashed turn recovery for bot_turn_id=%s: missing user_id=%s",
-                _row_get(row, "id"),
-                scope.user_id,
+        released = int(result or 0)
+        if released:
+            bot_id = row["bot_id"]
+            logger.info(
+                "recovery: released %d messages from crashed bot_turn_id=%s bot_id=%s",
+                released,
+                turn_id,
+                bot_id,
             )
-            continue
-        target_coalescer = _coalescer_for_scope(registry, scope.bot_id)
-        if target_coalescer is None:
-            logger.warning(
-                "recovery-v2: no coalescer for bot_id=%s; leaving bot_turn_id=%s rows in failed",
-                scope.bot_id,
-                _row_get(row, "id"),
-            )
-            # A3 work item 6: this is the SRE-flagged case from A1.  Surface it
-            # as its own counter so the page-severity alert fires.
             metrics.incr(
-                "recovery_skipped_missing_coalescer",
-                bot=scope.bot_id,
+                "recovery_released",
+                value=released,
+                bot=bot_id,
             )
-            continue
-        await target_coalescer.add_burst(user.id, message_ids, user, scope=scope)  # pause-check via send_outbound
-        metrics.incr(
-            "recovery_requeued",
-            bot=scope.bot_id,
-            reason="crashed_turn",
-        )
 
     settings = get_settings()
     max_retries = settings.inbound_queue_max_retry_attempts

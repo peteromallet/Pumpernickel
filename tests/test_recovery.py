@@ -109,9 +109,8 @@ async def test_crashed_turn_marks_failed_and_requeues_full_burst(fake_pool) -> N
     await recover_on_startup(fake_pool, _ready_registry(mediator=coalescer))
 
     assert fake_pool.bot_turns[turn_id]["failure_reason"] == "crashed"
-    assert len(coalescer.add_burst_calls) == 1
-    assert coalescer.add_burst_calls[0][:3] == (user.id, ids, user)
-    assert coalescer.add_burst_calls[0][3].bot_id == "mediator"
+    assert fake_pool.bot_turns[turn_id]["completed_at"] is not None
+    assert len(coalescer.add_burst_calls) == 0
     assert coalescer.add_calls == []
 
 
@@ -143,8 +142,8 @@ async def test_already_marked_crashed_turn_is_requeued_by_v2(fake_pool) -> None:
 
     await recover_on_startup(fake_pool, _ready_registry(mediator=coalescer))
 
-    assert len(coalescer.add_burst_calls) == 1
-    assert coalescer.add_burst_calls[0][:3] == (user.id, ids, user)
+    assert fake_pool.bot_turns[turn_id]["completed_at"] is not None
+    assert len(coalescer.add_burst_calls) == 0
 
 
 async def test_failed_raw_message_requeues_to_matching_bot_coalescer(fake_pool) -> None:

@@ -70,6 +70,10 @@ _TOOL_SCHEMA_VERSION: str = hashlib.sha1(
     open(_tool_schemas_module.__file__, "rb").read()
 ).hexdigest()[:12]
 
+_AGENTIC_LIFECYCLE_WRITER_SQL = (
+    "SELECT set_config('app.lifecycle_writer', 'agentic', true)"
+)
+
 logger = logging.getLogger(__name__)
 
 _pool: Any | None = None
@@ -120,6 +124,11 @@ class FallbackBreakerOpen(LLMPhaseError):
     def __init__(self, bot_id: str) -> None:
         super().__init__(f"fallback_breaker_open bot_id={bot_id}")
         self.failure_reason = "fallback_breaker_open"
+
+
+class _ZeroClaimAbort(Exception):
+    """Raised inside a conn.transaction() when zero triggering messages are
+    claimable.  asyncpg rolls back the bot_turn INSERT, leaving no orphan row."""
 
 
 class RespondCapNoOutput(LLMPhaseError):
@@ -1239,7 +1248,7 @@ async def _resolve_outbound_text(
 
 
 async def _open_turn(
-    pool: Any,
+    conn: Any,
     triggering_message_ids: list[UUID],
     user: User,
     prompt_snapshot: str,
@@ -1252,7 +1261,7 @@ async def _open_turn(
     hot_context_builder_version: str,
     tool_schema_version: str,
 ) -> tuple[UUID, datetime]:
-    row = await pool.fetchrow(
+    row = await conn.fetchrow(
         """
         INSERT INTO bot_turns (
             triggered_by_message_id, triggering_message_ids, user_in_context,
@@ -1283,7 +1292,7 @@ async def _open_turn(
 
 
 async def _complete_turn(
-    pool: Any,
+    conn: Any,
     turn_id: UUID,
     started_at: datetime,
     final_output_message_id: UUID | None,
@@ -1291,12 +1300,12 @@ async def _complete_turn(
     reasoning: str,
 ) -> None:
     duration_ms = max(0, int((datetime.now(UTC) - started_at).total_seconds() * 1000))
-    existing = await pool.fetchval(
+    existing = await conn.fetchval(
         "SELECT COALESCE(reasoning, '') FROM bot_turns WHERE id=$1", turn_id
     )
     note = f"\n{reasoning}" if reasoning else ""
     updated_reasoning = f"{existing or ''}{note}"
-    await pool.execute(
+    await conn.execute(
         """
         UPDATE bot_turns
         SET final_output_message_id=$1,
@@ -1315,7 +1324,7 @@ async def _complete_turn(
         turn_id,
     )
     await record_turn_event(
-        pool,
+        conn,
         turn_id,
         "turn.completed",
         duration_ms=duration_ms,
@@ -1324,6 +1333,69 @@ async def _complete_turn(
             "tool_call_count": tool_call_count,
         },
     )
+
+
+async def _finalize_turn_atomically(
+    pool: Any,
+    turn_id: UUID,
+    started_at: datetime,
+    final_output_message_id: UUID | None,
+    tool_call_count: int,
+    reasoning: str,
+    *,
+    message_ids: list[UUID] | None = None,
+    outcome: str,
+    scope: InboundScope,
+    primary_topic_id: UUID | None = None,
+    failure_reason: str | None = None,
+    failure_class: str | None = None,
+    processing_error: str | None = None,
+) -> None:
+    """Complete a bot_turn and mark its inbound messages in one transaction.
+
+    Acquires a connection, opens a transaction, sets LIFECYCLE WRITER to
+    'agentic', then calls _complete_turn followed by either
+    _complete_messages_in_tx or _fail_messages_in_tx.
+
+    outcome='failed' triggers _fail_messages_in_tx (requires failure_class,
+    failure_reason, processing_error).  All other outcomes use
+    _complete_messages_in_tx.
+
+    When message_ids is None or empty, only _complete_turn runs (SpendCap
+    path where messages were already deferred).
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(_AGENTIC_LIFECYCLE_WRITER_SQL)
+            await _complete_turn(
+                conn,
+                turn_id,
+                started_at,
+                final_output_message_id,
+                tool_call_count,
+                reasoning,
+            )
+            if message_ids:
+                if outcome == "failed":
+                    await inbound_queue._fail_messages_in_tx(
+                        conn,
+                        message_ids,
+                        processing_error=processing_error or "finalize_turn_atomically",
+                        handled_by_turn_id=turn_id,
+                        bot_id=scope.bot_id,
+                        topic_id=primary_topic_id,
+                        failure_class=failure_class or "infra_bug",
+                        failure_reason=failure_reason,
+                    )
+                else:
+                    await inbound_queue._complete_messages_in_tx(
+                        conn,
+                        message_ids,
+                        handling_result=outcome,
+                        handled_by_turn_id=turn_id,
+                        bot_id=scope.bot_id,
+                        topic_id=primary_topic_id,
+                    )
 
 
 async def _record_turn_final_output(
@@ -1542,52 +1614,10 @@ async def _run_agentic(
     started_at = datetime.now(UTC)
     responded_to_user = False
 
-    # ── Pre-LLM claim gate ──────────────────────────────────────────
-    # Atomically claim triggering inbound messages before doing any expensive
-    # work (hot context construction, LLM calls).  If none of the triggering
-    # messages are claimable, bail out immediately — no hot context, no turn,
-    # no LLM, no reply.
-    claimed_message_ids: list[UUID] = []
-    if triggering_message_ids:
-        claimed_message_ids = await inbound_queue.claim_messages_for_turn(
-            active_pool,
-            triggering_message_ids,
-            bot_id=scope.bot_id,
-            topic_id=primary_topic_id,
-        )
-        if not claimed_message_ids:
-            logger.info(
-                "_run_agentic: zero of %d triggering messages claimable "
-                "bot_id=%s topic_id=%s — aborting before hot context",
-                len(triggering_message_ids),
-                scope.bot_id,
-                str(primary_topic_id),
-            )
-            # If we got here via recovery requeue of a crashed bot_turn whose
-            # triggering messages have since been handled by another path,
-            # the originating bot_turn row will still be picked up by every
-            # subsequent recovery sweep — an infinite requeue loop. Mark any
-            # such crashed bot_turn rows terminal so recovery stops seeing
-            # them. Idempotent: the WHERE clause is a no-op when we got here
-            # via the normal (non-recovery) flow.
-            await active_pool.execute(
-                """
-                UPDATE bot_turns
-                SET completed_at = now(),
-                    failure_reason = 'abandoned_unclaimable'
-                WHERE failure_reason = 'crashed'
-                  AND completed_at IS NULL
-                  AND final_output_message_id IS NULL
-                  AND bot_id = $1
-                  AND topic_id = $2
-                  AND triggering_message_ids && $3::uuid[]
-                """,
-                scope.bot_id,
-                primary_topic_id,
-                triggering_message_ids,
-            )
-            return
-
+    # ── Hot-context build + atomic claim+open ───────────────────────
+    # Hot context and prompt_snapshot are computed before the write
+    # transaction per FLAG-RR-009 strategy (a): all read-heavy work
+    # completes before acquiring the write connection.
     try:
         if bot_spec.participants_shape == "solo":
             partner = None
@@ -1654,26 +1684,62 @@ async def _run_agentic(
         )
         prompt_snapshot = f"{system_prompt}\n\n{rendered_hot_context}"
         bot_spec_version = hashlib.sha1(repr(bot_spec).encode()).hexdigest()[:12]
-        turn_id, started_at = await _open_turn(
-            active_pool,
-            triggering_message_ids,
-            user,
-            prompt_snapshot,
-            conversational_model,
-            selected_prompt_version,
-            bot_id=scope.bot_id,
-            topic_id=primary_topic_id,
-            bot_spec_version=bot_spec_version,
-            hot_context_builder_version=bot_spec.hot_context_builder_version,
-            tool_schema_version=_TOOL_SCHEMA_VERSION,
-        )
-        # Stamp the active-processing turn on claimed inbound rows.
-        if claimed_message_ids:
-            await active_pool.execute(
-                "UPDATE messages SET handled_by_turn_id=$1 WHERE id = ANY($2::uuid[])",
-                turn_id,
-                claimed_message_ids,
-            )
+
+        # ── Atomic claim+open ────────────────────────────────────
+        # Open the bot_turn and claim triggering messages in a single
+        # transaction.  Zero-claim raises _ZeroClaimAbort inside the tx,
+        # rolling back the bot_turn INSERT.  bot_turn_id is stamped on
+        # messages by the claim CTE (in-flight ownership); the legacy
+        # UPDATE messages SET handled_by_turn_id is gone per the
+        # column-semantics contract (handled_by_turn_id is terminal-only).
+        claimed_message_ids: list[UUID] = []
+        if triggering_message_ids:
+            async with active_pool.acquire() as claim_conn:
+                async with claim_conn.transaction():
+                    await claim_conn.execute(_AGENTIC_LIFECYCLE_WRITER_SQL)
+                    turn_id, started_at = await _open_turn(
+                        claim_conn,
+                        triggering_message_ids,
+                        user,
+                        prompt_snapshot,
+                        conversational_model,
+                        selected_prompt_version,
+                        bot_id=scope.bot_id,
+                        topic_id=primary_topic_id,
+                        bot_spec_version=bot_spec_version,
+                        hot_context_builder_version=bot_spec.hot_context_builder_version,
+                        tool_schema_version=_TOOL_SCHEMA_VERSION,
+                    )
+                    claimed_message_ids = (
+                        await inbound_queue._claim_messages_for_turn_in_tx(
+                            claim_conn,
+                            triggering_message_ids,
+                            bot_id=scope.bot_id,
+                            topic_id=primary_topic_id,
+                            new_bot_turn_id=turn_id,
+                        )
+                    )
+                    if not claimed_message_ids:
+                        raise _ZeroClaimAbort()
+        else:
+            # No triggering messages (scheduled job, etc.) — open turn
+            # without claiming.
+            async with active_pool.acquire() as claim_conn:
+                async with claim_conn.transaction():
+                    await claim_conn.execute(_AGENTIC_LIFECYCLE_WRITER_SQL)
+                    turn_id, started_at = await _open_turn(
+                        claim_conn,
+                        triggering_message_ids,
+                        user,
+                        prompt_snapshot,
+                        conversational_model,
+                        selected_prompt_version,
+                        bot_id=scope.bot_id,
+                        topic_id=primary_topic_id,
+                        bot_spec_version=bot_spec_version,
+                        hot_context_builder_version=bot_spec.hot_context_builder_version,
+                        tool_schema_version=_TOOL_SCHEMA_VERSION,
+                    )
 
         await record_turn_event(
             active_pool,
@@ -2089,16 +2155,8 @@ async def _run_agentic(
             f"Executed turn plan ({turn_plan.skeleton_name}): {turn_plan.trace()}"
         )
         reasoning = "\n".join(part for part in (reasoning, executed_plan) if part)
-        await _complete_turn(
-            active_pool,
-            turn_id,
-            started_at,
-            final_output_message_id,
-            tool_call_count,
-            reasoning,
-        )
 
-        # ── Mark claimed inbound messages as terminal ──────────────────
+        # ── Finalize turn + messages atomically ────────────────────────
         if claimed_message_ids:
             if responded_to_user:
                 handling_result = "replied"
@@ -2111,15 +2169,20 @@ async def _run_agentic(
                     f"provider_send_failed"
                     f" [failure_class={failure_class}, retryable=true]"
                 )
-                await inbound_queue.fail_messages(
+                await _finalize_turn_atomically(
                     active_pool,
-                    claimed_message_ids,
-                    processing_error=error_detail,
-                    handled_by_turn_id=turn_id,
-                    bot_id=scope.bot_id,
-                    topic_id=primary_topic_id,
-                    failure_class=failure_class,
+                    turn_id,
+                    started_at,
+                    final_output_message_id,
+                    tool_call_count,
+                    reasoning,
+                    message_ids=claimed_message_ids,
+                    outcome="failed",
+                    scope=scope,
+                    primary_topic_id=primary_topic_id,
                     failure_reason=failure_reason,
+                    failure_class=failure_class,
+                    processing_error=error_detail,
                 )
                 return
             elif assistant_text and not responded_to_user:
@@ -2130,14 +2193,40 @@ async def _run_agentic(
                 handling_result = "silent"
             else:
                 handling_result = "no_action"
-            await inbound_queue.complete_messages(
+            await _finalize_turn_atomically(
                 active_pool,
-                claimed_message_ids,
-                handling_result=handling_result,
-                handled_by_turn_id=turn_id,
-                bot_id=scope.bot_id,
-                topic_id=primary_topic_id,
+                turn_id,
+                started_at,
+                final_output_message_id,
+                tool_call_count,
+                reasoning,
+                message_ids=claimed_message_ids,
+                outcome=handling_result,
+                scope=scope,
+                primary_topic_id=primary_topic_id,
             )
+        else:
+            await _finalize_turn_atomically(
+                active_pool,
+                turn_id,
+                started_at,
+                final_output_message_id,
+                tool_call_count,
+                reasoning,
+                outcome="no_action",
+                scope=scope,
+                primary_topic_id=primary_topic_id,
+            )
+        return
+
+    except _ZeroClaimAbort:
+        logger.info(
+            "_run_agentic: zero of %d triggering messages claimable "
+            "bot_id=%s topic_id=%s — aborting (bot_turn rolled back)",
+            len(triggering_message_ids),
+            scope.bot_id,
+            str(primary_topic_id),
+        )
         return
 
     except SpendCapExceeded:
@@ -2204,13 +2293,16 @@ async def _run_agentic(
                             turn_id,
                             "Spend cap fallback skipped because a newer inbound message arrived during paced send.",
                         )
-            await _complete_turn(
+            await _finalize_turn_atomically(
                 active_pool,
                 turn_id,
                 started_at,
                 final_output_message_id,
                 0,
                 "Text LLM spend cap hit; deferred original trigger messages for next-day retry.",
+                outcome="replied",
+                scope=scope,
+                primary_topic_id=primary_topic_id,
             )
             return
         # No turn was opened before spend cap was hit — defer the messages
@@ -2274,6 +2366,9 @@ async def _run_agentic(
             if responded_to_user:
                 # A user-visible response already occurred — mark terminal
                 # as 'replied' (not retryable) but still record the turn failure.
+                # bot_turn_id=NULL clear here (terminal message UPDATE).
+                # _fail_turn above stamped failure_reason in a separate tx.
+                # The BEFORE-UPDATE trigger and recovery crash handler bound the split.
                 await inbound_queue.complete_messages(
                     active_pool,
                     claimed_message_ids,
@@ -2290,6 +2385,9 @@ async def _run_agentic(
                 return
             else:
                 # No user-visible response — mark failed for potential retry.
+                # bot_turn_id=NULL clear here (terminal message UPDATE).
+                # _fail_turn above stamped failure_reason in a separate tx.
+                # The BEFORE-UPDATE trigger and recovery crash handler bound the split.
                 failure_class = _failure_class_for(failure_reason)
                 retryable = (
                     fail_metadata.get("retryable", True)

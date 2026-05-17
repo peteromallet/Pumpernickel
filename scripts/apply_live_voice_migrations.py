@@ -44,6 +44,7 @@ MIGRATIONS = (
     "0043_auth_magic_links.sql",
     "0044_live_session_latency.sql",
     "0045_live_session_spend.sql",
+    "0049_messages_bot_turn_id.sql",
 )
 
 

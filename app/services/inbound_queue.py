@@ -235,12 +235,86 @@ def _utc_now() -> datetime:
 
 # ── claim ────────────────────────────────────────────────────────────────────
 
+async def _claim_messages_for_turn_in_tx(
+    conn: Any,
+    message_ids: list[UUID],
+    *,
+    bot_id: str,
+    topic_id: UUID,
+    new_bot_turn_id: UUID | None = None,
+) -> list[UUID]:
+    """Claim eligible inbound messages inside an already-open transaction.
+
+    Caller MUST already hold a transaction on ``conn`` AND have executed
+    ``_SET_LIFECYCLE_WRITER_SQL`` on the same connection.
+
+    ``new_bot_turn_id`` is the in-flight ownership pointer.  When None
+    (legacy caller), existing ``bot_turn_id`` is preserved (backward compat).
+    When set, the claim CTE stamps matching rows with this turn id AND
+    refuses to claim rows that are already claimed by a DIFFERENT in-flight
+    turn (the WHERE clause allows NULL bot_turn_id, NULL new_bot_turn_id,
+    or matching bot_turn_id).
+    """
+    if not message_ids:
+        return []
+
+    rows = await conn.fetch(
+        """
+        WITH claimed AS (
+            UPDATE messages
+            SET processing_state      = 'processing',
+                processing_started_at = now(),
+                processing_attempts   = processing_attempts + 1,
+                processing_error      = NULL,
+                next_retry_at         = NULL,
+                bot_turn_id           = COALESCE($4::uuid, bot_turn_id)
+            WHERE id = ANY($1::uuid[])
+              AND direction = 'inbound'
+              AND processing_state IN ('raw', 'deferred')
+              AND (processing_started_at IS NULL
+                   OR processing_started_at < now() - interval '5 minutes')
+              AND bot_id = $2
+              AND topic_id = $3
+              AND (bot_turn_id IS NULL OR $4::uuid IS NULL OR bot_turn_id = $4::uuid)
+            RETURNING id
+        )
+        SELECT id FROM claimed
+        """,
+        message_ids,
+        bot_id,
+        topic_id,
+        new_bot_turn_id,
+    )
+    if rows and _ledger_dual_write_enabled():
+        attempt_rows = await conn.fetch(
+            "SELECT id, processing_attempts FROM messages "
+            "WHERE id = ANY($1::uuid[])",
+            [row["id"] for row in rows],
+        )
+        attempts_by_id = {
+            r["id"]: int(r["processing_attempts"] or 1)
+            for r in attempt_rows
+        }
+        for row in rows:
+            await _ledger_open_active(
+                conn,
+                message_id=row["id"],
+                bot_id=bot_id,
+                topic_id=topic_id,
+                attempt_number=attempts_by_id.get(row["id"], 1),
+                created_by="live",
+                bot_turn_id=new_bot_turn_id,
+            )
+    return [row["id"] for row in rows]
+
+
 async def claim_messages_for_turn(
     pool: Any,
     message_ids: list[UUID],
     *,
     bot_id: str,
     topic_id: UUID,
+    new_bot_turn_id: UUID | None = None,
 ) -> list[UUID]:
     """Atomically claim eligible inbound messages for a turn.
 
@@ -249,12 +323,14 @@ async def claim_messages_for_turn(
     - ``processing_state IN ('raw', 'deferred')``
     - ``bot_id`` and ``topic_id`` match the caller's scope
     - ``processing_started_at IS NULL`` or older than 5 minutes (stale claim)
+    - ``bot_turn_id IS NULL`` or matches ``new_bot_turn_id`` (in-flight owner)
 
     Claimed rows are immediately:
     - Set to ``processing_state = 'processing'``
     - Stamped with ``processing_started_at = now()``
     - Have ``processing_attempts`` incremented
     - Have ``processing_error`` cleared
+    - Have ``bot_turn_id`` set to ``new_bot_turn_id`` when provided
 
     Returns only the ids that were *actually* claimed (race-resistant:
     rows that did not match the WHERE at COMMIT time are silently excluded).
@@ -265,51 +341,13 @@ async def claim_messages_for_turn(
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(_SET_LIFECYCLE_WRITER_SQL)
-            rows = await conn.fetch(
-                """
-                WITH claimed AS (
-                    UPDATE messages
-                    SET processing_state      = 'processing',
-                        processing_started_at = now(),
-                        processing_attempts   = processing_attempts + 1,
-                        processing_error      = NULL,
-                        next_retry_at         = NULL
-                    WHERE id = ANY($1::uuid[])
-                      AND direction = 'inbound'
-                      AND processing_state IN ('raw', 'deferred')
-                      AND (processing_started_at IS NULL
-                           OR processing_started_at < now() - interval '5 minutes')
-                      AND bot_id = $2
-                      AND topic_id = $3
-                    RETURNING id
-                )
-                SELECT id FROM claimed
-                """,
+            claimed = await _claim_messages_for_turn_in_tx(
+                conn,
                 message_ids,
-                bot_id,
-                topic_id,
+                bot_id=bot_id,
+                topic_id=topic_id,
+                new_bot_turn_id=new_bot_turn_id,
             )
-            if rows and _ledger_dual_write_enabled():
-                # Fetch the post-increment attempt numbers via a small read.
-                attempt_rows = await conn.fetch(
-                    "SELECT id, processing_attempts FROM messages "
-                    "WHERE id = ANY($1::uuid[])",
-                    [row["id"] for row in rows],
-                )
-                attempts_by_id = {
-                    r["id"]: int(r["processing_attempts"] or 1)
-                    for r in attempt_rows
-                }
-                for row in rows:
-                    await _ledger_open_active(
-                        conn,
-                        message_id=row["id"],
-                        bot_id=bot_id,
-                        topic_id=topic_id,
-                        attempt_number=attempts_by_id.get(row["id"], 1),
-                        created_by="live",
-                    )
-    claimed = [row["id"] for row in rows]
     unclaimed = len(message_ids) - len(claimed)
     if unclaimed:
         logger.debug(
@@ -331,6 +369,57 @@ async def claim_messages_for_turn(
 
 
 # ── terminal completion ──────────────────────────────────────────────────────
+
+async def _complete_messages_in_tx(
+    conn: Any,
+    message_ids: list[UUID],
+    *,
+    handling_result: str,
+    handled_by_turn_id: UUID | None = None,
+    bot_id: str,
+    topic_id: UUID,
+) -> int:
+    """Mark inbound messages as successfully handled (tx already held).
+
+    Caller MUST already hold a transaction on ``conn`` AND have executed
+    ``_SET_LIFECYCLE_WRITER_SQL`` on the same connection.
+
+    Clears ``bot_turn_id`` (in-flight owner) while preserving
+    ``handled_by_turn_id`` (historical terminal handler).
+    """
+    if not message_ids:
+        return 0
+
+    result = await conn.execute(
+        """
+        UPDATE messages
+        SET processing_state   = 'processed',
+            handling_result    = $4,
+            handled_at         = now(),
+            handled_by_turn_id = $5,
+            bot_turn_id        = NULL,
+            next_retry_at      = NULL,
+            failure_class      = NULL
+        WHERE id = ANY($1::uuid[])
+          AND direction = 'inbound'
+          AND bot_id = $2
+          AND topic_id = $3
+        """,
+        message_ids,
+        bot_id,
+        topic_id,
+        handling_result,
+        handled_by_turn_id,
+    )
+    if _ledger_dual_write_enabled():
+        for mid in message_ids:
+            await _ledger_mark_succeeded(
+                conn,
+                message_id=mid,
+                bot_turn_id=handled_by_turn_id,
+            )
+    return _parse_update_count(result)
+
 
 async def complete_messages(
     pool: Any,
@@ -357,35 +446,14 @@ async def complete_messages(
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(_SET_LIFECYCLE_WRITER_SQL)
-            result = await conn.execute(
-                """
-                UPDATE messages
-                SET processing_state   = 'processed',
-                    handling_result    = $4,
-                    handled_at         = now(),
-                    handled_by_turn_id = $5,
-                    next_retry_at      = NULL,
-                    failure_class      = NULL
-                WHERE id = ANY($1::uuid[])
-                  AND direction = 'inbound'
-                  AND bot_id = $2
-                  AND topic_id = $3
-                """,
+            updated = await _complete_messages_in_tx(
+                conn,
                 message_ids,
-                bot_id,
-                topic_id,
-                handling_result,
-                handled_by_turn_id,
+                handling_result=handling_result,
+                handled_by_turn_id=handled_by_turn_id,
+                bot_id=bot_id,
+                topic_id=topic_id,
             )
-            if _ledger_dual_write_enabled():
-                for mid in message_ids:
-                    await _ledger_mark_succeeded(
-                        conn,
-                        message_id=mid,
-                        bot_turn_id=handled_by_turn_id,
-                    )
-    # asyncpg execute returns a string like "UPDATE N" — parse the count
-    updated = _parse_update_count(result)
     if updated:
         logger.debug(
             "complete_messages: updated=%d result=%s bot_id=%s topic_id=%s",
@@ -394,7 +462,7 @@ async def complete_messages(
             bot_id,
             str(topic_id),
         )
-        # A3 work item 6: completion is a "success" terminal class.  SD-002
+        # A3 work item 6: completion is a \"success\" terminal class.  SD-002
         # only defines 3 failure classes (retryable_pre_send / terminal_post_send /
         # infra_bug); ``success`` is the sentinel label used here to keep the
         # started/completed ratio interpretable.
@@ -408,6 +476,90 @@ async def complete_messages(
 
 
 # ── failure ──────────────────────────────────────────────────────────────────
+
+async def _fail_messages_in_tx(
+    conn: Any,
+    message_ids: list[UUID],
+    *,
+    processing_error: str,
+    handled_by_turn_id: UUID | None = None,
+    bot_id: str,
+    topic_id: UUID,
+    failure_class: str,
+    failure_reason: str | None,
+) -> int:
+    """Mark inbound messages as failed (tx already held).
+
+    Caller MUST already hold a transaction on ``conn`` AND have executed
+    ``_SET_LIFECYCLE_WRITER_SQL`` on the same connection.
+
+    Clears ``bot_turn_id`` (in-flight owner) while preserving
+    ``handled_by_turn_id`` (historical terminal handler).
+
+    ``next_retry_at`` is computed in-SQL as an exponential backoff for
+    ``retryable_pre_send`` rows and NULL for terminal classes.
+    The caller must provide ``backoff_base_seconds`` and ``backoff_cap_seconds``
+    (pre-fetched from settings).
+    """
+    if failure_class not in FAILURE_CLASSES:
+        raise ValueError(
+            f"unknown failure_class: {failure_class!r}; "
+            f"expected one of {sorted(FAILURE_CLASSES)}"
+        )
+    if not message_ids:
+        return 0
+
+    settings = get_settings()
+    backoff_base_seconds = settings.recovery_v2_retry_base_seconds
+    backoff_cap_seconds = settings.recovery_v2_retry_cap_seconds
+    dual_write = bool(getattr(settings, "ledger_dual_write_enabled", False))
+
+    result = await conn.execute(
+        """
+        UPDATE messages
+        SET processing_state   = 'failed',
+            processing_error   = $4,
+            handling_result    = 'failed',
+            handled_by_turn_id = COALESCE($5, handled_by_turn_id),
+            bot_turn_id        = NULL,
+            handled_at         = CASE WHEN $5 IS NOT NULL THEN now()
+                                      ELSE handled_at END,
+            failure_class      = $6,
+            next_retry_at      = CASE
+                WHEN $6 = 'retryable_pre_send'
+                THEN now() + (
+                    LEAST(
+                        $7::numeric * power(2, GREATEST(processing_attempts - 1, 0)),
+                        $8::numeric
+                    ) || ' seconds'
+                )::interval
+                ELSE NULL
+            END
+        WHERE id = ANY($1::uuid[])
+          AND direction = 'inbound'
+          AND bot_id = $2
+          AND topic_id = $3
+        """,
+        message_ids,
+        bot_id,
+        topic_id,
+        processing_error,
+        handled_by_turn_id,
+        failure_class,
+        backoff_base_seconds,
+        backoff_cap_seconds,
+    )
+    if dual_write:
+        for mid in message_ids:
+            await _ledger_mark_failed(
+                conn,
+                message_id=mid,
+                failure_class=failure_class,
+                failure_reason=failure_reason,
+                bot_turn_id=handled_by_turn_id,
+            )
+    return _parse_update_count(result)
+
 
 async def fail_messages(
     pool: Any,
@@ -443,60 +595,19 @@ async def fail_messages(
     if not message_ids:
         return 0
 
-    settings = get_settings()
-    backoff_base_seconds = settings.recovery_v2_retry_base_seconds
-    backoff_cap_seconds = settings.recovery_v2_retry_cap_seconds
-    dual_write = bool(getattr(settings, "ledger_dual_write_enabled", False))
-    # ``fail_messages`` already requires settings for the backoff knobs, so
-    # the dual-write flag piggy-backs on that existing settings access.
-
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(_SET_LIFECYCLE_WRITER_SQL)
-            result = await conn.execute(
-                """
-                UPDATE messages
-                SET processing_state   = 'failed',
-                    processing_error   = $4,
-                    handling_result    = 'failed',
-                    handled_by_turn_id = COALESCE($5, handled_by_turn_id),
-                    handled_at         = CASE WHEN $5 IS NOT NULL THEN now()
-                                              ELSE handled_at END,
-                    failure_class      = $6,
-                    next_retry_at      = CASE
-                        WHEN $6 = 'retryable_pre_send'
-                        THEN now() + (
-                            LEAST(
-                                $7::numeric * power(2, GREATEST(processing_attempts - 1, 0)),
-                                $8::numeric
-                            ) || ' seconds'
-                        )::interval
-                        ELSE NULL
-                    END
-                WHERE id = ANY($1::uuid[])
-                  AND direction = 'inbound'
-                  AND bot_id = $2
-                  AND topic_id = $3
-                """,
+            updated = await _fail_messages_in_tx(
+                conn,
                 message_ids,
-                bot_id,
-                topic_id,
-                processing_error,
-                handled_by_turn_id,
-                failure_class,
-                backoff_base_seconds,
-                backoff_cap_seconds,
+                processing_error=processing_error,
+                handled_by_turn_id=handled_by_turn_id,
+                bot_id=bot_id,
+                topic_id=topic_id,
+                failure_class=failure_class,
+                failure_reason=failure_reason,
             )
-            if dual_write:
-                for mid in message_ids:
-                    await _ledger_mark_failed(
-                        conn,
-                        message_id=mid,
-                        failure_class=failure_class,
-                        failure_reason=failure_reason,
-                        bot_turn_id=handled_by_turn_id,
-                    )
-    updated = _parse_update_count(result)
     if updated:
         logger.debug(
             "fail_messages: updated=%d error=%s bot_id=%s topic_id=%s "

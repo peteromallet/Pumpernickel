@@ -122,6 +122,14 @@ class FakeAcquireContext:
 
 
 class FakePool:
+    """In-memory FakePool for offline tests.
+
+    Trigger-equivalent enforcement only covers the claim CTE path
+    (fetch handler at the _claim_messages_for_turn_in_tx simulator).
+    Bare-UPDATE bot_turn_id paths are not predicate-checked by FakePool;
+    Step 13.6 real-PG smoke is authoritative for those paths.
+    """
+
     def __init__(self) -> None:
         self.closed = False
         self.users = {}
@@ -548,6 +556,8 @@ class FakePool:
                 "processing_started_at": None,
                 "processing_error": None,
                 "processing_attempts": 0,
+                # 0049 in-flight owner pointer
+                "bot_turn_id": None,
             }
             self.messages[row["id"]] = row
             return {"id": row["id"]}
@@ -2283,15 +2293,42 @@ class FakePool:
                 ):
                     return 1
             return None
+        # ── 0049: recovery crashed-turn passive release CTE ─────────────
+        # WITH released AS (UPDATE messages …), turn_done AS (UPDATE bot_turns …)
+        # SELECT count(*) FROM released
+        if "WITH released AS ( UPDATE messages" in compact and "turn_done AS ( UPDATE bot_turns" in compact:
+            turn_id = args[0]
+            count = 0
+            for msg in self.messages.values():
+                if (msg.get("bot_turn_id") == turn_id
+                        and msg.get("processing_state") in ("processing", "deferred")):
+                    msg["processing_state"] = "raw"
+                    msg["bot_turn_id"] = None
+                    msg["processing_started_at"] = None
+                    count += 1
+            if turn_id in self.bot_turns:
+                turn = self.bot_turns[turn_id]
+                if turn.get("completed_at") is None:
+                    turn["completed_at"] = datetime.now(UTC)
+                if turn.get("failure_reason") is None:
+                    turn["failure_reason"] = "crashed"
+            return count
         raise AssertionError(f"unhandled fetchval SQL: {compact}")
 
     async def fetch(self, sql: str, *args):
         compact = " ".join(sql.split())
-        # ── 0041: claim_messages_for_turn CTE ────────────────────────────
+        # ── 0041/0049: claim_messages_for_turn CTE ───────────────────────
+        # 0049 adds new_bot_turn_id parameter (args[3]).
+        # Mirror the real CTE WHERE clause:
+        #   AND (bot_turn_id IS NULL OR $4::uuid IS NULL OR bot_turn_id = $4::uuid)
+        # COALESCE($4::uuid, bot_turn_id) sets the in-flight owner when provided.
+        # Trigger-equivalent enforcement lives here (claim CTE path only);
+        # bare-UPDATE bot_turn_id paths are not predicate-checked by FakePool.
         if "WITH claimed AS ( UPDATE messages" in compact and "RETURNING id ) SELECT id FROM claimed" in compact:
             message_ids = set(args[0])
             bot_id_arg = args[1]
             topic_id_arg = args[2]
+            new_bot_turn_id = args[3] if len(args) > 3 else None
             claimed = []
             for msg_id, msg in list(self.messages.items()):
                 if msg_id not in message_ids:
@@ -2303,9 +2340,18 @@ class FakePool:
                 ps = msg.get("processing_started_at")
                 if ps is not None and ps >= datetime.now(UTC) - timedelta(minutes=5):
                     continue
-                if msg.get("bot_id") != bot_id_arg:
+                # Backward-compat: legacy messages without bot_id/topic_id
+                # default to mediator/relationship (matches _message_matches_bot_topic).
+                row_bid = msg["bot_id"] if "bot_id" in msg else "mediator"
+                row_tid = msg["topic_id"] if "topic_id" in msg else UUID("00000000-0000-4000-8000-000000000001")
+                if row_bid != bot_id_arg:
                     continue
-                if msg.get("topic_id") != topic_id_arg:
+                if row_tid != topic_id_arg:
+                    continue
+                # ── 0049 bot_turn_id constraint ─────────────────────────
+                existing_bt = msg.get("bot_turn_id")
+                if existing_bt is not None and new_bot_turn_id is not None and existing_bt != new_bot_turn_id:
+                    # WHERE clause blocks: different in-flight owner
                     continue
                 msg["processing_state"] = "processing"
                 msg["processing_started_at"] = datetime.now(UTC)
@@ -2313,6 +2359,9 @@ class FakePool:
                 msg["processing_error"] = None
                 # Recovery-v2: claim NULLs the retry pointer via writer marker.
                 msg["next_retry_at"] = None
+                # 0049: set in-flight owner (COALESCE behaviour)
+                if new_bot_turn_id is not None:
+                    msg["bot_turn_id"] = new_bot_turn_id
                 claimed.append({"id": msg_id})
             return claimed
         # ── 0041: _recovery_scopes query ─────────────────────────────────
@@ -2949,12 +2998,40 @@ class FakePool:
             return rows
         if (
             compact.startswith(
+                "SELECT id, triggering_message_ids, bot_id"
+            )
+            and "FROM bot_turns" in compact
+            and "failure_reason = 'crashed'" in compact
+        ):
+            # Recovery-v2: SELECT crashed bot_turns for passive release.
+            rows = []
+            cutoff = datetime.now(UTC) - timedelta(minutes=5)
+            for turn in self.bot_turns.values():
+                if turn.get("failure_reason") != "crashed":
+                    continue
+                if turn.get("completed_at") is not None:
+                    continue
+                if turn.get("final_output_message_id") is not None:
+                    continue
+                started_at = turn.get("started_at")
+                if started_at is not None and started_at >= cutoff:
+                    continue
+                rows.append(
+                    {
+                        "id": turn["id"],
+                        "triggering_message_ids": turn["triggering_message_ids"],
+                        "bot_id": turn.get("bot_id"),
+                    }
+                )
+            return rows
+        if (
+            compact.startswith(
                 "SELECT id, triggering_message_ids, user_in_context AS user_id"
             )
             and "FROM bot_turns" in compact
             and "failure_reason = 'crashed'" in compact
         ):
-            # Recovery-v2: SELECT crashed bot_turns for re-dispatch.
+            # Legacy: SELECT crashed bot_turns for re-dispatch (pre-T8).
             rows = []
             cutoff = datetime.now(UTC) - timedelta(minutes=5)
             for turn in self.bot_turns.values():
@@ -3682,9 +3759,13 @@ class FakePool:
                     msg = self.messages[message_id]
                     if msg.get("direction") != "inbound":
                         continue
-                    if msg.get("bot_id") != bot_id_arg:
+                    # Backward-compat: legacy messages without bot_id/topic_id
+                    # default to mediator/relationship (matches claim CTE simulator).
+                    row_bid = msg["bot_id"] if "bot_id" in msg else "mediator"
+                    row_tid = msg["topic_id"] if "topic_id" in msg else UUID("00000000-0000-4000-8000-000000000001")
+                    if row_bid != bot_id_arg:
                         continue
-                    if msg.get("topic_id") != topic_id_arg:
+                    if row_tid != topic_id_arg:
                         continue
                     msg["processing_state"] = "processed"
                     msg["handling_result"] = handling_result
@@ -3693,6 +3774,8 @@ class FakePool:
                     # Recovery-v2: complete_messages NULLs both lifecycle cols.
                     msg["next_retry_at"] = None
                     msg["failure_class"] = None
+                    # 0049: clear in-flight owner at terminal completion
+                    msg["bot_turn_id"] = None
                     count += 1
             return f"UPDATE {count}"
         # fail_messages → failed + error
@@ -3712,9 +3795,13 @@ class FakePool:
                     msg = self.messages[message_id]
                     if msg.get("direction") != "inbound":
                         continue
-                    if msg.get("bot_id") != bot_id_arg:
+                    # Backward-compat: legacy messages without bot_id/topic_id
+                    # default to mediator/relationship (matches claim CTE simulator).
+                    row_bid = msg["bot_id"] if "bot_id" in msg else "mediator"
+                    row_tid = msg["topic_id"] if "topic_id" in msg else UUID("00000000-0000-4000-8000-000000000001")
+                    if row_bid != bot_id_arg:
                         continue
-                    if msg.get("topic_id") != topic_id_arg:
+                    if row_tid != topic_id_arg:
                         continue
                     msg["processing_state"] = "failed"
                     msg["processing_error"] = processing_error
@@ -3722,6 +3809,8 @@ class FakePool:
                     if handled_by_turn_id is not None:
                         msg["handled_by_turn_id"] = handled_by_turn_id
                         msg["handled_at"] = datetime.now(UTC)
+                    # 0049: clear in-flight owner at terminal failure
+                    msg["bot_turn_id"] = None
                     # Recovery-v2 lifecycle columns: failure_class + backoff.
                     if failure_class is not None:
                         msg["failure_class"] = failure_class
@@ -3754,9 +3843,13 @@ class FakePool:
                     msg = self.messages[message_id]
                     if msg.get("direction") != "inbound":
                         continue
-                    if msg.get("bot_id") != bot_id_arg:
+                    # Backward-compat: legacy messages without bot_id/topic_id
+                    # default to mediator/relationship (matches claim CTE simulator).
+                    row_bid = msg["bot_id"] if "bot_id" in msg else "mediator"
+                    row_tid = msg["topic_id"] if "topic_id" in msg else UUID("00000000-0000-4000-8000-000000000001")
+                    if row_bid != bot_id_arg:
                         continue
-                    if msg.get("topic_id") != topic_id_arg:
+                    if row_tid != topic_id_arg:
                         continue
                     msg["processing_state"] = "deferred"
                     count += 1
@@ -4181,25 +4274,6 @@ class FakePool:
         if compact.startswith("UPDATE bot_turns SET failure_reason=$1"):
             failure_reason, turn_id = args
             self.bot_turns[turn_id]["failure_reason"] = failure_reason
-            return "UPDATE 1"
-        if compact.startswith(
-            "UPDATE bot_turns SET completed_at = now(), failure_reason = 'abandoned_unclaimable'"
-        ):
-            bot_id, topic_id, triggering_ids = args
-            triggering_set = set(triggering_ids or [])
-            for turn in self.bot_turns.values():
-                if (
-                    turn.get("failure_reason") == "crashed"
-                    and turn.get("completed_at") is None
-                    and turn.get("final_output_message_id") is None
-                    and turn.get("bot_id") == bot_id
-                    and turn.get("topic_id") == topic_id
-                    and triggering_set.intersection(
-                        set(turn.get("triggering_message_ids") or [])
-                    )
-                ):
-                    turn["completed_at"] = datetime.now(UTC)
-                    turn["failure_reason"] = "abandoned_unclaimable"
             return "UPDATE 1"
         if compact.startswith("UPDATE public.eval_runs SET scenarios_passed"):
             scenarios_passed, scenarios_failed, total_cost_usd, notes, run_id = args
