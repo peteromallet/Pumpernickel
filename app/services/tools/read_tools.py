@@ -1085,63 +1085,54 @@ def _target_tool_names(target_type: Any) -> set[str]:
 async def get_bot_actions(
     ctx: TurnContext, args: GetBotActionsInput
 ) -> GetBotActionsOutput:
+    """Audit read: returns bot_turns enriched with triggering + outbound content.
+
+    Backed by the SQL view ``mediator.v_bot_actions`` (migration 0043). The
+    view denormalises ``bot_turns`` against ``messages``, ``tool_calls``, and
+    ``turn_audit_events`` in a single place so that adding a new column never
+    requires touching the application layer.
+
+    Bot-scoping is enforced here as a mandatory ``bot_id = $N`` filter
+    against the view (no opt-out flag — see Project B work item 3 and
+    SD-014 on bot-scope discipline).
+    """
     logger.info("read tool get_bot_actions turn_id=%s", ctx.turn_id)
-    clauses: list[str] = []
-    params: list[Any] = []
-    add_date_range(clauses, params, "bt.started_at", args.date_range)
+    # bot_id is always set on the turn context; the view is defined so that
+    # every row carries the originating bot, and we MUST scope to it.
+    if ctx.bot_id is None:
+        # Defensive: callers should never reach get_bot_actions without a
+        # bot_id (the turn that invoked the tool is itself bot-scoped).
+        return GetBotActionsOutput(actions=[])
+
+    clauses: list[str] = ["bot_id = $1"]
+    params: list[Any] = [ctx.bot_id]
+    add_date_range(clauses, params, "started_at", args.date_range)
     if args.user_in_context is not None:
         params.append(args.user_in_context)
-        clauses.append(f"bt.user_in_context = ${len(params)}")
+        clauses.append(f"user_in_context = ${len(params)}")
     target_names = _target_tool_names(args.target_type)
     if target_names:
         params.append(list(target_names))
+        # tool_calls in the view is a jsonb array of tool_calls rows; check
+        # whether any element's tool_name is in the target set.
         clauses.append(
-            f"EXISTS (SELECT 1 FROM tool_calls tcf WHERE tcf.turn_id = bt.id AND tcf.tool_name = ANY(${len(params)}::text[]))"
+            "EXISTS ("
+            "SELECT 1 FROM jsonb_array_elements(tool_calls) tcf "
+            f"WHERE tcf->>'tool_name' = ANY(${len(params)}::text[])"
+            ")"
         )
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    where = f"WHERE {' AND '.join(clauses)}"
     params.append(args.limit)
     rows = await ctx.pool.fetch(
         f"""
-        SELECT bt.id AS turn_id, bt.started_at, bt.user_in_context, bt.triggered_by_message_id,
-               tm.content AS triggering_content,
-               tm.handling_result AS triggering_handling_result,
-               tm.processing_error AS triggering_processing_error,
-               bt.final_output_message_id, om.content AS final_outbound_content,
-               COALESCE(bt.reasoning, '') AS reasoning,
-               COALESCE(
-                 jsonb_agg(to_jsonb(tc) ORDER BY tc.called_at) FILTER (WHERE tc.id IS NOT NULL),
-                 '[]'::jsonb
-               ) AS tool_calls,
-               COALESCE(
-                 (
-                   SELECT jsonb_agg(
-                     jsonb_build_object(
-                       'id', tae.id,
-                       'turn_id', tae.turn_id,
-                       'event_seq', tae.event_seq,
-                       'event_type', tae.event_type,
-                       'step', tae.step,
-                       'severity', tae.severity,
-                       'occurred_at', tae.occurred_at,
-                       'duration_ms', tae.duration_ms,
-                       'actor', tae.actor,
-                       'message', tae.message,
-                       'metadata', tae.metadata
-                     )
-                     ORDER BY tae.event_seq
-                   )
-                   FROM turn_audit_events tae
-                   WHERE tae.turn_id = bt.id
-                 ),
-                 '[]'::jsonb
-               ) AS audit_events
-        FROM bot_turns bt
-        LEFT JOIN messages tm ON tm.id = bt.triggered_by_message_id
-        LEFT JOIN messages om ON om.id = bt.final_output_message_id
-        LEFT JOIN tool_calls tc ON tc.turn_id = bt.id
+        SELECT turn_id, started_at, user_in_context, triggered_by_message_id,
+               triggering_content, triggering_handling_result,
+               triggering_processing_error,
+               final_output_message_id, final_outbound_content,
+               reasoning, tool_calls, audit_events
+        FROM v_bot_actions
         {where}
-        GROUP BY bt.id, tm.content, tm.handling_result, tm.processing_error, om.content
-        ORDER BY bt.started_at DESC
+        ORDER BY started_at DESC
         LIMIT ${len(params)}
         """,
         *params,

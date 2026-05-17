@@ -1,0 +1,84 @@
+name: Postgres-backed tests
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "migrations/**"
+      - "tests/**"
+      - "scripts/run_sql_tests.sh"
+      - "pyproject.toml"
+      - ".github/workflows/postgres-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "migrations/**"
+      - "tests/**"
+      - "scripts/run_sql_tests.sh"
+      - "pyproject.toml"
+      - ".github/workflows/postgres-tests.yml"
+
+jobs:
+  postgres:
+    name: Postgres fixture + smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # The fixture in tests/fixtures/postgres.py reads TEST_DATABASE_URL
+      # first; when set it uses that DSN as the admin connection (carving
+      # out a fresh per-session test database) instead of spinning up its
+      # own Docker container.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # Stub env vars required by app.config.get_settings() when conftest
+      # imports app modules at collection time.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DATABASE_SCHEMA: mediator
+      SUPABASE_URL: https://example.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: dummy-service-role
+      ANTHROPIC_API_KEY: dummy-anthropic
+      OPENAI_API_KEY: dummy-openai
+      GROQ_API_KEY: dummy-groq
+      WHATSAPP_TOKEN: dummy-whatsapp
+      WHATSAPP_PHONE_NUMBER_ID: "12345"
+      WHATSAPP_VERIFY_TOKEN: dummy-verify
+      WHATSAPP_APP_SECRET: dummy-secret
+      ADMIN_PASSWORD: dummy-admin
+      PARTNER_PHONE_A: "15555550100"
+      PARTNER_PHONE_B: "15555550101"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Seed Supabase-style roles
+        run: |
+          # The fixture creates anon / authenticated / service_role itself,
+          # but doing it up-front keeps the first migration log readable.
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE anon; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE service_role; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
+
+      - name: Run Postgres-marked tests
+        run: pytest -m postgres -v
