@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -8,15 +8,23 @@ import pytest
 from app.config import get_settings
 from app.main import _install_bot_coalescer
 from app.models.user import User
+from app.services.coalescer_registry import CoalescerRegistry
 from app.services.pacer import DiscordPacer, PacingDecision
 from tests._scope_helpers import make_resolved_scope
 
 
 def _fresh_app() -> SimpleNamespace:
-    """Build a SimpleNamespace mimicking the lifespan's app.state shape."""
+    """Build a SimpleNamespace mimicking the lifespan's app.state shape.
+
+    Constructs a real CoalescerRegistry plus a read-only MappingProxyType
+    over its ``installed`` dict so reads via ``app.state.coalescers[bot_id]``
+    continue to work in existing assertions.
+    """
+    registry = CoalescerRegistry()
     return SimpleNamespace(
         state=SimpleNamespace(
-            coalescers={},
+            coalescer_registry=registry,
+            coalescers=MappingProxyType(registry.installed),
             discord_pacers={},
         )
     )
