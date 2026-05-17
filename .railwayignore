@@ -1,20 +1,56 @@
-.env
-.env.*
-!.env.example
+# Files to exclude from `railway up` uploads.
+# This OVERRIDES .gitignore for the upload, so we can ship the
+# pre-built React dist/ even though it's gitignored.
+
+# Source-control + IDE
+.git/
+.idea/
+.vscode/
+*.swp
+
+# Python build artifacts (we still want to ship the source, just not caches)
 __pycache__/
 *.py[cod]
+*.pyo
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .venv/
 venv/
-.DS_Store
+
+# Node — ship dist/, exclude node_modules
+web/live-voice/node_modules/
+web/live-voice/.vite/
+
+# Megaplan internal state — never ship to prod
 .claude/
 .megaplan/
 .megaplan-queue/
+megaplan/
 megaplans/
-supabase/
-scripts/import_chatgpt.py
-backups/
-*.dump
+
+# Environment + secrets
+.env
+.env.*
+!.env.example
+.env.local
+.env.production
+
+# Large data / logs / dumps / DB exports
 *.log
+*.sqlite
+*.dump
+data/
+fixtures/
+evals/
+backups/
+supabase/
+
+# Tests + dev-only
+tests/
+docs/
+scripts/
+
+# Misc
+.DS_Store
+Thumbs.db
