@@ -1563,6 +1563,29 @@ async def _run_agentic(
                 scope.bot_id,
                 str(primary_topic_id),
             )
+            # If we got here via recovery requeue of a crashed bot_turn whose
+            # triggering messages have since been handled by another path,
+            # the originating bot_turn row will still be picked up by every
+            # subsequent recovery sweep — an infinite requeue loop. Mark any
+            # such crashed bot_turn rows terminal so recovery stops seeing
+            # them. Idempotent: the WHERE clause is a no-op when we got here
+            # via the normal (non-recovery) flow.
+            await active_pool.execute(
+                """
+                UPDATE bot_turns
+                SET completed_at = now(),
+                    failure_reason = 'abandoned_unclaimable'
+                WHERE failure_reason = 'crashed'
+                  AND completed_at IS NULL
+                  AND final_output_message_id IS NULL
+                  AND bot_id = $1
+                  AND topic_id = $2
+                  AND triggering_message_ids && $3::uuid[]
+                """,
+                scope.bot_id,
+                primary_topic_id,
+                triggering_message_ids,
+            )
             return
 
     try:

@@ -4182,6 +4182,25 @@ class FakePool:
             failure_reason, turn_id = args
             self.bot_turns[turn_id]["failure_reason"] = failure_reason
             return "UPDATE 1"
+        if compact.startswith(
+            "UPDATE bot_turns SET completed_at = now(), failure_reason = 'abandoned_unclaimable'"
+        ):
+            bot_id, topic_id, triggering_ids = args
+            triggering_set = set(triggering_ids or [])
+            for turn in self.bot_turns.values():
+                if (
+                    turn.get("failure_reason") == "crashed"
+                    and turn.get("completed_at") is None
+                    and turn.get("final_output_message_id") is None
+                    and turn.get("bot_id") == bot_id
+                    and turn.get("topic_id") == topic_id
+                    and triggering_set.intersection(
+                        set(turn.get("triggering_message_ids") or [])
+                    )
+                ):
+                    turn["completed_at"] = datetime.now(UTC)
+                    turn["failure_reason"] = "abandoned_unclaimable"
+            return "UPDATE 1"
         if compact.startswith("UPDATE public.eval_runs SET scenarios_passed"):
             scenarios_passed, scenarios_failed, total_cost_usd, notes, run_id = args
             self.eval_runs[run_id].update(
