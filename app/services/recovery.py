@@ -8,17 +8,20 @@ from uuid import UUID
 
 from app.config import get_settings
 from app.models.user import fetch_user_by_id
-from app.services import inbound_queue, system_state
+from app.services import inbound_queue, metrics, system_state
+from app.services.coalescer_registry import CoalescerRegistry
 from app.services.scope import scope_from_bot_turn_row, scope_from_message_row
 
 logger = logging.getLogger(__name__)
 
 
-def _coalescer_for_scope(coalescers: Any, bot_id: str) -> Any | None:
-    """Resolve the right bot coalescer while preserving old single-coalescer callers."""
-    if isinstance(coalescers, dict):
-        return coalescers.get(bot_id)
-    return coalescers
+def _coalescer_for_scope(registry: CoalescerRegistry, bot_id: str) -> Any | None:
+    """Resolve the right bot coalescer through the registry.
+
+    Returns ``None`` when no coalescer is registered for ``bot_id``; callers
+    log a structured warning and leave the row in ``failed``.
+    """
+    return registry.get(bot_id)
 
 
 async def _recovery_scopes(pool: Any) -> dict[str, set[UUID]]:
@@ -99,11 +102,20 @@ async def recover_scheduled_jobs_on_startup(pool: Any, *, now: datetime | None =
     )
 
 
-async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None = None) -> None:
+async def _recover_legacy_invariants(pool: Any, *, now: datetime | None = None) -> None:
+    """Always-on legacy invariants: scheduled_jobs reconciliation, bot_turn
+    crash-marking (both pre-send and post-send), and retention-expiry sweeps
+    for raw + (failed/processing) inbound rows.
+
+    Never inspects ``failure_class``.  Runs regardless of the recovery-v2
+    kill switch or coalescer readiness.
+    """
     await recover_scheduled_jobs_on_startup(pool, now=now)
-    if await system_state.is_paused(pool):
-        return
-    crashed = await pool.fetch(
+
+    # Mark crashed (pre-send) turns so the v2 half can pick them up for retry.
+    # RETURNING keeps the fake-pool matcher's bookkeeping path; rows are
+    # discarded here — v2 re-SELECTs the crashed set for dispatch.
+    await pool.fetch(
         """
         UPDATE bot_turns
         SET failure_reason='crashed'
@@ -114,33 +126,8 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         RETURNING id, triggering_message_ids, user_in_context AS user_id, bot_id, topic_id
         """
     )
-    for row in crashed:
-        message_ids = row["triggering_message_ids"]
-        if not message_ids:
-            continue
-        try:
-            scope = scope_from_bot_turn_row(row)
-        except ValueError as exc:
-            logger.warning("skipping crashed turn recovery for bot_turn_id=%s: %s", _row_get(row, "id"), exc)
-            continue
-        user = await fetch_user_by_id(pool, scope.user_id)
-        if user is None:
-            logger.warning(
-                "skipping crashed turn recovery for bot_turn_id=%s: missing user_id=%s",
-                _row_get(row, "id"),
-                scope.user_id,
-            )
-            continue
-        target_coalescer = _coalescer_for_scope(coalescer, scope.bot_id)
-        if target_coalescer is None:
-            logger.warning(
-                "skipping crashed turn recovery for bot_turn_id=%s: no coalescer for bot_id=%s",
-                _row_get(row, "id"),
-                scope.bot_id,
-            )
-            continue
-        await target_coalescer.add_burst(user.id, message_ids, user, scope=scope)  # pause-check via send_outbound
 
+    # Mark crashed-after-send turns terminal (no retry — outbound already left).
     await pool.execute(
         """
         UPDATE bot_turns
@@ -155,7 +142,7 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
     settings = get_settings()
     retention_cutoff = (now or _utc_now()) - timedelta(days=settings.inbound_queue_retention_days)
 
-    # ── Expire inbound raw rows past retention ─────────────────────────
+    # Expire inbound raw rows past retention.
     await pool.execute(
         """
         UPDATE messages
@@ -169,6 +156,104 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         retention_cutoff,
     )
 
+    # Expire old failed/processing rows past retention.
+    await pool.execute(
+        """
+        UPDATE messages
+        SET processing_state = 'expired',
+            handling_result  = 'expired',
+            handled_at       = now()
+        WHERE direction = 'inbound'
+          AND processing_state IN ('failed', 'processing')
+          AND sent_at < $1
+        """,
+        retention_cutoff,
+    )
+
+
+async def _recover_v2_inbound(
+    pool: Any,
+    registry: CoalescerRegistry,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Recovery-v2 inbound paths: requeue crashed turn-triggering messages,
+    raw-message recovery, stale-processing recovery, retryable-failed recovery.
+
+    Gated by the recovery_v2 kill switch (checked here and again at the top
+    of each ``run_recovery_forever`` tick) AND ``registry.is_ready()``.  When
+    a bot is unknown to the registry we log a structured warning and leave
+    the row in ``failed``.
+    """
+    if await system_state.is_recovery_v2_killed(pool):
+        logger.info("recovery-v2 skipped: kill switch engaged")
+        return
+    if not registry.is_ready():
+        logger.info(
+            "recovery-v2 skipped: registry not ready expected=%s installed=%s ready=%s",
+            sorted(registry.expected),
+            sorted(registry.installed.keys()),
+            sorted(registry.ready),
+        )
+        return
+
+    # Re-dispatch crashed turn-triggering message bursts back through the
+    # coalescer.  ``_recover_legacy_invariants`` has already flipped the
+    # bot_turn ``failure_reason`` to ``crashed``; we now pick the row up and
+    # hand the triggering ids to the matching bot coalescer.
+    crashed = await pool.fetch(
+        """
+        SELECT id, triggering_message_ids, user_in_context AS user_id, bot_id, topic_id
+        FROM bot_turns
+        WHERE failure_reason = 'crashed'
+          AND completed_at IS NULL
+          AND final_output_message_id IS NULL
+          AND started_at < now() - interval '5 minutes'
+        """
+    )
+    for row in crashed:
+        message_ids = row["triggering_message_ids"]
+        if not message_ids:
+            continue
+        try:
+            scope = scope_from_bot_turn_row(row)
+        except ValueError as exc:
+            logger.warning(
+                "skipping crashed turn recovery for bot_turn_id=%s: %s",
+                _row_get(row, "id"),
+                exc,
+            )
+            continue
+        user = await fetch_user_by_id(pool, scope.user_id)
+        if user is None:
+            logger.warning(
+                "skipping crashed turn recovery for bot_turn_id=%s: missing user_id=%s",
+                _row_get(row, "id"),
+                scope.user_id,
+            )
+            continue
+        target_coalescer = _coalescer_for_scope(registry, scope.bot_id)
+        if target_coalescer is None:
+            logger.warning(
+                "recovery-v2: no coalescer for bot_id=%s; leaving bot_turn_id=%s rows in failed",
+                scope.bot_id,
+                _row_get(row, "id"),
+            )
+            # A3 work item 6: this is the SRE-flagged case from A1.  Surface it
+            # as its own counter so the page-severity alert fires.
+            metrics.incr(
+                "recovery_skipped_missing_coalescer",
+                bot=scope.bot_id,
+            )
+            continue
+        await target_coalescer.add_burst(user.id, message_ids, user, scope=scope)  # pause-check via send_outbound
+        metrics.incr(
+            "recovery_requeued",
+            bot=scope.bot_id,
+            reason="crashed_turn",
+        )
+
+    settings = get_settings()
     max_retries = settings.inbound_queue_max_retry_attempts
 
     raw_messages = await pool.fetch(
@@ -178,6 +263,9 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         WHERE m.direction = 'inbound'
           AND m.processing_state = 'raw'
           AND m.sent_at < now() - interval '30 seconds'
+          AND (m.next_retry_at IS NULL OR m.next_retry_at <= now())
+          AND (m.failure_class IS NULL
+               OR m.failure_class NOT IN ('terminal_post_send', 'infra_bug'))
           AND (
             NOT EXISTS (
               SELECT 1
@@ -206,23 +294,40 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
         try:
             scope = scope_from_message_row(row)
         except ValueError as exc:
-            logger.warning("skipping raw message recovery for message_id=%s: %s", _row_get(row, "id"), exc)
+            logger.warning(
+                "skipping raw message recovery for message_id=%s: %s",
+                _row_get(row, "id"),
+                exc,
+            )
             continue
         user = await fetch_user_by_id(pool, scope.user_id)
         if user is None:
-            logger.warning("skipping raw message recovery for message_id=%s: missing user_id=%s", row["id"], scope.user_id)
+            logger.warning(
+                "skipping raw message recovery for message_id=%s: missing user_id=%s",
+                row["id"],
+                scope.user_id,
+            )
             continue
-        target_coalescer = _coalescer_for_scope(coalescer, scope.bot_id)
+        target_coalescer = _coalescer_for_scope(registry, scope.bot_id)
         if target_coalescer is None:
             logger.warning(
-                "skipping raw message recovery for message_id=%s: no coalescer for bot_id=%s",
-                row["id"],
+                "recovery-v2: no coalescer for bot_id=%s; leaving message_id=%s in failed",
                 scope.bot_id,
+                row["id"],
+            )
+            metrics.incr(
+                "recovery_skipped_missing_coalescer",
+                bot=scope.bot_id,
             )
             continue
         await target_coalescer.add(user.id, row["id"], user, source="recovery", scope=scope)  # pause-check via send_outbound
+        metrics.incr(
+            "recovery_requeued",
+            bot=scope.bot_id,
+            reason="raw_message",
+        )
 
-    # ── Recover stale inbound processing rows ──────────────────────────
+    # Recover stale inbound ``processing`` rows.
     stale_processing_recovered = 0
     scope_map = await _recovery_scopes(pool)
     for bot_id, topic_ids in scope_map.items():
@@ -242,10 +347,18 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
                     bot_id,
                     str(topic_id),
                 )
+                metrics.incr(
+                    "recovery_requeued",
+                    value=count,
+                    bot=bot_id,
+                    reason="stale_processing",
+                )
     if stale_processing_recovered:
         logger.info("recovery: total stale processing recovered=%d", stale_processing_recovered)
 
-    # ── Recover retryable inbound failed rows ──────────────────────────
+    # Recover retryable inbound ``failed`` rows.  ``recover_retryable_failed``
+    # only flips state→raw; ``claim_messages_for_turn`` will NULL the
+    # lifecycle columns via the writer-marker mutator path.
     failed_recovered = 0
     failed_scope_map = await _recovery_scopes(pool)
     for bot_id, topic_ids in failed_scope_map.items():
@@ -265,29 +378,57 @@ async def recover_on_startup(pool: Any, coalescer: Any, *, now: datetime | None 
                     bot_id,
                     str(topic_id),
                 )
+                metrics.incr(
+                    "recovery_requeued",
+                    value=count,
+                    bot=bot_id,
+                    reason="retryable_failed",
+                )
     if failed_recovered:
         logger.info("recovery: total retryable failed recovered=%d", failed_recovered)
 
-    # ── Expire old failed/processing rows past retention ───────────────
-    await pool.execute(
-        """
-        UPDATE messages
-        SET processing_state = 'expired',
-            handling_result  = 'expired',
-            handled_at       = now()
-        WHERE direction = 'inbound'
-          AND processing_state IN ('failed', 'processing')
-          AND sent_at < $1
-        """,
-        retention_cutoff,
-    )
+
+async def recover_on_startup(
+    pool: Any,
+    registry: CoalescerRegistry,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Top-level recovery entry point.
+
+    Always runs the legacy invariants (scheduled_jobs reconciliation,
+    bot_turn crash-marking, retention-expiry sweeps).  The v2 inbound half
+    runs only when the kill switch is NOT set and the coalescer registry is
+    ready.
+    """
+    await _recover_legacy_invariants(pool, now=now)
+    if await system_state.is_paused(pool):
+        return
+    if await system_state.is_recovery_v2_killed(pool):
+        logger.info("recovery-v2 skipped: kill switch engaged")
+        return
+    await _recover_v2_inbound(pool, registry, now=now)
 
 
-async def run_recovery_forever(pool: Any, coalescer: Any, *, interval_seconds: float = 30.0) -> None:
+async def run_recovery_forever(
+    pool: Any,
+    registry: CoalescerRegistry,
+    *,
+    interval_seconds: float = 30.0,
+) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            await recover_on_startup(pool, coalescer)
+            # Legacy invariants always run; the kill switch only gates the v2
+            # inbound half.  Check it at the top of each tick so an operator
+            # flipping the switch takes effect on the next iteration.
+            await _recover_legacy_invariants(pool)
+            if await system_state.is_paused(pool):
+                continue
+            if await system_state.is_recovery_v2_killed(pool):
+                logger.info("recovery-v2 skipped: kill switch engaged")
+                continue
+            await _recover_v2_inbound(pool, registry)
         except asyncio.CancelledError:
             raise
         except Exception:
