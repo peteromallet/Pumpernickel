@@ -717,6 +717,36 @@ async def _create_message_with_retry(
     last_error: Exception | None = None
     fell_back = False
 
+    # Defensive net: any orphaned ``tool_use`` (assistant block with no
+    # matching ``tool_result`` in the next user message) gets a synthetic
+    # stub appended before we hit the wire. A non-zero repair count means a
+    # caller leaked an unpaired tool_use — we still go out clean (no provider
+    # 400, no mislabel as "llm_phase_failed"), but we log + emit a metric so
+    # the leak source can be tracked and fixed at the root.
+    messages, _orphans_repaired = _pair_orphan_tool_uses_with_stubs(
+        messages, reason="defensive_repair"
+    )
+    if _orphans_repaired:
+        logger.warning(
+            "_create_message_with_retry repaired %d orphan tool_use block(s) "
+            "before provider call; check upstream callsite turn_id=%s bot=%s phase=%s",
+            _orphans_repaired,
+            ctx.turn_id,
+            bot_id,
+            ctx.current_step,
+            extra=obs_fields(ctx),
+        )
+        try:
+            metrics.incr(
+                "orphan_tool_use_repaired",
+                count=_orphans_repaired,
+                bot=bot_id,
+                phase=str(ctx.current_step or "unknown"),
+            )
+        except Exception:  # noqa: BLE001
+            # Metric emission must never fail the call.
+            pass
+
     for hop_index, hop_provider in enumerate(deduped_chain):
         # Reuse the caller-provided client only when it matches the first hop
         # AND the caller didn't pin via provider_chain.  Otherwise build fresh.
@@ -811,6 +841,101 @@ async def _create_message_with_retry(
 
     # Unreachable: the loop either returns or raises.
     raise LLMPhaseError(str(last_error or "provider chain exhausted"))
+
+
+def _pair_orphan_tool_uses_with_stubs(
+    messages: list[dict[str, Any]],
+    *,
+    reason: str = "iteration_cap_skipped",
+) -> tuple[list[dict[str, Any]], int]:
+    """Append synthetic ``tool_result`` stubs for any orphaned ``tool_use``.
+
+    Every ``tool_use`` block in an assistant message MUST be followed by a
+    matching ``tool_result`` in the next user message — Anthropic 400s and
+    most other providers reject otherwise. This function walks the messages
+    list and ensures the invariant holds; orphans are repaired by inserting a
+    minimal user message with a stub ``tool_result`` for each orphan id.
+
+    Returns ``(repaired_messages, orphan_count)``. ``orphan_count`` is the
+    number of tool_use ids that needed stubs. A non-zero count is itself a
+    signal that an upstream callsite leaked an unpaired tool_use — the caller
+    should log or emit a metric so the leak source can be tracked down.
+
+    Parameters
+    ----------
+    messages
+        Conversation history; not mutated.
+    reason
+        Short label captured in the stub ``content`` so post-hoc readers
+        understand why the tool didn't actually execute (e.g.
+        ``"iteration_cap_skipped"``, ``"defensive_repair"``).
+    """
+    if not messages:
+        return list(messages), 0
+    out: list[dict[str, Any]] = []
+    orphans_repaired = 0
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        out.append(dict(msg))
+        content = msg.get("content")
+        if msg.get("role") != "assistant" or not isinstance(content, list):
+            i += 1
+            continue
+        tool_use_ids: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                bid = block.get("id")
+                if isinstance(bid, str) and bid:
+                    tool_use_ids.append(bid)
+        if not tool_use_ids:
+            i += 1
+            continue
+        # Inspect the NEXT message for matching tool_result blocks.
+        next_msg = messages[i + 1] if i + 1 < n else None
+        next_content = next_msg.get("content") if isinstance(next_msg, dict) else None
+        present_result_ids: set[str] = set()
+        if isinstance(next_content, list):
+            for block in next_content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    rid = block.get("tool_use_id")
+                    if isinstance(rid, str):
+                        present_result_ids.add(rid)
+        missing_ids = [tid for tid in tool_use_ids if tid not in present_result_ids]
+        if not missing_ids:
+            i += 1
+            continue
+        # Synthesize stub results. If the next message is a user message
+        # with content list, splice the stubs into its content. Otherwise
+        # insert a fresh user message between this assistant message and
+        # the next one.
+        stub_blocks = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tid,
+                "content": json.dumps(
+                    {"is_error": True, "skipped": True, "reason": reason},
+                    default=str,
+                ),
+                "is_error": True,
+            }
+            for tid in missing_ids
+        ]
+        orphans_repaired += len(missing_ids)
+        if (
+            isinstance(next_msg, dict)
+            and next_msg.get("role") == "user"
+            and isinstance(next_content, list)
+        ):
+            spliced = dict(next_msg)
+            spliced["content"] = list(next_content) + stub_blocks
+            out.append(spliced)
+            i += 2  # consume both assistant + spliced user message
+        else:
+            out.append({"role": "user", "content": stub_blocks})
+            i += 1  # the original next_msg (if any) becomes out.append next iter
+    return out, orphans_repaired
 
 
 def _anthropic_safe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -915,12 +1040,24 @@ async def run_step(
                 # Read / consult are pre-send context-gathering phases.  The
                 # spec only named ``read`` explicitly; ``consult`` is treated
                 # identically because both must not fail a turn.
+                #
+                # The iteration that hit the cap appended an assistant message
+                # with tool_use blocks but never ran the tools (line ~995+
+                # below is unreached). Returning ``messages`` as-is leaves
+                # orphan tool_use blocks that the NEXT step's provider call
+                # will choke on (Anthropic returns a 400 "tool_use without
+                # tool_result" → mislabeled chain-exhausted as llm_timeout).
+                # Synthesize stub tool_result blocks so the invariant holds.
+                messages, _orphan_count = _pair_orphan_tool_uses_with_stubs(
+                    messages, reason="iteration_cap_skipped"
+                )
                 logger.warning(
                     "%s step tool iteration cap reached; advancing without failing turn "
-                    "turn_id=%s cap=%d",
+                    "turn_id=%s cap=%d orphan_stubs=%d",
                     current_step,
                     ctx.turn_id,
                     max_tool_iterations,
+                    _orphan_count,
                     extra=obs_fields(ctx),
                 )
                 return "", messages, tool_call_count
