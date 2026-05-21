@@ -534,9 +534,6 @@ def _debrief_write_guard_ok(
         "shareable_turn_ids", {}
     )
     redacted_turns: set[str] = set(transcript_policy.get("redacted_turn_ids", []))
-    hot_context_notes_allowed: bool = bool(
-        transcript_policy.get("allow_hot_context_derived_writes", False)
-    )
 
     # ── Validate evidence references ────────────────────────────────────
     if evidence_refs:
@@ -598,19 +595,18 @@ def _debrief_write_guard_ok(
         # For writes without transcript references, require an explicit
         # derivation_source marking it as derived from hot context / bot
         # notes / prep artifact.
-        if not hot_context_notes_allowed:
-            _record_debrief_write_intent(
-                ctx, tool_name, raw_args,
-                outcome="rejected",
-                reason="debrief_missing_derivation_source",
-            )
-            return _tool_error(
-                "debrief_missing_derivation_source: durable write must carry "
-                "evidence_refs with transcript_turn_id or derivation_source "
-                "in ('hot_context', 'bot_notes', 'prep_artifact')",
-                error_code="debrief_missing_derivation_source",
-                retryable=False,
-            )
+        _record_debrief_write_intent(
+            ctx, tool_name, raw_args,
+            outcome="rejected",
+            reason="debrief_missing_derivation_source",
+        )
+        return _tool_error(
+            "debrief_missing_derivation_source: durable write must carry "
+            "evidence_refs with transcript_turn_id or derivation_source "
+            "in ('hot_context', 'bot_notes', 'prep_artifact')",
+            error_code="debrief_missing_derivation_source",
+            retryable=False,
+        )
 
     # ── Guard passed ────────────────────────────────────────────────────
     _record_debrief_write_intent(

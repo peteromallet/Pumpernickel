@@ -338,6 +338,11 @@ async def run_live_debrief_agentic_job(
     # ── Function-scoped imports to avoid circular deps ──────────────────
     from app.bots.registry import get_bot_spec
     from app.services.live import artifacts as live_artifacts
+    from app.services.hot_context import build_hot_context, render_hot_context
+    from app.services.hot_context_solo import (
+        build_hot_context_solo,
+        render_hot_context_solo,
+    )
     from app.services.live.bot_profile import (
         format_live_bot_profile,
         live_bot_profile_context,
@@ -516,13 +521,50 @@ async def run_live_debrief_agentic_job(
         partner_user_id=partner_user_id,
     )
 
-    # ── 9. Build hot context string ─────────────────────────────────────
-    hot_context_rendered = format_live_bot_profile(bot_profile)
-    if prep_artifact:
-        hot_context_rendered += (
-            "\n\nPREP ARTIFACT:\n"
-            + json.dumps(prep_artifact, indent=2, default=str)
+    # ── 9. Build normal hot context string ──────────────────────────────
+    try:
+        allow_cross_topic_peek = getattr(
+            getattr(bot_spec, "read_scopes", None),
+            "allow_cross_topic_peek",
+            False,
         )
+        if getattr(bot_spec, "participants_shape", None) == "solo" or partner is None:
+            if resolved_topic_id is None:
+                raise ValueError("live_debrief hot context requires topic_id")
+            hot_context = await build_hot_context_solo(
+                pool,
+                user,
+                [],
+                trigger_metadata={"kind": "live_debrief", "conversation_id": str(conversation_id)},
+                primary_topic_id=resolved_topic_id,
+                bot_id=bot_id,
+                allow_cross_topic_peek=allow_cross_topic_peek,
+            )
+            hot_context_rendered = render_hot_context_solo(hot_context)
+        else:
+            hot_context = await build_hot_context(
+                pool,
+                user,
+                partner,
+                [],
+                trigger_metadata={"kind": "live_debrief", "conversation_id": str(conversation_id)},
+                primary_topic_id=resolved_topic_id,
+                allow_cross_topic_peek=allow_cross_topic_peek,
+                allow_cross_topic_status_injection=getattr(
+                    getattr(bot_spec, "read_scopes", None),
+                    "allow_cross_topic_status_injection",
+                    False,
+                ),
+                bot_id=bot_id,
+            )
+            hot_context_rendered = render_hot_context(hot_context)
+    except Exception:
+        logger.warning(
+            "live_debrief: falling back to live bot profile context for %s",
+            conversation_id,
+            exc_info=True,
+        )
+        hot_context_rendered = format_live_bot_profile(bot_profile)
 
     # ── 10. Build debrief tool caps ─────────────────────────────────────
     tool_cap = settings.live_debrief_tool_call_cap

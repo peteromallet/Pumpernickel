@@ -313,6 +313,18 @@ class TestDebriefHappyPath:
             fake_run_job,
         )
 
+        async def fake_build_hot_context_solo(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {"normal": "hot-context"}
+
+        monkeypatch.setattr(
+            "app.services.hot_context_solo.build_hot_context_solo",
+            fake_build_hot_context_solo,
+        )
+        monkeypatch.setattr(
+            "app.services.hot_context_solo.render_hot_context_solo",
+            lambda hot_context: "NORMAL HOT CONTEXT",
+        )
+
         pool = DebriefFakePool()
         pool.set_conversations_row(
             conversation_id,
@@ -354,6 +366,7 @@ class TestDebriefHappyPath:
         assert "live_debrief_transcript_policy" in config.initial_extras
         policy = config.initial_extras["live_debrief_transcript_policy"]
         assert policy, "debrief transcript policy must be available to tool guards"
+        assert captured_run_kwargs["hot_context"] == "NORMAL HOT CONTEXT"
 
         # Status transition: debriefing -> review_pending.
         assert pool.updated_status == "review_pending", (
@@ -719,6 +732,49 @@ class TestDebriefRedactionEnforcement:
         assert error.get("error_code") == "debrief_quote_mismatch", (
             f"Expected debrief_quote_mismatch, got {error.get('error_code')}"
         )
+
+    def test_missing_evidence_requires_explicit_derivation_source(self) -> None:
+        """Hot-context-derived writes must still say where they came from."""
+        from app.services.tools.registry import _debrief_write_guard_ok
+
+        raw_args: dict[str, Any] = {
+            "content": "User has a recurring pattern.",
+        }
+        policy: dict[str, Any] = {
+            "redacted_turn_ids": [],
+            "shareable_turn_ids": {},
+            "allow_hot_context_derived_writes": True,
+        }
+        ctx = TurnContext(
+            turn_id=uuid4(),
+            pool=None,
+            user=_make_user(),
+            partner=None,
+            triggering_message_ids=[],
+            bot_id="mediator",
+            transport=None,
+            user_id=uuid4(),
+            bot_spec=get_bot_spec("mediator"),
+            binding_id=None,
+            participants_shape="dyad",
+            primary_topic_id=uuid4(),
+            primary_topic_slug="relationship",
+            channel_id=None,
+            read_scopes=None,
+            write_scopes=None,
+            cross_topic_policy=None,
+            dyad_id=None,
+            current_step="live_debrief",
+            turn_started_at=datetime.now(timezone.utc),
+        )
+        ctx.extras["live_debrief_transcript_policy"] = policy
+
+        error = _debrief_write_guard_ok(ctx, "add_memory", raw_args)
+        assert error is not None
+        assert error.get("error_code") == "debrief_missing_derivation_source"
+
+        raw_args["derivation_source"] = "hot_context"
+        assert _debrief_write_guard_ok(ctx, "add_memory", raw_args) is None
 
 
 # ── (d) Outbound denial ──────────────────────────────────────────────────────
