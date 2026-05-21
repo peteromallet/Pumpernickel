@@ -123,8 +123,9 @@ def test_turn_context_field_count():
     #           read_scopes, write_scopes, cross_topic_policy = 10
     # S2a adds: dyad_id = 1
     # InboundScope refactor adds: transport, user_id = 2
-    # Total: 31
-    assert len(field_names) == 31
+    # S2 live prep adds: extras = 1
+    # Total: 32
+    assert len(field_names) == 32
     assert "bot_id" in field_names
     assert "transport" in field_names
     assert "user_id" in field_names

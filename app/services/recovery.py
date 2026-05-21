@@ -170,6 +170,48 @@ async def _recover_legacy_invariants(pool: Any, *, now: datetime | None = None) 
         retention_cutoff,
     )
 
+    # ── Live-prep orphan sweep ────────────────────────────────────────
+    await sweep_orphaned_prepping(pool, now=now)
+
+
+async def sweep_orphaned_prepping(
+    pool: Any, *, now: datetime | None = None
+) -> None:
+    """Mark conversations stuck in ``prepping`` as ``prep_failed``.
+
+    The background task's broad ``except`` is the primary defense against
+    orphaned prepping sessions.  This sweep is the backstop — it catches
+    sessions where the entire process (or event loop) died before the
+    background task's except handler could fire.
+    """
+    settings = get_settings()
+    timeout_minutes = settings.live_prep_orphan_timeout_minutes
+    cutoff = (now or _utc_now()) - timedelta(minutes=timeout_minutes)
+    result = await pool.execute(
+        """
+        UPDATE mediator.conversations
+        SET status = 'prep_failed',
+            session_fields = COALESCE(session_fields, '{}'::jsonb)
+                             || jsonb_build_object('prep_error', 'orphaned')
+        WHERE status = 'prepping'
+          AND created_at < $1
+        """,
+        cutoff,
+    )
+    # result is the command tag string e.g. "UPDATE 3"; extract count.
+    count = 0
+    try:
+        count = int(str(result).split()[-1]) if result else 0
+    except (ValueError, IndexError):
+        pass
+    if count:
+        logger.info(
+            "recovery: orphaned prepping sessions swept=%d "
+            "timeout_minutes=%d",
+            count,
+            timeout_minutes,
+        )
+
 
 async def _recover_v2_inbound(
     pool: Any,

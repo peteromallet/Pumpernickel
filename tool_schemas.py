@@ -18,6 +18,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.services.live.schemas import Agenda
+
 
 # ---------------------------------------------------------------------------
 # Shared enums and primitives
@@ -2262,6 +2264,20 @@ class GetAdherenceOutput(BaseModel):
 # ---------------------------------------------------------------------------
 #
 # ---------------------------------------------------------------------------
+# submit_live_brief (S2 agentic live prep)
+# ---------------------------------------------------------------------------
+
+
+class SubmitLiveBriefInput(BaseModel):
+    agenda: Agenda
+    notes: str | None = None
+
+
+class SubmitLiveBriefOutput(BaseModel):
+    ok: bool = True
+
+
+# ---------------------------------------------------------------------------
 # set_topic_status (S4)
 # ---------------------------------------------------------------------------
 
@@ -2288,6 +2304,7 @@ class SetTopicStatusOutput(BaseModel):
 
 TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "update_turn_plan": (UpdateTurnPlanInput, UpdateTurnPlanOutput),
+    "submit_live_brief": (SubmitLiveBriefInput, SubmitLiveBriefOutput),
     # read
     "search_messages": (SearchMessagesInput, SearchMessagesOutput),
     "search_emojis": (SearchEmojisInput, SearchEmojisOutput),

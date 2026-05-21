@@ -1,4 +1,12 @@
-"""Sprint 1 — agenda schema + prep persistence tests (stub LLM).
+"""Sprint 1 — agenda schema + prep persistence tests (stub LLM, sync dev path only).
+
+These tests cover the legacy synchronous prep path via ``produce_agenda``
+with ``StubAgendaProducer``.  They do **not** exercise the agentic async
+prep path (Sprint 2) — for agentic coverage, see
+``tests/test_live_prep_agentic.py``.
+
+Requires ``LIVE_VOICE_PREP_PROVIDER=stub`` to ensure no accidental routing
+to the agentic path in environments where the env var may be set.
 
 Two layers:
 1. Pure-Python schema tests for ``Agenda`` / ``AgendaItem`` — internal-ref
@@ -9,6 +17,7 @@ Two layers:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,6 +28,18 @@ from app.bots.base import BotSpec
 from app.bots.registry import BOT_SPECS
 from app.services.live.prep import StubAgendaProducer, produce_agenda
 from app.services.live.schemas import Agenda, AgendaItem, PrepRequest
+
+
+# ── Module-level fixture: ensure these tests always run in stub mode ────────
+# These tests cover the legacy synchronous prep path (Sprint 1).  The agentic
+# async path (Sprint 2) is exercised by tests/test_live_prep_agentic.py.
+
+
+@pytest.fixture(autouse=True)
+def _force_stub_prep_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LIVE_VOICE_PREP_PROVIDER=stub so these sync-path tests never
+    accidentally route to the agentic async path."""
+    monkeypatch.setenv("LIVE_VOICE_PREP_PROVIDER", "stub")
 
 
 # --------------------------------------------------------------------------- #

@@ -31,6 +31,15 @@ TOOL_REGISTRY["set_partner_sharing"] = (SetPartnerSharingInput, SetPartnerSharin
 ToolFn = Callable[[TurnContext, BaseModel], Awaitable[BaseModel]]
 
 
+async def _submit_live_brief_handler(
+    ctx: TurnContext, args: BaseModel
+) -> BaseModel:
+    from tool_schemas import SubmitLiveBriefOutput
+
+    ctx.extras["submitted_live_brief"] = args.model_dump()
+    return SubmitLiveBriefOutput(ok=True)
+
+
 async def _consult_perspective(ctx: TurnContext, args: BaseModel) -> BaseModel:
     from app.services.tools.consult_perspective import consult_perspective
 
@@ -60,6 +69,7 @@ async def _update_turn_plan(
 
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
+    "submit_live_brief": "Submit the final structured agenda for a live voice session. Call this exactly once when prep is complete — the agenda must pass existing validation (unique item ids, at least one 'must' item, all next_item_ids resolve). This is the required finalization gate for live prep; plain text without this call is not a valid agenda.",
     "update_turn_plan": "Adjust the private turn checklist when the initial skeleton is too light or too heavy. Use this instead of hidden scratch notes. This does not send user-facing text or write durable state.",
     "search_messages": "Search prior message text, saved media explanations, or dates. Use for specific prior wording, repeated phrases, media explanations, and thread history; avoid for broad summaries. Example: find prior mentions of 'asked how my day went.' Each hit carries a `charge` label: `routine` (everyday content, low emotional weight), `notable` (emotionally meaningful but not heavy), `charged` (significant emotional weight, conflict, vulnerability, or intensity), `crisis` (meets crisis criteria).",
     "search_emojis": "Search the Unicode emoji dataset by meaning/name before reacting when a precise or unusual emoji would fit better than a generic one. Search by the emotional meaning, metaphor, or exact tone you want to convey. Example: search 'quiet support', 'fragile repair', or 'small but real progress.'",
@@ -133,6 +143,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 
 
 TOOL_DISPATCH: dict[str, ToolFn] = {
+    "submit_live_brief": _submit_live_brief_handler,
     "update_turn_plan": _update_turn_plan,
     "search_messages": read_tools.search_messages,
     "search_emojis": read_tools.search_emojis,
@@ -382,6 +393,14 @@ RECORD_WRITE_TOOLS = WRITE_PHASE_TOOLS - SCHEDULE_TOOLS | {
 # but increases the risk of premature scheduling during lightweight turns.
 RESPOND_TOOLS = {"send_message_part", "search_emojis", "check_oob", "log_event"}
 READ_TOOLS_FOR_STEP = READ_PHASE_TOOLS - {"send_message_part"}
+# Live prep tools: read tools minus outbound/OOB plus the required submit gate.
+# No write tools, no outbound, no schedule tools — prep is private and read-only
+# except for update_turn_plan (always allowed) and submit_live_brief (required gate).
+LIVE_PREP_TOOLS = (
+    READ_PHASE_TOOLS
+    - {"send_message_part", "summarize_oob_topics", "check_oob"}
+    | {"submit_live_brief"}
+)
 STEP_ALLOWED_TOOLS: dict[TurnStep, set[str]] = {
     "read": READ_TOOLS_FOR_STEP,
     "consult": CONSULT_PHASE_TOOLS | {"consult_perspective"},
@@ -389,6 +408,7 @@ STEP_ALLOWED_TOOLS: dict[TurnStep, set[str]] = {
     "record": RECORD_WRITE_TOOLS | RECORD_READ_TOOLS,
     "schedule": SCHEDULE_TOOLS,
     "done": set(),
+    "live_prep": LIVE_PREP_TOOLS,
 }
 ALWAYS_ALLOWED_TOOLS = {"update_turn_plan"}
 

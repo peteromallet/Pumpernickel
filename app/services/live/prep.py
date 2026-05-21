@@ -1,13 +1,17 @@
-"""Sprint 1 — Opus-driven prep step.
+"""Live-voice prep step with both legacy sync and agentic async paths.
 
 Produces a structured agenda (see :class:`app.services.live.schemas.Agenda`)
 for a chosen bot + user, validates it against the schema, then persists the
 session envelope to ``mediator.conversations`` and the items to
 ``mediator.conversation_items``.
 
-The LLM call is abstracted behind :class:`AgendaProducer`. Production wires
-this to Anthropic Opus via function calling; tests inject a stub. Both keep
-the call site identical — schema validation is the gate, not the source.
+Legacy path: LLM call abstracted behind :class:`AgendaProducer`. Production
+wires this to Anthropic Opus via function calling; tests inject a stub.
+
+Agentic path (Sprint 2): The selected bot uses its normal persona, hot context,
+scoped read tools, and provider chain in a private non-chat turn, submitting
+a structured live brief via ``submit_live_brief``.  The router schedules this
+asynchronously; this module provides the entrypoint.
 """
 
 from __future__ import annotations
@@ -18,6 +22,9 @@ import os
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from app.bots.registry import get_bot_spec
+from app.config import get_settings
+from app.models.user import User
 from app.services.live.schemas import (
     Agenda,
     AgendaItem,
@@ -32,15 +39,19 @@ from app.services.live.bot_profile import (
 
 logger = logging.getLogger(__name__)
 
+# Sentinel class so callers can detect the agentic-preferred path even when
+# the return type is ``AgendaProducer | None``.
+_SENTINEL_AGENTIC: Any = object()
 
-def select_agenda_producer() -> "AgendaProducer":
+
+def select_agenda_producer() -> "AgendaProducer | None":
     """Pick the agenda producer based on env.
 
-    * ``LIVE_VOICE_PREP_PROVIDER=stub`` → :class:`StubAgendaProducer`.
-    * ``LIVE_VOICE_PREP_PROVIDER=anthropic`` → :class:`AnthropicOpusAgendaProducer`.
-    * ``LIVE_VOICE_PREP_PROVIDER=deepseek`` → :class:`DeepseekAgendaProducer`.
-    * Auto-select when unset: real Anthropic key wins, else Deepseek if its
-      key is real, else stub.
+    * ``LIVE_VOICE_PREP_PROVIDER=stub`` → :class:`StubAgendaProducer` (sync).
+    * ``LIVE_VOICE_PREP_PROVIDER=anthropic`` → :class:`AnthropicOpusAgendaProducer` (sync).
+    * ``LIVE_VOICE_PREP_PROVIDER=deepseek`` → :class:`DeepseekAgendaProducer` (sync).
+    * Auto-select when unset: returns ``None`` → agentic async path (Sprint 2).
+    * Any explicit provider name overrides default agentic routing.
     """
     provider = (os.environ.get("LIVE_VOICE_PREP_PROVIDER") or "").strip().lower()
     anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
@@ -54,6 +65,10 @@ def select_agenda_producer() -> "AgendaProducer":
         return AnthropicOpusAgendaProducer()
     if provider == "deepseek":
         return DeepseekAgendaProducer()
+    # Default: agentic async path when no explicit provider is set.
+    if not provider:
+        return None
+    # Fallback auto-detect for unrecognized provider values.
     if has_anthropic:
         return AnthropicOpusAgendaProducer()
     if has_deepseek:
@@ -160,6 +175,396 @@ async def gather_prep_context(pool: Any, user_id: UUID, bot_id: str) -> dict[str
         context["distillations"] = []
 
     return context
+
+
+# --------------------------------------------------------------------------- #
+# Agentic prep entrypoint (Sprint 2)
+# --------------------------------------------------------------------------- #
+
+
+async def run_live_prep_agentic_job(
+    conversation_id: UUID,
+    user_id: UUID,
+    bot_id: str,
+    steering_text: str | None,
+    topic_id: UUID | None,
+    pool: Any,
+) -> Any:
+    """Run the agentic live-prep turn for a conversation in status='prepping'.
+
+    Loads the conversations row, gathers context, calls the non-chat agentic
+    runner, and persists artifacts + items on success or marks the session as
+    ``prep_failed`` on failure.
+
+    Returns :class:`NonchatJobResult` — *not* ``PrepResult``.  Callers that
+    need a ``PrepResult`` should call ``produce_agenda`` through the legacy
+    sync path instead.
+    """
+    from app.services.live import artifacts as live_artifacts
+    from app.services.nonchat_agentic import run_agentic_nonchat_job
+
+    settings = get_settings()
+
+    # ── 1. Load the conversations row ───────────────────────────────────
+    row = await pool.fetchrow(
+        """\
+        SELECT id, user_id, partner_user_id, bot_id, mode, steering_text,
+               status, topic_id, session_fields, prep_summary, current_item_id
+        FROM mediator.conversations
+        WHERE id = $1
+        """,
+        conversation_id,
+    )
+    if row is None:
+        raise ValueError(
+            f"conversation_id={conversation_id} not found in mediator.conversations"
+        )
+    if row["status"] != "prepping":
+        raise ValueError(
+            f"conversation_id={conversation_id} has status={row['status']!r}, "
+            f"expected 'prepping'"
+        )
+
+    steering = steering_text or row["steering_text"] or ""
+    resolved_topic_id = topic_id or row["topic_id"]
+
+    # ── 2. Load partner user if present ─────────────────────────────────
+    partner: User | None = None
+    if row["partner_user_id"] is not None:
+        partner_row = await pool.fetchrow(
+            "SELECT * FROM users WHERE id = $1", row["partner_user_id"]
+        )
+        if partner_row is not None:
+            partner = user_from_live_row(row["partner_user_id"], partner_row)
+
+    # ── 3. Load the session creator's user record ───────────────────────
+    user_row = await pool.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    if user_row is None:
+        raise ValueError(f"user_id={user_id} not found in users")
+    user = user_from_live_row(user_id, user_row)
+
+    # ── 4. Gather prep context (themes, distillations, bot profile) ─────
+    context = await gather_prep_context(pool, user_id, bot_id)
+
+    # ── 5. Resolve bot spec ─────────────────────────────────────────────
+    try:
+        bot_spec = get_bot_spec(bot_id)
+    except Exception:
+        logger.warning(
+            "live_prep_agentic: unknown bot_id=%s — cannot resolve bot spec",
+            bot_id,
+        )
+        # Update status to prep_failed before returning.
+        await _set_prep_failed(pool, conversation_id, "unknown bot_id")
+        from app.services.nonchat_agentic import NonchatJobResult
+
+        return NonchatJobResult(
+            success=False,
+            brief=None,
+            failure_reason="unknown bot_id",
+            turn_id=None,
+            tool_call_count=0,
+        )
+
+    # ── 6. Build bot profile with partner for system prompt rendering ───
+    bot_profile = live_bot_profile_context(
+        bot_id, user=user, partner=partner,
+    )
+
+    # ── 7. Build system_task from steering_text + bot profile ───────────
+    system_task = _build_prep_system_task(
+        bot_spec=bot_spec,
+        bot_profile=bot_profile,
+        steering_text=steering,
+        context=context,
+    )
+
+    # ── 8. Build a lightweight hot_context string ────────────────────────
+    hot_context = _build_prep_hot_context(context, partner)
+
+    # ── 9. Run the non-chat agentic job ──────────────────────────────────
+    trigger_meta: dict[str, Any] = {
+        "kind": "live_prep",
+        "conversation_id": str(conversation_id),
+        "bot_id": bot_id,
+    }
+
+    result = await run_agentic_nonchat_job(
+        kind="live_prep",
+        user=user,
+        conversation_id=conversation_id,
+        system_task=system_task,
+        max_tool_iterations=settings.live_prep_tool_cap,
+        pool=pool,
+        bot_spec=bot_spec,
+        bot_id=bot_id,
+        topic_id=resolved_topic_id,
+        partner=partner,
+        hot_context=hot_context,
+        trigger_metadata=trigger_meta,
+    )
+
+    # ── 10. Persist outcome ─────────────────────────────────────────────
+    if result.success and result.brief:
+        await _persist_prep_success(
+            pool,
+            conversation_id,
+            user_id,
+            bot_id,
+            result,
+        )
+    else:
+        failure_reason = result.failure_reason or "live_prep_submit_missing"
+        await _set_prep_failed(pool, conversation_id, failure_reason)
+
+    return result
+
+
+async def retry_live_prep(
+    conversation_id: UUID,
+    pool: Any,
+) -> Any:
+    """Retry a failed live prep session.
+
+    Checks that the conversation is in ``prep_failed`` status, resets it to
+    ``prepping``, and re-runs ``run_live_prep_agentic_job``.
+    """
+    row = await pool.fetchrow(
+        "SELECT id, user_id, bot_id, steering_text, topic_id, status "
+        "FROM mediator.conversations WHERE id = $1",
+        conversation_id,
+    )
+    if row is None:
+        raise ValueError(
+            f"retry_live_prep: conversation_id={conversation_id} not found"
+        )
+    if row["status"] != "prep_failed":
+        raise ValueError(
+            f"retry_live_prep: conversation_id={conversation_id} "
+            f"has status={row['status']!r}, expected 'prep_failed'"
+        )
+
+    await pool.execute(
+        "UPDATE mediator.conversations SET status = 'prepping' WHERE id = $1",
+        conversation_id,
+    )
+
+    return await run_live_prep_agentic_job(
+        conversation_id=conversation_id,
+        user_id=UUID(row["user_id"]),
+        bot_id=row["bot_id"],
+        steering_text=row["steering_text"],
+        topic_id=UUID(row["topic_id"]) if row["topic_id"] else None,
+        pool=pool,
+    )
+
+
+# ── Internal helpers ────────────────────────────────────────────────────────
+
+
+def _build_prep_system_task(
+    *,
+    bot_spec: Any,
+    bot_profile: dict[str, Any],
+    steering_text: str,
+    context: dict[str, Any],
+) -> str:
+    """Build the system task that the non-chat runner passes as system_prompt."""
+    display_name = bot_profile.get("display_name") or bot_spec.bot_id
+    topic_slug = bot_spec.primary_topic_slug or "general"
+    participants_shape = bot_spec.participants_shape or "solo"
+
+    lines = [
+        f"You are {display_name}, preparing a live voice conversation agenda.",
+        f"Primary topic: {topic_slug}.  Participants shape: {participants_shape}.",
+    ]
+    if steering_text.strip():
+        lines.append(f"User steering: {steering_text.strip()}")
+    lines.append("")
+    lines.append(
+        "You have access to read tools to inspect the user's recent messages, "
+        "themes, distillations, and memories before composing the agenda.  "
+        "Use these to ground the agenda in the user's actual recent state."
+    )
+    lines.append("")
+    lines.append("When you are ready, call submit_live_brief with:")
+    lines.append("- agenda: a valid Agenda with 3-6 items, at least one 'must'")
+    lines.append("- notes: (optional) any reasoning you want to record")
+    lines.append("")
+    lines.append("Constraints:")
+    lines.append("- Do NOT send messages or reply to the user — this is a private prep turn.")
+    lines.append("- All items must be in-scope for your persona and topic.")
+    lines.append("- If you exhaust your tool budget without submitting, the prep fails.")
+
+    return "\n".join(lines)
+
+
+def _build_prep_hot_context(
+    context: dict[str, Any],
+    partner: User | None,
+) -> str:
+    """Build a concise hot_context string for the non-chat runner."""
+    parts: list[str] = []
+
+    bot_profile = context.get("bot_profile") or {}
+    profile_str = format_live_bot_profile(bot_profile)
+    parts.append(f"BOT PROFILE:\n{profile_str}")
+
+    themes = context.get("themes") or []
+    if themes:
+        parts.append(f"THEMES ({len(themes)}):\n" + json.dumps(themes, indent=2))
+
+    distillations = context.get("distillations") or []
+    if distillations:
+        parts.append(
+            f"DISTILLATIONS ({len(distillations)}):\n"
+            + json.dumps(distillations, indent=2)
+        )
+
+    if partner is not None:
+        parts.append(f"PARTNER: name={partner.name}")
+
+    return "\n\n".join(parts)
+
+
+async def _persist_prep_success(
+    pool: Any,
+    conversation_id: UUID,
+    user_id: UUID,
+    bot_id: str,
+    result: Any,
+) -> None:
+    """Persist the submitted brief to conversations_items, artifacts, and links."""
+    from app.services.live import artifacts as live_artifacts
+
+    brief = result.brief or {}
+    agenda_raw = brief.get("agenda") or {}
+    notes = brief.get("notes")
+
+    # Reconstruct Agenda model from the submitted brief for validation.
+    agenda = Agenda.model_validate(agenda_raw)
+
+    # Resolve theme_slug -> theme_id
+    theme_slugs = {item.theme_slug for item in agenda.items if item.theme_slug}
+    theme_id_by_slug: dict[str, UUID] = {}
+    if theme_slugs:
+        try:
+            rows = await pool.fetch(
+                "SELECT id, slug FROM themes WHERE user_id = $1 AND slug = ANY($2::text[])",
+                user_id,
+                list(theme_slugs),
+            )
+            theme_id_by_slug = {r["slug"]: r["id"] for r in rows}
+        except Exception:
+            logger.warning(
+                "prep: theme lookup failed; theme_id=NULL on every item", exc_info=True
+            )
+
+    item_uuid_by_id: dict[str, UUID] = {item.id: uuid4() for item in agenda.items}
+    current_item_uuid = item_uuid_by_id.get(agenda.first_item_id)
+    mode = "steered" if (agenda.prep_summary or "").strip() else "open"
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Persist conversation items.
+            for order_hint, item in enumerate(agenda.items):
+                await conn.execute(
+                    """\
+                    INSERT INTO mediator.conversation_items (
+                        id, conversation_id, theme_id, kind, title, intent, ask,
+                        done_when, next_item_ids, priority, speaker_scope,
+                        coverage_evidence_required, order_hint
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                            $9::uuid[], $10, $11, $12, $13)
+                    """,
+                    item_uuid_by_id[item.id],
+                    conversation_id,
+                    theme_id_by_slug.get(item.theme_slug) if item.theme_slug else None,
+                    item.kind,
+                    item.title,
+                    item.intent,
+                    item.ask,
+                    item.done_when,
+                    [item_uuid_by_id[ref] for ref in item.next_item_ids],
+                    item.priority,
+                    item.speaker_scope,
+                    item.coverage_evidence_required,
+                    item.order_hint or order_hint,
+                )
+
+            # Create the live_prep_brief artifact.
+            artifact = await live_artifacts.create_artifact(
+                conn,
+                conversation_id=str(conversation_id),
+                bot_id=bot_id,
+                user_id=str(user_id),
+                artifact_type="live_prep_brief",
+                payload={
+                    "agenda": agenda.model_dump(mode="json"),
+                    "notes": notes,
+                    "turn_id": str(result.turn_id) if result.turn_id else None,
+                },
+                created_by_turn_id=str(result.turn_id) if result.turn_id else None,
+            )
+
+            # Link each item to the artifact with relation=planned_item.
+            for item in agenda.items:
+                item_uuid = item_uuid_by_id[item.id]
+                await live_artifacts.add_artifact_link(
+                    conn,
+                    artifact_id=artifact.id,
+                    target_table="conversation_items",
+                    target_id=str(item_uuid),
+                    relation="planned_item",
+                )
+
+            # Update conversation status to ready.
+            await conn.execute(
+                """\
+                UPDATE mediator.conversations
+                SET status = 'ready',
+                    prep_summary = $2,
+                    current_item_id = $3,
+                    mode = $4
+                WHERE id = $1
+                """,
+                conversation_id,
+                agenda.prep_summary,
+                current_item_uuid,
+                mode,
+            )
+
+    logger.info(
+        "live_prep_agentic: persisted %d items, artifact=%s for conversation_id=%s",
+        len(agenda.items),
+        artifact.id,
+        conversation_id,
+    )
+
+
+async def _set_prep_failed(
+    pool: Any,
+    conversation_id: UUID,
+    failure_reason: str,
+) -> None:
+    """Atomically set the conversation status to 'prep_failed' with an error note."""
+    await pool.execute(
+        """\
+        UPDATE mediator.conversations
+        SET status = 'prep_failed',
+            session_fields = session_fields
+                || jsonb_build_object('prep_error', $2::text)
+        WHERE id = $1
+        """,
+        conversation_id,
+        failure_reason,
+    )
+    logger.warning(
+        "live_prep_agentic: marked prep_failed for conversation_id=%s reason=%s",
+        conversation_id,
+        failure_reason,
+    )
 
 
 async def produce_agenda(

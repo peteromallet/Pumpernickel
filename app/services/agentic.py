@@ -1363,6 +1363,64 @@ async def _resolve_outbound_text(
     return suggested
 
 
+async def _open_nonchat_turn(
+    pool: Any,
+    user_id: UUID,
+    prompt_snapshot: str,
+    model_version: str,
+    system_prompt_version: str,
+    *,
+    bot_id: str,
+    topic_id: UUID | None,
+    kind: str,
+    conversation_id: UUID,
+) -> tuple[UUID, datetime]:
+    """Open a non-chat bot_turn (live_prep, etc.) with its own connection.
+
+    Unlike _open_turn, this owns its pool acquisition + transaction so the
+    caller does not need to pass a conn.  The INSERT covers all 15 columns
+    (the 13 from _open_turn + kind + conversation_id).
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO bot_turns (
+                    triggered_by_message_id, triggering_message_ids,
+                    user_in_context,
+                    system_prompt_version, model_version,
+                    prompt_snapshot, prompt_snapshot_encrypted,
+                    started_at,
+                    bot_id, topic_id,
+                    bot_spec_version, hot_context_builder_version,
+                    tool_schema_version,
+                    kind, conversation_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9, $10, $11, $12, $13, $14)
+                RETURNING id, started_at
+                """,
+                None,  # triggered_by_message_id
+                [],  # triggering_message_ids
+                user_id,
+                system_prompt_version,
+                model_version,
+                prompt_snapshot,
+                encrypt_value(prompt_snapshot),
+                bot_id,
+                topic_id,
+                None,  # bot_spec_version
+                None,  # hot_context_builder_version
+                None,  # tool_schema_version
+                kind,
+                conversation_id,
+            )
+    try:
+        started_at = row["started_at"]
+    except KeyError:
+        started_at = datetime.now(UTC)
+    return row["id"], started_at
+
+
 async def _open_turn(
     conn: Any,
     triggering_message_ids: list[UUID],

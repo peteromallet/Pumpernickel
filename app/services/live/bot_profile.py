@@ -43,7 +43,12 @@ def user_from_live_row(user_id: UUID, row: Any | None) -> User:
     )
 
 
-def live_bot_profile_context(bot_id: str, *, user: User | None = None) -> dict[str, Any]:
+def live_bot_profile_context(
+    bot_id: str,
+    *,
+    user: User | None = None,
+    partner: User | None = None,
+) -> dict[str, Any]:
     """Return selected-bot context for live prep and live turn prompts."""
     try:
         spec = get_bot_spec(bot_id)
@@ -66,8 +71,19 @@ def live_bot_profile_context(bot_id: str, *, user: User | None = None) -> dict[s
         profile["system_prompt"] = spec.render_system_prompt(
             assistant_name=spec.display_name,
             user=user,
-            partner=None,
+            partner=partner,
             prompt_version=spec.bot_spec_version,
+        )
+    except AttributeError:
+        # DEBT-041: BotSpec.render_system_prompt accesses partner.name
+        # unconditionally.  When partner is None (solo bots,
+        # NULL partner_user_id), this raises AttributeError.  We
+        # silently continue without a system prompt rather than
+        # crashing the caller.
+        logger.warning(
+            "live bot profile: failed to render %s prompt (partner attribute missing)",
+            bot_id,
+            exc_info=True,
         )
     except Exception:
         logger.warning(

@@ -49,6 +49,7 @@ class TurnContext:
     sent_message_parts: list[dict[str, Any]] | None = None
     hot_context_rendered: str | None = None
     trigger_metadata: dict[str, Any] = field(default_factory=dict)
+    extras: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_scope(
