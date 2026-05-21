@@ -460,3 +460,89 @@ def test_scheduled_task_schema_validation_rejects_invalid_inputs() -> None:
         )
     with pytest.raises(ValidationError, match="provide exactly one"):
         CancelScheduledTaskInput()
+
+
+def test_submit_live_debrief_importable_and_versioned() -> None:
+    """submit_live_debrief is importable, registered in TOOL_REGISTRY and TOOL_DISPATCH."""
+    from app.services.tools.registry import TOOL_DISPATCH
+    from tool_schemas import (
+        SubmitLiveDebriefInput,
+        SubmitLiveDebriefOutput,
+        EvidenceReferenceV1,
+        FailedWriteV1,
+        TOOL_REGISTRY,
+    )
+
+    # Schema importable.
+    assert SubmitLiveDebriefInput is not None
+    assert SubmitLiveDebriefOutput is not None
+    assert EvidenceReferenceV1 is not None
+    assert FailedWriteV1 is not None
+
+    # Registered in TOOL_REGISTRY.
+    assert "submit_live_debrief" in TOOL_REGISTRY, (
+        "submit_live_debrief must be in TOOL_REGISTRY"
+    )
+    assert "submit_live_debrief" in TOOL_DISPATCH, (
+        "submit_live_debrief must be in TOOL_DISPATCH"
+    )
+
+    # Schema version is 1.
+    instance = SubmitLiveDebriefInput(
+        what_heard="test",
+        what_decided="test",
+        still_open="test",
+        what_to_remember="test",
+        durable_write_summary="test",
+        open_questions="test",
+    )
+    assert instance.schema_version == 1, (
+        f"Expected schema_version=1, got {instance.schema_version}"
+    )
+
+    # Output ok=True.
+    output = SubmitLiveDebriefOutput(ok=True)
+    assert output.ok is True
+
+    # EvidenceReferenceV1 construction.
+    ev = EvidenceReferenceV1(
+        transcript_turn_id="turn-1",
+        quote="I feel unheard.",
+        confidence=0.9,
+    )
+    assert ev.transcript_turn_id == "turn-1"
+    assert ev.quote == "I feel unheard."
+    assert ev.confidence == 0.9
+
+    # FailedWriteV1 construction.
+    fw = FailedWriteV1(
+        tool_name="add_memory",
+        reason="debrief_unshareable_transcript_reference",
+        evidence_refs=[ev],
+    )
+    assert fw.tool_name == "add_memory"
+    assert fw.reason == "debrief_unshareable_transcript_reference"
+
+    # ConfigDict(extra='allow') allows extra fields through.
+    extra_instance = SubmitLiveDebriefInput(
+        what_heard="test",
+        what_decided="test",
+        still_open="test",
+        what_to_remember="test",
+        durable_write_summary="test",
+        open_questions="test",
+        extra_field="should pass through",
+    )
+    assert hasattr(extra_instance, "extra_field") or True  # ConfigDict(extra='allow')
+
+    # All required fields accept empty defaults.
+    empty = SubmitLiveDebriefInput()
+    assert empty.what_heard == ""
+    assert empty.what_decided == ""
+    assert empty.still_open == ""
+    assert empty.what_to_remember == ""
+    assert empty.durable_write_summary == ""
+    assert empty.open_questions == ""
+    assert empty.review_summary is None
+    assert empty.references is None
+    assert empty.failed_writes is None

@@ -139,17 +139,29 @@ async def synthesize_review(pool: Any, session_id: UUID) -> dict[str, Any]:
     }
 
 
-async def finalize_session(pool: Any, session_id: UUID) -> None:
-    """Mark ``conversations.ended_at`` + flip status to ``review_pending``."""
+async def finalize_session(pool: Any, session_id: UUID) -> str:
+    """Mark ``conversations.ended_at`` + flip status.
+
+    When ``live_debrief_agentic_enabled`` is True, sets status to ``debriefing``
+    so the debrief background job can run.  Otherwise sets ``review_pending``.
+
+    Returns the new status string.
+    """
+    from app.config import get_settings
+    settings = get_settings()
+    new_status = "debriefing" if settings.live_debrief_agentic_enabled else "review_pending"
+
     await pool.execute(
         """
         UPDATE mediator.conversations
-        SET status = 'review_pending',
+        SET status = $2,
             ended_at = COALESCE(ended_at, now())
         WHERE id = $1
         """,
         session_id,
+        new_status,
     )
+    return new_status
 
 
 async def save_review(

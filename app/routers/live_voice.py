@@ -34,6 +34,10 @@ from app.services.live.prep import (
     run_live_prep_agentic_job,
     select_agenda_producer,
 )
+from app.services.live.debrief import (
+    retry_live_debrief,
+    run_live_debrief_agentic_job,
+)
 from app.services.live.rate_limit import WS_RATE_LIMITER
 from app.services.live.schemas import PrepRequest, TurnRequest
 from app.services.live.stt import select_transcriber
@@ -576,6 +580,82 @@ async def retry_prep(
     }
 
 
+@router.post("/api/live/sessions/{session_id}/debrief/retry")
+async def retry_debrief(
+    session_id: UUID,
+    pool: Any = Depends(get_pool),
+) -> dict[str, Any]:
+    """Retry a failed live-debrief session.
+
+    Only accepts sessions in ``debrief_failed`` status (409 otherwise).
+    Resets status to ``debriefing`` and schedules a new agentic debrief task.
+
+    Gated behind ``live_debrief_agentic_enabled`` feature flag (403 when off).
+    """
+    if not await _conversations_table_exists(pool):
+        raise HTTPException(status_code=503, detail="live conversations not yet migrated")
+
+    settings = get_settings()
+    if not settings.live_debrief_agentic_enabled:
+        raise HTTPException(status_code=403, detail="live_debrief_agentic not enabled")
+
+    row = await pool.fetchrow(
+        "SELECT id, status FROM mediator.conversations WHERE id = $1",
+        session_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    if row["status"] != "debrief_failed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot retry debrief for session in status={row['status']!r}; "
+                f"only 'debrief_failed' sessions are retryable"
+            ),
+        )
+
+    # Update to 'debriefing' so the retry can proceed.
+    await pool.execute(
+        "UPDATE mediator.conversations SET status = 'debriefing' WHERE id = $1",
+        session_id,
+    )
+
+    # Schedule the retry as a background task.
+    async def _background_retry() -> None:
+        try:
+            await retry_live_debrief(
+                conversation_id=session_id,
+                pool=pool,
+            )
+        except Exception:
+            logger.exception(
+                "live_voice: background retry debrief crashed for session_id=%s",
+                session_id,
+            )
+            try:
+                from app.services.live.debrief import _set_debrief_failed
+                await _set_debrief_failed(
+                    pool, session_id,
+                    "background retry task crashed",
+                    turn_id=None,
+                    tool_call_count=0,
+                )
+            except Exception:
+                logger.warning(
+                    "live_voice: failed to mark debrief_failed after retry crash",
+                    exc_info=True,
+                )
+
+    asyncio.create_task(_background_retry())
+
+    return {
+        "session_id": str(session_id),
+        "status": "debriefing",
+        "debrief_pending": True,
+    }
+
+
 class ConsentBody(BaseModel):
     model_config = {"extra": "ignore"}
     kind: str = Field(..., description="'solo' or 'partner_present'")
@@ -649,18 +729,147 @@ async def post_consent(
 
 @router.post("/api/live/sessions/{session_id}/end")
 async def end_session(session_id: UUID, pool: Any = Depends(get_pool)) -> dict[str, Any]:
-    """Flip the session to review_pending and synthesize the review payload."""
+    """Flip the session to review_pending (or debriefing) and synthesize review.
+
+    When ``live_debrief_agentic_enabled`` is True, the session transitions to
+    ``debriefing`` and a background debrief job is queued.  The response still
+    includes the deterministic synthesis immediately.
+    """
     if not await _conversations_table_exists(pool):
         raise HTTPException(status_code=503, detail="live conversations not yet migrated")
-    await finalize_session(pool, session_id)
-    return await synthesize_review(pool, session_id)
+
+    new_status = await finalize_session(pool, session_id)
+    review = await synthesize_review(pool, session_id)
+
+    settings = get_settings()
+    if settings.live_debrief_agentic_enabled and new_status == "debriefing":
+        # Queue the agentic debrief as a background task.
+        async def _background_debrief() -> None:
+            try:
+                # Load the user row so we can pass a proper User object.
+                conv_row = await pool.fetchrow(
+                    "SELECT user_id FROM mediator.conversations WHERE id = $1",
+                    session_id,
+                )
+                if conv_row is None:
+                    logger.error(
+                        "live_voice: background debrief cannot find session_id=%s",
+                        session_id,
+                    )
+                    return
+                user_row = await pool.fetchrow(
+                    "SELECT * FROM users WHERE id = $1", conv_row["user_id"]
+                )
+                if user_row is None:
+                    logger.error(
+                        "live_voice: background debrief cannot find user for session_id=%s",
+                        session_id,
+                    )
+                    return
+                from app.services.live.bot_profile import user_from_live_row
+                user = user_from_live_row(conv_row["user_id"], user_row)
+
+                await run_live_debrief_agentic_job(
+                    conversation_id=session_id,
+                    user=user,
+                    pool=pool,
+                )
+            except Exception:
+                logger.exception(
+                    "live_voice: background debrief crashed for session_id=%s",
+                    session_id,
+                )
+                try:
+                    from app.services.live.debrief import _set_debrief_failed
+                    await _set_debrief_failed(
+                        pool, session_id,
+                        "background debrief task crashed",
+                        turn_id=None,
+                        tool_call_count=0,
+                    )
+                except Exception:
+                    logger.warning(
+                        "live_voice: failed to mark debrief_failed after crash",
+                        exc_info=True,
+                    )
+
+        asyncio.create_task(_background_debrief())
+        review["debrief_pending"] = True
+
+    return review
 
 
 @router.get("/api/live/sessions/{session_id}/review")
 async def get_review(session_id: UUID, pool: Any = Depends(get_pool)) -> dict[str, Any]:
+    """Return deterministic synthesis immediately.
+
+    Never blocks waiting for debrief — always returns the deterministic
+    synthesis first.  When the conversation is in ``debriefing`` status,
+    ``debrief_pending`` is set to ``True``.  When a debrief artifact exists
+    (successful debrief), the ``live_debrief`` and optional ``review_summary``
+    fields are included.  When debrief has failed, ``debrief_failed`` metadata
+    is surfaced.
+    """
     if not await _conversations_table_exists(pool):
         raise HTTPException(status_code=503, detail="live conversations not yet migrated")
-    return await synthesize_review(pool, session_id)
+
+    review = await synthesize_review(pool, session_id)
+
+    # ── Enrich with debrief artifacts / failure metadata ─────────────────
+    conv = await pool.fetchrow(
+        """
+        SELECT id, status, session_fields
+        FROM mediator.conversations
+        WHERE id = $1
+        """,
+        session_id,
+    )
+    if conv is None:
+        return review
+
+    status = conv["status"]
+
+    if status == "debriefing":
+        review["debrief_pending"] = True
+
+    elif status == "debrief_failed":
+        sf = conv["session_fields"] or {}
+        if isinstance(sf, dict):
+            review["debrief_failed"] = {
+                "reason": sf.get("debrief_failure_reason"),
+                "error": sf.get("debrief_error"),
+                "failed_at": sf.get("debrief_failed_at"),
+            }
+        else:
+            review["debrief_failed"] = {"reason": "unknown"}
+
+    # When debrief succeeded (review_pending/synthesized), include artifacts
+    if status in ("review_pending", "synthesized"):
+        try:
+            from app.services.live import artifacts as live_artifacts
+            debrief_artifact = await live_artifacts.get_current_artifact(
+                pool,
+                conversation_id=str(session_id),
+                artifact_type="live_debrief",
+            )
+            if debrief_artifact is not None:
+                review["live_debrief"] = debrief_artifact.payload
+                # Also check for review_summary artifact
+                review_summary = await live_artifacts.get_current_artifact(
+                    pool,
+                    conversation_id=str(session_id),
+                    artifact_type="review_summary",
+                )
+                if review_summary is not None and review_summary.payload:
+                    review["review_summary"] = review_summary.payload.get("review_summary")
+        except Exception:
+            logger.debug(
+                "live_voice: failed to enrich /review with debrief artifacts for %s",
+                session_id,
+                exc_info=True,
+            )
+
+    return review
 
 
 class SaveReviewBody(BaseModel):

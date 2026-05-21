@@ -114,6 +114,25 @@ class BoundedLoopExceeded(Exception):
         self.failure_reason = message
 
 
+class MaxToolCallsExceeded(Exception):
+    """Raised when the per-debrief tool-call cap is reached mid-response.
+
+    Carries the messages list and counts so the caller (nonchat_agentic) can
+    distinguish "cap reached without submit" from other failure modes."""
+
+    def __init__(
+        self,
+        *args: Any,
+        messages: list[dict[str, Any]] | None = None,
+        tool_call_count: int = 0,
+        max_calls: int = 0,
+    ) -> None:
+        super().__init__(*args)
+        self.messages: list[dict[str, Any]] = messages or []
+        self.tool_call_count = tool_call_count
+        self.max_calls = max_calls
+
+
 # ── Project A2 provider-chain exceptions ─────────────────────────────────────
 # All four assign ``failure_reason`` on the instance so that the outer turn
 # failure handler at the bottom of ``_run_agentic`` resolves
@@ -943,6 +962,7 @@ async def run_step(
     model_for_provider: dict[str, str] | None = None,
     max_tokens: int = 1200,
     max_tool_iterations: int | None = None,
+    max_tool_calls: int | None = None,
 ) -> tuple[str, list[dict[str, Any]], int]:
     settings = get_settings()
     if client is None and provider_chain is None:
@@ -1097,8 +1117,31 @@ async def run_step(
                 f"tool iteration cap exceeded: {max_tool_iterations}"
             )
         tool_results: list[dict[str, Any]] = []
+        capped = False
         for tool_use in tool_uses:
-            if tool_use["name"] != "update_turn_plan":
+            # update_turn_plan is ALWAYS exempt from the tool-call cap
+            is_exempt = tool_use["name"] == "update_turn_plan"
+            if not is_exempt and max_tool_calls is not None and tool_call_count >= max_tool_calls:
+                # Cap reached — stub remaining tool_use blocks so the provider
+                # message invariant (every tool_use → tool_result pair) holds.
+                capped = True
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use["id"],
+                        "content": json.dumps(
+                            _tool_error(
+                                "tool_cap_exceeded: debrief tool-call limit reached",
+                                error_code="tool_cap_exceeded",
+                                retryable=False,
+                            ),
+                            default=str,
+                        ),
+                        "is_error": True,
+                    }
+                )
+                continue
+            if not is_exempt:
                 tool_call_count += 1
             result = await call_tool(tool_use["name"], tool_use.get("input") or {}, ctx)
             is_error = bool(result.get("is_error") or result.get("error"))
@@ -1111,6 +1154,13 @@ async def run_step(
                 }
             )
         messages.append({"role": "user", "content": tool_results})
+        if capped:
+            raise MaxToolCallsExceeded(
+                f"tool call cap exceeded: {max_tool_calls}",
+                messages=messages,
+                tool_call_count=tool_call_count,
+                max_calls=max_tool_calls,
+            )
 
         # ── Recoverable validation-error correction cap ─────────────────
         _iter_has_recoverable = any(

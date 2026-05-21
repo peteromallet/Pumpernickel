@@ -113,6 +113,19 @@ def _summary_submit_live_brief(
     )
 
 
+def _summary_submit_live_debrief(
+    args: dict[str, Any], result: dict[str, Any]
+) -> str | None:
+    summary = _trunc(args.get("review_summary") or "", 80)
+    heard = _trunc(args.get("what_heard") or "", 40)
+    refs = len(args.get("references") or [])
+    failed = len(args.get("failed_writes") or [])
+    return (
+        f"submit_live_debrief heard={heard!r} refs={refs}"
+        f"{' failed_writes=' + str(failed) if failed else ''}"
+    )
+
+
 def _summary_send_message_part(
     args: dict[str, Any], result: dict[str, Any]
 ) -> str | None:
@@ -198,6 +211,7 @@ TOOL_SUMMARIZERS: dict[
     str, Callable[[dict[str, Any], dict[str, Any]], str | None]
 ] = {
     "submit_live_brief": _summary_submit_live_brief,
+    "submit_live_debrief": _summary_submit_live_debrief,
     "schedule_task": _summary_schedule_task,
     "schedule_checkin": _summary_schedule_checkin,
     "list_scheduled_tasks": _summary_list_scheduled_tasks,

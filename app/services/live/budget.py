@@ -54,6 +54,14 @@ async def charge_session(pool: Any, session_id: UUID, cents: int) -> BudgetState
     short-circuit on hard_capped because operators may want to see the
     final cost. The router enforces the cap separately by reading
     ``hard_capped`` before queuing the next turn.
+
+    NOTE: Per-session spend attribution for live debrief jobs is
+    intentionally NOT wired here in Sprint 3.  Debrief provider usage
+    still flows through the global ``record_llm_cost`` text-LLM accounting
+    path (via ``_record_response_cost`` inside ``run_step``), but
+    ``mediator.conversations.spend_usd_cents`` is NOT bumped for debrief
+    turns.  Full per-session spend attribution (including debrief) is
+    deferred to Sprint 4 behind the provenance-linking feature flag.
     """
     if cents > 0:
         await pool.execute(

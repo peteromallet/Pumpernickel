@@ -23,6 +23,15 @@ milestones:
     profile: partnered
     robustness: full
     depth: medium
+    phase_model:
+      - plan=codex:medium
+      - critique=codex:low
+      - revise=codex:medium
+      - loop_plan=codex:medium
+      - review=codex:low
+      - tiebreaker_researcher=codex:medium
+      - tiebreaker_challenger=codex:medium
+      - feedback=codex:low
     notes: "Private post-session debrief with durable writes, scheduling, feature flagging, and high tool budget. Systematic provenance linking lands in m4."
 
   - label: m4-provenance-durable-writes
@@ -31,6 +40,15 @@ milestones:
     profile: partnered
     robustness: full
     depth: medium
+    phase_model:
+      - plan=codex:medium
+      - critique=codex:low
+      - revise=codex:medium
+      - loop_plan=codex:medium
+      - review=codex:low
+      - tiebreaker_researcher=codex:medium
+      - tiebreaker_challenger=codex:medium
+      - feedback=codex:low
     notes: "Audit durable write tool return payloads, expose created IDs consistently, and link debrief-created durable records to conversation artifacts."
 
   - label: m5-productization-recovery
@@ -39,6 +57,15 @@ milestones:
     profile: directed
     robustness: full
     depth: low
+    phase_model:
+      - plan=codex:low
+      - critique=codex:low
+      - revise=codex:low
+      - loop_plan=codex:low
+      - review=codex:low
+      - tiebreaker_researcher=codex:low
+      - tiebreaker_challenger=codex:low
+      - feedback=codex:low
     notes: "UI/ops/retry/recovery polish and backwards-compatible rollout."
 
 on_failure:

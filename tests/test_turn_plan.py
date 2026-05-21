@@ -8,6 +8,9 @@ from app.models.user import User
 from app.services.turn_context import TurnContext
 from app.services.turn_plan import (
     SKELETONS,
+    STEP_LABELS,
+    STEP_ORDER,
+    TurnStep,
     make_turn_plan,
     orient_summary,
     pick_default_skeleton,
@@ -217,3 +220,27 @@ async def test_record_step_rejects_user_facing_tools(fake_pool: FakePool) -> Non
     assert consult_result["is_error"] is True
     assert "send_message_part" not in STEP_ALLOWED_TOOLS["record"]
     assert "consult_perspective" not in STEP_ALLOWED_TOOLS["record"]
+
+
+def test_live_debrief_step_exists() -> None:
+    """Verify live_debrief is registered in TurnStep, STEP_LABELS, STEP_ORDER,
+    and STEP_ALLOWED_TOOLS with the expected sentinel values."""
+    # TurnStep literal includes live_debrief
+    _step: TurnStep = "live_debrief"
+    assert _step == "live_debrief"
+
+    # STEP_LABELS has an entry
+    assert STEP_LABELS["live_debrief"] == "live debrief"
+
+    # STEP_ORDER has the same -1 sentinel as live_prep
+    assert STEP_ORDER["live_debrief"] == -1
+
+    # STEP_ALLOWED_TOOLS has an empty set (flat policy always overrides)
+    assert "live_debrief" in STEP_ALLOWED_TOOLS
+    assert STEP_ALLOWED_TOOLS["live_debrief"] == set()
+
+    # live_debrief is NOT in any skeleton
+    for _skeleton_name, _steps in SKELETONS.items():
+        assert "live_debrief" not in _steps, (
+            f"live_debrief must not appear in skeleton {_skeleton_name}"
+        )
