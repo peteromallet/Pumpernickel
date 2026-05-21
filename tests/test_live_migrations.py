@@ -96,6 +96,80 @@ class TestMigrationContent:
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Migration 0053 checks — live debrief statuses
+# --------------------------------------------------------------------------- #
+
+
+def _read_0053_up() -> str:
+    return (MIGRATIONS_DIR / "0053_live_debrief_statuses.sql").read_text()
+
+
+def _read_0053_down() -> str:
+    return (MIGRATIONS_DIR / "0053_live_debrief_statuses.down.sql").read_text()
+
+
+class TestMigration0053:
+    def test_up_and_down_files_exist(self) -> None:
+        assert (MIGRATIONS_DIR / "0053_live_debrief_statuses.sql").exists()
+        assert (MIGRATIONS_DIR / "0053_live_debrief_statuses.down.sql").exists()
+
+    def test_up_adds_debriefing_and_debrief_failed(self) -> None:
+        sql = _read_0053_up()
+        assert "'debriefing'" in sql, "up migration must add debriefing"
+        assert "'debrief_failed'" in sql, "up migration must add debrief_failed"
+
+    def test_up_creates_partial_index(self) -> None:
+        sql = _read_0053_up()
+        assert "idx_conversations_status_debrief_failed" in sql, (
+            "up migration must create partial index for debrief_failed"
+        )
+        assert "WHERE status = 'debrief_failed'" in sql or (
+            "status = 'debrief_failed'" in sql
+        ), "partial index must filter on status = 'debrief_failed'"
+
+    def test_down_restores_original_constraint(self) -> None:
+        sql = _read_0053_down()
+        assert "DROP INDEX" in sql or "drop index" in sql.lower(), (
+            "down migration must drop the partial index"
+        )
+        # The down migration ADD CONSTRAINT block must NOT include
+        # debriefing/debrief_failed. Extract only the ADD CONSTRAINT block.
+        add_constraint_idx = sql.find("ADD CONSTRAINT conversations_status_check")
+        if add_constraint_idx == -1:
+            add_constraint_idx = sql.find("ADD CONSTRAINT")
+        assert add_constraint_idx != -1, "down migration must have ADD CONSTRAINT"
+        # Get everything from ADD CONSTRAINT to the next semicolon or end.
+        constraint_block = sql[add_constraint_idx:]
+        semicolon_idx = constraint_block.find(";")
+        if semicolon_idx != -1:
+            constraint_block = constraint_block[:semicolon_idx + 1]
+        assert "'debriefing'" not in constraint_block, (
+            f"down migration ADD CONSTRAINT must not include debriefing: {constraint_block[:200]}"
+        )
+        assert "'debrief_failed'" not in constraint_block, (
+            f"down migration ADD CONSTRAINT must not include debrief_failed: {constraint_block[:200]}"
+        )
+
+    def test_debrief_statuses_not_in_active_session_indexes(self) -> None:
+        """Confirm debriefing and debrief_failed are NOT in active-session
+        indexes. The 0053 up migration should not modify idx_conversations_status_active
+        or idx_conversations_spend_active."""
+        sql = _read_0053_up()
+        # Filter out comment lines to only check SQL statements.
+        sql_lines = [
+            line for line in sql.split("\n")
+            if not line.strip().startswith("--")
+        ]
+        sql_body = "\n".join(sql_lines)
+        assert "idx_conversations_status_active" not in sql_body, (
+            "0053 must not modify active-session index"
+        )
+        assert "idx_conversations_spend_active" not in sql_body, (
+            "0053 must not modify spend-active index"
+        )
+
+
 class TestMigrationDatabase:
     """Apply 0042 to a scratch schema and verify RLS surface."""
 

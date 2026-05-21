@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     consult_max_tool_iterations: int = Field(default=3, ge=0, le=10)
     nonchat_default_max_tool_iterations: int = Field(default=100, ge=0, le=2000)
     live_debrief_max_tool_iterations: int = Field(default=500, ge=0, le=5000)
+    # ── Live debrief agentic settings ────────────────────────────────────
+    live_debrief_agentic_enabled: bool = False
+    live_debrief_tool_call_cap: int = Field(default=500, ge=1, le=5000)
     # ── Live prep agentic settings ──────────────────────────────────────
     live_prep_tool_cap: int = Field(default=100, ge=1, le=500)
     live_prep_allow_consult: bool = Field(default=False)

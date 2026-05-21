@@ -2278,6 +2278,55 @@ class SubmitLiveBriefOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# submit_live_debrief (S3 agentic live debrief)
+# ---------------------------------------------------------------------------
+
+
+class EvidenceReferenceV1(BaseModel):
+    """Structured transcript evidence for a debrief claim."""
+    model_config = ConfigDict(extra="allow")
+    transcript_turn_id: str | None = None
+    quote: str | None = None
+    confidence: float | None = None
+
+
+class FailedWriteV1(BaseModel):
+    """Record of a failed durable write during debrief."""
+    model_config = ConfigDict(extra="allow")
+    tool_name: str | None = None
+    reason: str | None = None
+    evidence_refs: list[EvidenceReferenceV1] | None = None
+
+
+class SubmitLiveDebriefInput(BaseModel):
+    """Required finalization gate for live debrief.  The debrief model must call
+    this exactly once before the tool cap, or the job is marked debrief_failed."""
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: int = 1
+
+    # ── Core review fields ──────────────────────────────────────────────
+    review_summary: str | None = None
+    what_heard: str = ""
+    what_decided: str = ""
+    still_open: str = ""
+    what_to_remember: str = ""
+
+    # ── Durable write audit ─────────────────────────────────────────────
+    durable_write_summary: str = ""
+    open_questions: str = ""
+
+    # ── Evidence and failure tracking ───────────────────────────────────
+    references: list[EvidenceReferenceV1] | None = None
+    failed_writes: list[FailedWriteV1] | None = None
+
+
+class SubmitLiveDebriefOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    ok: bool = True
+
+
+# ---------------------------------------------------------------------------
 # set_topic_status (S4)
 # ---------------------------------------------------------------------------
 
@@ -2305,6 +2354,7 @@ class SetTopicStatusOutput(BaseModel):
 TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "update_turn_plan": (UpdateTurnPlanInput, UpdateTurnPlanOutput),
     "submit_live_brief": (SubmitLiveBriefInput, SubmitLiveBriefOutput),
+    "submit_live_debrief": (SubmitLiveDebriefInput, SubmitLiveDebriefOutput),
     # read
     "search_messages": (SearchMessagesInput, SearchMessagesOutput),
     "search_emojis": (SearchEmojisInput, SearchEmojisOutput),

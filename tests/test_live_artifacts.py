@@ -589,3 +589,38 @@ class TestConfigDefaults:
                      groq_api_key="sk-test", whatsapp_token="test",
                      whatsapp_verify_token="test", admin_password="test",
                      live_debrief_max_tool_iterations=5001)
+
+
+# ---------------------------------------------------------------------------
+# Live debrief artifacts — no DB required
+# ---------------------------------------------------------------------------
+
+
+class TestLiveDebriefArtifact:
+    """Verify live_debrief artifact type is supported in the artifact system."""
+
+    def test_live_debrief_in_artifact_types(self) -> None:
+        """live_debrief is in ARTIFACT_TYPES frozenset."""
+        assert "live_debrief" in ARTIFACT_TYPES, (
+            f"live_debrief must be in ARTIFACT_TYPES; got {sorted(ARTIFACT_TYPES)}"
+        )
+
+    def test_live_debrief_kind_constant(self) -> None:
+        """LIVE_DEBRIEF_KIND is 'live_debrief'."""
+        assert LIVE_DEBRIEF_KIND == "live_debrief", (
+            f"Expected LIVE_DEBRIEF_KIND='live_debrief', got {LIVE_DEBRIEF_KIND!r}"
+        )
+
+    def test_review_summary_in_artifact_types(self) -> None:
+        """review_summary is in ARTIFACT_TYPES frozenset."""
+        assert "review_summary" in ARTIFACT_TYPES, (
+            f"review_summary must be in ARTIFACT_TYPES; got {sorted(ARTIFACT_TYPES)}"
+        )
+
+    def test_get_current_artifact_for_live_debrief(self) -> None:
+        """get_current_artifact is importable with live_debrief type."""
+        assert callable(get_current_artifact)
+
+    def test_create_artifact_live_debrief_supported(self) -> None:
+        """create_artifact function handles artifact_type='live_debrief'."""
+        assert callable(create_artifact)

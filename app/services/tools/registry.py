@@ -40,6 +40,15 @@ async def _submit_live_brief_handler(
     return SubmitLiveBriefOutput(ok=True)
 
 
+async def _submit_live_debrief_handler(
+    ctx: TurnContext, args: BaseModel
+) -> BaseModel:
+    from tool_schemas import SubmitLiveDebriefOutput
+
+    ctx.extras["submitted_live_debrief"] = args.model_dump()
+    return SubmitLiveDebriefOutput(ok=True)
+
+
 async def _consult_perspective(ctx: TurnContext, args: BaseModel) -> BaseModel:
     from app.services.tools.consult_perspective import consult_perspective
 
@@ -70,6 +79,7 @@ async def _update_turn_plan(
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
     "submit_live_brief": "Submit the final structured agenda for a live voice session. Call this exactly once when prep is complete — the agenda must pass existing validation (unique item ids, at least one 'must' item, all next_item_ids resolve). This is the required finalization gate for live prep; plain text without this call is not a valid agenda.",
+    "submit_live_debrief": "Submit the final structured review for a live voice debrief session. Call this exactly once when debrief is complete. This is the required finalization gate for live debrief; missing this call after the tool cap is a retryable failure. Include review_summary, what_heard, what_decided, still_open, what_to_remember, durable_write_summary, open_questions, and optional evidence references with transcript_turn_id, quote, and confidence.",
     "update_turn_plan": "Adjust the private turn checklist when the initial skeleton is too light or too heavy. Use this instead of hidden scratch notes. This does not send user-facing text or write durable state.",
     "search_messages": "Search prior message text, saved media explanations, or dates. Use for specific prior wording, repeated phrases, media explanations, and thread history; avoid for broad summaries. Example: find prior mentions of 'asked how my day went.' Each hit carries a `charge` label: `routine` (everyday content, low emotional weight), `notable` (emotionally meaningful but not heavy), `charged` (significant emotional weight, conflict, vulnerability, or intensity), `crisis` (meets crisis criteria).",
     "search_emojis": "Search the Unicode emoji dataset by meaning/name before reacting when a precise or unusual emoji would fit better than a generic one. Search by the emotional meaning, metaphor, or exact tone you want to convey. Example: search 'quiet support', 'fragile repair', or 'small but real progress.'",
@@ -144,6 +154,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 
 TOOL_DISPATCH: dict[str, ToolFn] = {
     "submit_live_brief": _submit_live_brief_handler,
+    "submit_live_debrief": _submit_live_debrief_handler,
     "update_turn_plan": _update_turn_plan,
     "search_messages": read_tools.search_messages,
     "search_emojis": read_tools.search_emojis,
@@ -409,8 +420,248 @@ STEP_ALLOWED_TOOLS: dict[TurnStep, set[str]] = {
     "schedule": SCHEDULE_TOOLS,
     "done": set(),
     "live_prep": LIVE_PREP_TOOLS,
+    "live_debrief": set(),
 }
 ALWAYS_ALLOWED_TOOLS = {"update_turn_plan"}
+
+# ── Live debrief flat tool policy ────────────────────────────────────────
+# Outbound messaging tools are forbidden during debrief.  The flat policy
+# starts from all registered tools, removes the outbound denylist, then is
+# filtered through the bot's tool_allowlist and BOT_EXCLUSIVE_TOOLS at
+# _step_allowed() time.  submit_live_debrief is the required finalization
+# gate; update_turn_plan is always allowed.
+LIVE_DEBRIEF_OUTBOUND_DENYLIST: frozenset[str] = frozenset({
+    "send_message_part",
+    "send_bridge_candidate",
+    "escalate_to_partner",
+    "edit_outbound_message",
+    "delete_outbound_message",
+    "react_to_message",
+})
+
+# ── Live debrief durable-write safety gate ───────────────────────────────
+# Tools whose debrief calls must pass _debrief_write_guard_ok before
+# model_validate.  The guard inspects raw_args for evidence_refs and
+# derivation_source, validates transcript references against the
+# live_debrief_transcript_policy in ctx.extras, and records write intents.
+# This set covers every durable-write tool that may be called during a
+# live_debrief job: memory, observation, distillation, theme, watch/OOB,
+# commitment/event writes, and schedule create/update.
+LIVE_DEBRIEF_GUARDED_WRITE_TOOLS: frozenset[str] = frozenset({
+    # memory
+    "add_memory",
+    "update_memory",
+    "supersede_memory",
+    # observation
+    "log_observation",
+    "update_observation",
+    # distillation
+    "add_distillation",
+    "update_distillation",
+    "revise_distillation",
+    # theme
+    "create_theme",
+    "update_theme",
+    # watch items
+    "add_watch_item",
+    "update_watch_item",
+    "address_watch_item",
+    # OOB
+    "add_oob",
+    "update_oob",
+    "lift_oob",
+    # commitment / event writes
+    "create_commitment",
+    "update_commitment",
+    "close_commitment",
+    "log_event",
+    # schedule create / update
+    "schedule_checkin",
+    "schedule_task",
+    "update_scheduled_task",
+    "update_scheduled_checkin",
+})
+
+
+def build_live_debrief_tools(bot_spec: Any | None = None) -> set[str]:
+    """Return the flat set of tool names allowed during a live debrief job.
+
+    The caller passes this set as TurnContext.flat_allowed_tools so both
+    schema rendering (to_anthropic_tools) and dispatch (call_tool) see the
+    same policy.
+    """
+    tools: set[str] = set(TOOL_REGISTRY.keys()) - LIVE_DEBRIEF_OUTBOUND_DENYLIST
+    tools.add("submit_live_debrief")
+    tools.add("update_turn_plan")
+    # The caller is responsible for applying bot_spec.tool_allowlist and
+    # BOT_EXCLUSIVE_TOOLS (which _step_allowed handles).  We do an early
+    # intersection here so the flat set doesn't include tools the bot
+    # can never use, but the authoritative intersection happens in
+    # _step_allowed().
+    if bot_spec is not None and bot_spec.tool_allowlist is not None:
+        tools &= bot_spec.tool_allowlist | ALWAYS_ALLOWED_TOOLS
+    return tools
+
+
+def _debrief_write_guard_ok(
+    ctx: TurnContext, tool_name: str, raw_args: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Validate that a debrief durable write does not cite unshareable transcript data.
+
+    Called from ``call_tool`` before Pydantic ``model_validate`` so that
+    guard-only fields (evidence_refs, derivation_source) are available in
+    raw_args even when the target schema lacks them.
+
+    Returns ``None`` when the write is allowed.  Returns a ``_tool_error``
+    dict when it should be rejected.
+    """
+    # Only active during live_debrief steps AND for guarded write tools.
+    if ctx.current_step != "live_debrief":
+        return None
+    if tool_name not in LIVE_DEBRIEF_GUARDED_WRITE_TOOLS:
+        return None
+
+    # ── Extract guard-only fields from raw_args ─────────────────────────
+    evidence_refs: list[dict[str, Any]] = raw_args.get("evidence_refs") or []
+    derivation_source: str | None = raw_args.get("derivation_source")
+
+    # ── Load the transcript policy from ctx.extras ──────────────────────
+    transcript_policy: dict[str, Any] = ctx.extras.get(
+        "live_debrief_transcript_policy", {}
+    )
+    # shareable_turn_ids maps turn_id_str -> {text_hash, quote_hashes}
+    shareable_turns: dict[str, dict[str, Any]] = transcript_policy.get(
+        "shareable_turn_ids", {}
+    )
+    redacted_turns: set[str] = set(transcript_policy.get("redacted_turn_ids", []))
+
+    # ── Validate evidence references ────────────────────────────────────
+    # Track whether we found at least one valid evidence reference with a
+    # non-empty transcript_turn_id.  If evidence_refs is present but every
+    # item has an empty/missing turn_id, we must still require a valid
+    # derivation_source (the elif below would not fire because the ``if``
+    # branch was entered, so we need an explicit tracker).
+    found_valid_ref = False
+    if evidence_refs:
+        for ref in evidence_refs:
+            turn_id = str(ref.get("transcript_turn_id", ""))
+            if not turn_id:
+                continue
+            # Reject references to redacted turns
+            if turn_id in redacted_turns:
+                _record_debrief_write_intent(
+                    ctx, tool_name, raw_args,
+                    outcome="rejected",
+                    reason="debrief_unshareable_transcript_reference",
+                    evidence_refs=evidence_refs,
+                )
+                return _tool_error(
+                    f"debrief_unshareable_transcript_reference: "
+                    f"turn {turn_id} is redacted or not shareable",
+                    error_code="debrief_unshareable_transcript_reference",
+                    retryable=False,
+                )
+            # Validate the turn is in the shareable set
+            if turn_id not in shareable_turns:
+                _record_debrief_write_intent(
+                    ctx, tool_name, raw_args,
+                    outcome="rejected",
+                    reason="debrief_unknown_transcript_reference",
+                    evidence_refs=evidence_refs,
+                )
+                return _tool_error(
+                    f"debrief_unknown_transcript_reference: "
+                    f"turn {turn_id} is not in the transcript policy",
+                    error_code="debrief_unknown_transcript_reference",
+                    retryable=False,
+                )
+            # Quote-matching: compare provided quote against stored hashes
+            quote = str(ref.get("quote", "")).strip()
+            if quote:
+                turn_info = shareable_turns.get(turn_id, {})
+                quote_hashes: set[str] = set(turn_info.get("quote_hashes", []))
+                text_hash: str | None = turn_info.get("text_hash")
+                if quote_hashes:
+                    import hashlib as _hashlib
+                    provided_hash = _hashlib.sha256(quote.encode()).hexdigest()
+                    if provided_hash not in quote_hashes and text_hash and provided_hash != text_hash:
+                        _record_debrief_write_intent(
+                            ctx, tool_name, raw_args,
+                            outcome="rejected",
+                            reason="debrief_quote_mismatch",
+                            evidence_refs=evidence_refs,
+                        )
+                        return _tool_error(
+                            f"debrief_quote_mismatch: quote does not match "
+                            f"stored transcript text for turn {turn_id}",
+                            error_code="debrief_quote_mismatch",
+                            retryable=False,
+                        )
+            found_valid_ref = True
+
+    if not found_valid_ref and derivation_source not in (
+        "hot_context", "bot_notes", "prep_artifact"
+    ):
+        # For writes without valid transcript references, require an explicit
+        # derivation_source marking it as derived from hot context / bot
+        # notes / prep artifact.
+        _record_debrief_write_intent(
+            ctx, tool_name, raw_args,
+            outcome="rejected",
+            reason="debrief_missing_derivation_source",
+        )
+        return _tool_error(
+            "debrief_missing_derivation_source: durable write must carry "
+            "evidence_refs with transcript_turn_id or derivation_source "
+            "in ('hot_context', 'bot_notes', 'prep_artifact')",
+            error_code="debrief_missing_derivation_source",
+            retryable=False,
+        )
+
+    # ── Guard passed ────────────────────────────────────────────────────
+    _record_debrief_write_intent(
+        ctx, tool_name, raw_args,
+        outcome="allowed",
+        evidence_refs=evidence_refs,
+        derivation_source=derivation_source,
+    )
+    return None
+
+
+def _record_debrief_write_intent(
+    ctx: TurnContext,
+    tool_name: str,
+    raw_args: dict[str, Any],
+    *,
+    outcome: str,
+    reason: str | None = None,
+    evidence_refs: list[dict[str, Any]] | None = None,
+    derivation_source: str | None = None,
+) -> None:
+    """Record a debrief write intent for later audit."""
+    import hashlib as _hashlib
+    import json as _json
+    text_hash = _hashlib.sha256(
+        _json.dumps(raw_args, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+
+    intent: dict[str, Any] = {
+        "tool_name": tool_name,
+        "text_hash": text_hash,
+        "outcome": outcome,
+    }
+    if evidence_refs:
+        intent["evidence_refs"] = evidence_refs
+    if derivation_source:
+        intent["derivation_source"] = derivation_source
+    if reason:
+        intent["reason"] = reason
+
+    write_intents: list[dict[str, Any]] = ctx.extras.setdefault(
+        "live_debrief_write_intents", []
+    )
+    write_intents.append(intent)
+
 
 READ_BEFORE_WRITE: dict[str, set[str]] = {
     "add_memory": {"get_memories"},
@@ -451,9 +702,16 @@ def to_anthropic_tools(allowed: set[str]) -> list[dict[str, Any]]:
 
 
 def _step_allowed(ctx: TurnContext) -> set[str]:
-    allowed = (
-        set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | ALWAYS_ALLOWED_TOOLS
-    )
+    # When flat_allowed_tools is set (non-chat jobs like live_debrief),
+    # it is authoritative instead of STEP_ALLOWED_TOOLS.  The flat set
+    # still passes through bot_spec.tool_allowlist and BOT_EXCLUSIVE_TOOLS
+    # so scope and exclusivity guards remain in effect.
+    if ctx.flat_allowed_tools is not None:
+        allowed = set(ctx.flat_allowed_tools) | ALWAYS_ALLOWED_TOOLS
+    else:
+        allowed = (
+            set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | ALWAYS_ALLOWED_TOOLS
+        )
     if ctx.bot_spec is not None and ctx.bot_spec.tool_allowlist is not None:
         allowed &= ctx.bot_spec.tool_allowlist | ALWAYS_ALLOWED_TOOLS
     # Remove bot-exclusive tools for non-matching bots.
@@ -606,6 +864,41 @@ async def call_tool(
         )
         return result
     input_model, output_model = registry_entry
+
+    # ── Debrief durable-write safety gate ────────────────────────────────
+    # Inspect raw_args BEFORE Pydantic model_validate so evidence_refs and
+    # derivation_source survive even when the target schema lacks those fields.
+    if ctx.current_step == "live_debrief":
+        guard_error = _debrief_write_guard_ok(ctx, name, raw_args)
+        if guard_error is not None:
+            await record_turn_event(
+                ctx.pool,
+                ctx.turn_id,
+                "tool.rejected",
+                step=phase,
+                severity="warning",
+                actor="tool",
+                metadata={
+                    "tool_name": name,
+                    "reason": guard_error.get("error_code", "debrief_guard_rejected"),
+                },
+            )
+            _record_visible_tool_call(
+                tool_name=name,
+                args=raw_args,
+                result=guard_error,
+                phase=phase,
+                started_at=started,
+            )
+            return guard_error
+        # Strip guard-only fields from raw_args before model_validate so
+        # Pydantic doesn't reject them on schemas without ConfigDict(extra='allow').
+        raw_args = {
+            k: v
+            for k, v in raw_args.items()
+            if k not in ("evidence_refs", "derivation_source")
+        }
+
     try:
         args = input_model.model_validate(_inject_consult_defaults(name, raw_args, ctx))
     except ValidationError as exc:

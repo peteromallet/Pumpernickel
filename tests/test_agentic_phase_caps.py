@@ -14,6 +14,7 @@ Covers (per plan_v4 Step 9):
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -279,3 +280,66 @@ def test_unsupported_chain_maps_to_infra_bug(app_env):
         FAILURE_REASON_TO_CLASS["unsupported_chain_anthropic_to_deepseek"]
         == "infra_bug"
     )
+
+
+# ── max_tool_calls cap tests ─────────────────────────────────────────────────
+
+
+class TestMaxToolCallsCap:
+    """Verify that MaxToolCallsExceeded is importable and carries expected
+    attributes.  Full cap-integration tests go through run_agentic_nonchat_job
+    (see test_nonchat_agentic.py)."""
+
+    def test_max_tool_calls_importable_and_has_attributes(self) -> None:
+        """MaxToolCallsExceeded is importable and has expected attributes."""
+        from app.services.agentic import MaxToolCallsExceeded
+
+        exc = MaxToolCallsExceeded(
+            "cap exceeded",
+            tool_call_count=5,
+            max_calls=500,
+        )
+        assert exc.tool_call_count == 5
+        assert exc.max_calls == 500
+        assert "cap exceeded" in str(exc)
+
+    def test_max_tool_calls_zero_default(self) -> None:
+        """Default tool_call_count is 0 when not provided."""
+        from app.services.agentic import MaxToolCallsExceeded
+
+        exc = MaxToolCallsExceeded("test")
+        assert exc.tool_call_count == 0
+        assert exc.max_calls == 0
+
+    def test_max_tool_calls_instance_is_exception(self) -> None:
+        """MaxToolCallsExceeded is a proper Exception subclass."""
+        from app.services.agentic import MaxToolCallsExceeded
+
+        exc = MaxToolCallsExceeded("test")
+        assert isinstance(exc, Exception)
+
+
+async def test_max_tool_calls_cap_builds_error_result_before_raising(
+    app_env, monkeypatch, _no_call_tool
+) -> None:
+    """The cap path must raise MaxToolCallsExceeded, not NameError."""
+    from app.services.agentic import MaxToolCallsExceeded
+
+    ctx = _ctx(step="live_debrief")
+    client = _ScriptedClient([_tool_use("log_observation")])
+
+    with pytest.raises(MaxToolCallsExceeded) as exc_info:
+        await run_step(
+            client,
+            ctx,
+            "system",
+            "context",
+            {"log_observation", "update_turn_plan"},
+            [{"role": "user", "content": "hi"}],
+            max_tool_calls=0,
+        )
+
+    exc = exc_info.value
+    assert exc.tool_call_count == 0
+    assert exc.max_calls == 0
+    assert "tool_result" in json.dumps(exc.messages, default=str)
