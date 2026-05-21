@@ -142,6 +142,16 @@ async def _apply_migrations(dsn: str, db_name: str) -> int:
     conn = await asyncpg.connect(dsn)
     try:
         await conn.execute("CREATE SCHEMA IF NOT EXISTS mediator;")
+        await conn.execute("CREATE SCHEMA IF NOT EXISTS auth;")
+        await conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION auth.uid()
+            RETURNS uuid
+            LANGUAGE sql
+            STABLE
+            AS $$ SELECT NULL::uuid $$;
+            """
+        )
         # Pin search_path for THIS connection while applying migrations.  We
         # also set it on the database so subsequent connections inherit it.
         await conn.execute(
