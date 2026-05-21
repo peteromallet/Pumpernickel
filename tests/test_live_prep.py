@@ -15,6 +15,8 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from app.bots.base import BotSpec
+from app.bots.registry import BOT_SPECS
 from app.services.live.prep import StubAgendaProducer, produce_agenda
 from app.services.live.schemas import Agenda, AgendaItem, PrepRequest
 
@@ -202,8 +204,102 @@ async def test_stub_producer_returns_validated_agenda() -> None:
     producer = StubAgendaProducer()
     agenda = await producer(
         PrepRequest(user_id=str(uuid4()), bot_id="tante_rosi", steering_text="x"),
-        context={"themes": [{"id": str(uuid4()), "slug": "pregnancy_timing", "label": "Timing"}]},
+        context={
+            "bot_profile": {
+                "bot_id": "tante_rosi",
+                "display_name": "Tante Rosi",
+                "primary_topic_slug": "pregnancy",
+                "participants_shape": "solo",
+            },
+            "themes": [
+                {"id": str(uuid4()), "slug": "pregnancy_timing", "label": "Timing"}
+            ],
+        },
     )
     # Pydantic round-trip — would raise on schema break.
     Agenda.model_validate(agenda.model_dump())
     assert agenda.items[0].theme_slug == "pregnancy_timing"
+    assert "Tante Rosi" in agenda.prep_summary
+    assert "pregnancy" in agenda.prep_summary
+    assert "pregnancy" in (agenda.items[0].ask or "").lower()
+    assert "partner" not in (agenda.items[0].ask or "").lower()
+
+
+@pytest.mark.anyio
+async def test_produce_agenda_passes_selected_bot_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: live prep must not silently use mediator-shaped prompts."""
+
+    def prompt_renderer(
+        assistant_name: str,
+        user_name: str,
+        partner_name: str | None = None,
+        **_: Any,
+    ) -> str:
+        del partner_name
+        return (
+            f"{assistant_name} fitness prompt for {user_name}; "
+            "ask about training load."
+        )
+
+    monkeypatch.setitem(
+        BOT_SPECS,
+        "hector_live_test",
+        BotSpec(
+            bot_id="hector_live_test",
+            prompt_renderer=prompt_renderer,
+            step_instructions={
+                "read": "read",
+                "consult": "consult",
+                "respond": "respond",
+                "record": "record",
+                "schedule": "schedule",
+                "done": "done",
+            },
+            display_name="Hector",
+            primary_topic_slug="fitness",
+            participants_shape="solo",
+        ),
+    )
+
+    class CapturingProducer:
+        def __init__(self) -> None:
+            self.context: dict[str, Any] | None = None
+
+        async def __call__(self, request: PrepRequest, context: dict[str, Any]) -> Agenda:
+            del request
+            self.context = context
+            return Agenda(
+                prep_summary="fitness prep",
+                items=[AgendaItem(id="anchor", title="Anchor", priority="must")],
+                first_item_id="anchor",
+            )
+
+    user_id = uuid4()
+    pool = _FakePool()
+    pool.set_user_row(
+        {
+            "id": user_id,
+            "name": "Maya",
+            "phone": "+15555550100",
+            "timezone": "Europe/Berlin",
+            "style_notes": None,
+            "onboarding_state": "ready",
+            "pacing_preferences": {},
+        }
+    )
+    producer = CapturingProducer()
+
+    await produce_agenda(
+        pool,
+        PrepRequest(user_id=str(user_id), bot_id="hector_live_test", steering_text=""),
+        producer=producer,
+    )
+
+    profile = (producer.context or {})["bot_profile"]
+    assert profile["bot_id"] == "hector_live_test"
+    assert profile["display_name"] == "Hector"
+    assert profile["primary_topic_slug"] == "fitness"
+    assert profile["participants_shape"] == "solo"
+    assert "fitness prompt for Maya" in profile["system_prompt"]

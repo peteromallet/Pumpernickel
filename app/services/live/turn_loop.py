@@ -7,7 +7,7 @@ applies it atomically to the DB.
 Ships two impls:
 
 * :class:`StubTurnCaller` — deterministic stub for dev/no-key runs.
-  Generates a plausible mediator-style utterance, advances coverage on the
+  Generates a plausible selected-bot utterance, advances coverage on the
   current item, and notes a single "fact".  Wire protocol is identical to
   the real Haiku caller.
 * :class:`AnthropicHaikuTurnCaller` — calls Claude Haiku 4.5 with the
@@ -29,6 +29,11 @@ from app.services.live.schemas import (
     TurnNote,
     TurnRequest,
 )
+from app.services.live.bot_profile import (
+    format_live_bot_profile,
+    live_bot_profile_context,
+    user_from_live_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +44,23 @@ class TurnCaller(Protocol):
 
 def select_turn_caller() -> "TurnCaller":
     provider = (os.environ.get("LIVE_VOICE_TURN_PROVIDER") or "").strip().lower()
-    api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    has_real_key = api_key.startswith("sk-ant-") and "stub" not in api_key
-    if provider == "stub" or (provider == "" and not has_real_key):
+    anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    deepseek_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    has_anthropic = anthropic_key.startswith("sk-ant-") and "stub" not in anthropic_key
+    has_deepseek = bool(deepseek_key) and "stub" not in deepseek_key.lower()
+
+    if provider == "stub":
         return StubTurnCaller()
-    return AnthropicHaikuTurnCaller()
+    if provider == "deepseek":
+        return DeepseekTurnCaller()
+    if provider == "anthropic":
+        return AnthropicHaikuTurnCaller()
+    # Auto-select: prefer a real Anthropic key (matches design), else Deepseek, else stub.
+    if has_anthropic:
+        return AnthropicHaikuTurnCaller()
+    if has_deepseek:
+        return DeepseekTurnCaller()
+    return StubTurnCaller()
 
 
 async def load_turn_context(pool: Any, session_id: UUID) -> dict[str, Any]:
@@ -67,6 +84,29 @@ async def load_turn_context(pool: Any, session_id: UUID) -> dict[str, Any]:
     if conv is None:
         return context
     context["conversation"] = {k: v for k, v in dict(conv).items()}
+    bot_id = context["conversation"].get("bot_id")
+    user_id = context["conversation"].get("user_id")
+
+    if bot_id is not None:
+        user = None
+        if user_id is not None:
+            try:
+                user_row = await pool.fetchrow(
+                    """
+                    SELECT id, name, phone, timezone, onboarding_state,
+                           pacing_preferences, pregnancy_edd, pregnancy_dating_basis,
+                           pregnancy_lmp_date, pregnancy_scan_date,
+                           pregnancy_scan_corrected_at, pregnancy_started_at,
+                           pregnancy_ended_at, pregnancy_outcome
+                    FROM users
+                    WHERE id = $1
+                    """,
+                    user_id,
+                )
+                user = user_from_live_row(user_id, user_row)
+            except Exception:
+                logger.warning("turn_loop: failed to load user row", exc_info=True)
+        context["bot_profile"] = live_bot_profile_context(bot_id, user=user)
 
     try:
         items = await pool.fetch(
@@ -296,6 +336,7 @@ class AnthropicHaikuTurnCaller:
 
         client = anthropic.AsyncAnthropic()
         conv = context.get("conversation") or {}
+        bot_profile = context.get("bot_profile") or {"bot_id": conv.get("bot_id")}
         items = context.get("items") or []
         last_turns = context.get("last_turns") or []
 
@@ -303,11 +344,17 @@ class AnthropicHaikuTurnCaller:
             {
                 "type": "text",
                 "text": (
-                    "You are a live-voice mediator-style coach. Always respond with the "
+                    "You are the selected Veas live-voice bot. Always respond with the "
                     "emit_live_turn tool; never use plain text. The agenda below is the "
-                    "checklist you must drive. Stay grounded, short utterances (<= 60 "
-                    "words), and only mark an item 'covered' when you can quote the user."
+                    "checklist you must drive. Follow the selected bot profile, scope, "
+                    "and style. Stay grounded, short utterances (<= 60 words), and only "
+                    "mark an item 'covered' when you can quote the user."
                 ),
+            },
+            {
+                "type": "text",
+                "text": "SELECTED BOT PROFILE:\n" + format_live_bot_profile(bot_profile),
+                "cache_control": {"type": "ephemeral"},
             },
             {
                 "type": "text",
@@ -349,3 +396,98 @@ class AnthropicHaikuTurnCaller:
             if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "emit_live_turn":
                 return TurnEmission.model_validate(block.input)
         raise RuntimeError("Haiku did not emit a tool_use; check tool_choice settings")
+
+
+# --------------------------------------------------------------------------- #
+# Deepseek impl: JSON-mode chat completion (no tool_choice forcing needed).
+# --------------------------------------------------------------------------- #
+
+
+class DeepseekTurnCaller:
+    """Deepseek per-turn caller.
+
+    Uses Deepseek's OpenAI-compatible /chat/completions with
+    ``response_format={"type":"json_object"}`` and prompt-side schema injection.
+    Selected by ``LIVE_VOICE_TURN_PROVIDER=deepseek`` or auto-selected when
+    a Deepseek key is present and the Anthropic key is missing/placeholder.
+    """
+
+    def __init__(self, *, model: str | None = None) -> None:
+        self._model = model
+
+    async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission:
+        import json
+
+        import httpx
+
+        from app.config import get_settings
+
+        settings = get_settings()
+        if settings.deepseek_api_key is None:
+            raise RuntimeError("DEEPSEEK_API_KEY not configured")
+        model = self._model or settings.deepseek_conversational_model
+
+        conv = context.get("conversation") or {}
+        bot_profile = context.get("bot_profile") or {"bot_id": conv.get("bot_id")}
+        items = context.get("items") or []
+        last_turns = context.get("last_turns") or []
+
+        schema = TurnEmission.model_json_schema()
+        agenda = [
+            {
+                "id": str(i["id"]),
+                "title": i["title"],
+                "status": i["status"],
+                "priority": i["priority"],
+                "intent": i.get("intent"),
+                "ask": i.get("ask"),
+                "done_when": i.get("done_when"),
+            }
+            for i in items
+        ]
+        system_text = (
+            "You are the selected Veas live-voice bot. Respond with ONE JSON "
+            "object that validates against OUTPUT_SCHEMA below; no prose, no "
+            "markdown, no code fences. Follow the selected bot profile, scope, "
+            "and style. Stay grounded, keep utterances <= 60 words, and only "
+            "mark an item 'covered' when you can quote the user.\n\n"
+            f"OUTPUT_SCHEMA:\n{json.dumps(schema)}\n\n"
+            f"SELECTED BOT PROFILE:\n{format_live_bot_profile(bot_profile)}\n\n"
+            f"PREP SUMMARY:\n{conv.get('prep_summary') or '(no prep summary)'}\n\n"
+            f"AGENDA:\n{json.dumps(agenda, indent=2)}"
+        )
+        user_content = (
+            "RECENT TRANSCRIPT:\n"
+            + "\n".join(f"- [{t['speaker_role']}] {t['text']}" for t in last_turns[-6:])
+            + f"\n\nLATEST USER UTTERANCE:\n{request.user_transcript_final}"
+        )
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": 1024,
+            "response_format": {"type": "json_object"},
+            "stream": False,
+        }
+        if settings.deepseek_reasoning_effort:
+            payload["reasoning_effort"] = settings.deepseek_reasoning_effort
+
+        async with httpx.AsyncClient(timeout=settings.provider_call_timeout_seconds) as client:
+            resp = await client.post(
+                f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.deepseek_api_key.get_secret_value()}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"Deepseek returned unexpected payload: {data!r}") from exc
+        return TurnEmission.model_validate_json(content)
