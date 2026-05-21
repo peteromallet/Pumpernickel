@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     deepseek_reasoning_effort: str | None = None
     consult_model: str = ""  # Bounded read-only consult loop model; defaults to conversational_model.
     consult_max_tool_iterations: int = Field(default=3, ge=0, le=10)
+    nonchat_default_max_tool_iterations: int = Field(default=100, ge=0, le=2000)
+    live_debrief_max_tool_iterations: int = Field(default=500, ge=0, le=5000)
     consult_timeout_s: float = Field(default=20.0, ge=1.0, le=120.0)
     oob_checker_model: str = "claude-sonnet-4-6"  # Delivery/read-tool OOB checker model.
     scoring_model: str = "claude-haiku-4-5-20251001"  # Observation scoring and OOB topic clustering model.

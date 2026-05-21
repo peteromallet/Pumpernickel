@@ -1,0 +1,13 @@
+# Nixpacks build for Railway.
+#
+# Adds Node to the build image and builds the live-voice React app before
+# the Python app starts. The built artifact lands at web/live-voice/dist
+# and is served by FastAPI at /live (see app/main.py).
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.build]
+cmds = [
+  "bash scripts/build_live_ui.sh",
+]

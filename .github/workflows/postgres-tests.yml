@@ -79,6 +79,8 @@ jobs:
           psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE anon; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
           psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
           psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE service_role; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS auth;"
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS \$\$ SELECT NULL::uuid \$\$;"
 
       - name: Run Postgres-marked tests
         run: pytest -m postgres -v
