@@ -69,6 +69,9 @@ class NonchatJobConfig:
     # Cap on total tool *calls* (non-update_turn_plan dispatches).
     max_tool_calls: int | None = None
 
+    # Extra server-side metadata to seed onto TurnContext before any tool call.
+    initial_extras: dict[str, Any] = field(default_factory=dict)
+
 
 # ── Pre-built configs ────────────────────────────────────────────────────
 LIVE_PREP_CONFIG = NonchatJobConfig(
@@ -223,6 +226,7 @@ async def run_agentic_nonchat_job(
         turn_started_at=started_at,
         trigger_metadata=trigger_metadata,
     )
+    ctx.extras.update(cfg.initial_extras)
 
     # ── 4. Build allowed_tools ──────────────────────────────────────────
     # When flat_allowed_tools is set, _step_allowed uses it as the

@@ -53,6 +53,7 @@ from app.services.text_safety import clean_user_facing_text
 from app.services.tools.registry import (
     STEP_ALLOWED_TOOLS,
     call_tool,
+    _tool_error,
     to_anthropic_tools,
 )
 from app.services.turn_audit import record_turn_event

@@ -14,6 +14,7 @@ Covers (per plan_v4 Step 9):
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -316,3 +317,29 @@ class TestMaxToolCallsCap:
 
         exc = MaxToolCallsExceeded("test")
         assert isinstance(exc, Exception)
+
+
+async def test_max_tool_calls_cap_builds_error_result_before_raising(
+    app_env, monkeypatch, _no_call_tool
+) -> None:
+    """The cap path must raise MaxToolCallsExceeded, not NameError."""
+    from app.services.agentic import MaxToolCallsExceeded
+
+    ctx = _ctx(step="live_debrief")
+    client = _ScriptedClient([_tool_use("log_observation")])
+
+    with pytest.raises(MaxToolCallsExceeded) as exc_info:
+        await run_step(
+            client,
+            ctx,
+            "system",
+            "context",
+            {"log_observation", "update_turn_plan"},
+            [{"role": "user", "content": "hi"}],
+            max_tool_calls=0,
+        )
+
+    exc = exc_info.value
+    assert exc.tool_call_count == 0
+    assert exc.max_calls == 0
+    assert "tool_result" in json.dumps(exc.messages, default=str)

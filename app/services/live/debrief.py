@@ -556,6 +556,9 @@ async def run_live_debrief_agentic_job(
         allowed_tools=flat_allowed_tools,
         failure_reason_prefix=LIVE_DEBRIEF_CONFIG.failure_reason_prefix,
         max_tool_calls=tool_cap,
+        initial_extras={
+            "live_debrief_transcript_policy": transcript_policy,
+        },
     )
 
     # ── 14. Run the non-chat agentic job ────────────────────────────────

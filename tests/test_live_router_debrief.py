@@ -8,6 +8,7 @@ Covers:
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -106,6 +107,14 @@ class TestDebriefRetryRoute:
         assert any(
             "/debrief/retry" in p for p in route_paths
         ), f"No debrief/retry route found; paths={route_paths}"
+
+    def test_retry_route_does_not_pre_reset_status(self) -> None:
+        """Route must call retry helper while status is still debrief_failed."""
+        from app.routers.live_voice import retry_debrief
+
+        source = inspect.getsource(retry_debrief)
+        before_background = source.split("async def _background_retry", 1)[0]
+        assert "SET status = 'debriefing'" not in before_background
 
 
 # ── Status transitions ──────────────────────────────────────────────────────

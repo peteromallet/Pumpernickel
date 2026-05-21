@@ -588,7 +588,9 @@ async def retry_debrief(
     """Retry a failed live-debrief session.
 
     Only accepts sessions in ``debrief_failed`` status (409 otherwise).
-    Resets status to ``debriefing`` and schedules a new agentic debrief task.
+    Schedules a new agentic debrief task. The retry helper validates the
+    current ``debrief_failed`` state and performs the transition to
+    ``debriefing`` itself.
 
     Gated behind ``live_debrief_agentic_enabled`` feature flag (403 when off).
     """
@@ -614,12 +616,6 @@ async def retry_debrief(
                 f"only 'debrief_failed' sessions are retryable"
             ),
         )
-
-    # Update to 'debriefing' so the retry can proceed.
-    await pool.execute(
-        "UPDATE mediator.conversations SET status = 'debriefing' WHERE id = $1",
-        session_id,
-    )
 
     # Schedule the retry as a background task.
     async def _background_retry() -> None:

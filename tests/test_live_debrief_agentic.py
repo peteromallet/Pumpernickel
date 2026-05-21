@@ -302,8 +302,10 @@ class TestDebriefHappyPath:
             turn_id=uuid4(),
             tool_call_count=3,
         )
+        captured_run_kwargs: dict[str, Any] = {}
 
         async def fake_run_job(**kwargs: Any) -> NonchatJobResult:
+            captured_run_kwargs.update(kwargs)
             return success_result
 
         monkeypatch.setattr(
@@ -348,6 +350,10 @@ class TestDebriefHappyPath:
         assert result.success is True, f"Expected success, got {result}"
         assert result.turn_id is not None
         assert result.brief == payload
+        config = captured_run_kwargs["config"]
+        assert "live_debrief_transcript_policy" in config.initial_extras
+        policy = config.initial_extras["live_debrief_transcript_policy"]
+        assert policy, "debrief transcript policy must be available to tool guards"
 
         # Status transition: debriefing -> review_pending.
         assert pool.updated_status == "review_pending", (
