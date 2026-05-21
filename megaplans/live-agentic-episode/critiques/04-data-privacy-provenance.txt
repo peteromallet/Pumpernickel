@@ -1,0 +1,64 @@
+## Privacy & Provenance Critique — Live Agentic Episode
+
+I've reviewed all six files. The plan has strong foundations (RLS everywhere, consent event auditing, `coverage_evidence_quote` enforced at schema level, AES-GCM encryption on sensitive columns). However, five material gaps emerge when transcript-derived content becomes durable knowledge via an automatic agentic debrief.
+
+---
+
+### Top 5 Concerns
+
+**1. Automatic durable writes with zero human review gate**
+
+M3 states: *"Do not require user approval before durable writes in this sprint."* The debrief reads the full transcript and writes memories, observations, distillations, commitments, and events — all automatically. If the LLM hallucinates, misattributes a partner's statement to the primary user, or extracts an embarrassing half-sentence as a "fact," that record lands in durable state with no review. The existing `save_review` in `synthesis.py` shows the intended pattern — user edits items/notes, *then* notes write through to `observations`. The debrief skips this entirely.
+
+**2. Partner/dyad privacy: transcript ingestion without `partner_share` filtering**
+
+`cross_thread_privacy.py` gates raw message visibility by `partner_share` (`opt_in`/`opt_out`), but the debrief feeds the **full transcript** — including partner turns — directly to the LLM without filtering. A partner who has set `partner_share=opt_out` would still have their spoken words analyzed, summarized, and potentially written into durable memories visible to the primary user. The plan mentions "hot context" but not the partner-sharing privacy model that already exists for messages. This is a regression from the chat-side privacy model.
+
+**3. Evidence quotes copied into durable records become un-deletable**
+
+`coverage_evidence_quote` on `conversation_items` is ON DELETE CASCADE — delete the conversation, the quote goes away. But once the debrief cites that quote inside a `memories.content` or `observations.content` row, the quote text lives in a durable table with **no cascade back to the conversation**. If a user deletes a session, the derived memories persist with no cleanup path. The `artifact_links.evidence` JSONB field is optional and unstructured — no guarantee the source transcript turn ID or quote text is preserved there either.
+
+**4. No retention, soft-delete, or conversation-lifecycle cleanup for derived durable writes**
+
+The existing deletion system (`deletion.py`) only handles `messages` with a 24-hour grace period. The proposed `conversation_artifacts` table has no `deleted_at`, `expires_at`, or `retention_policy` columns. Durable tables (`memories`, `observations`, `distillations`, `commitments`, `events`, `scheduled_jobs`) have no `source_conversation_id` or soft-delete path. If a user discards a conversation (status `discarded` exists), or the debrief produces wrong output, there is no bulk-rollback mechanism — each row must be individually hunted down across 6+ tables.
+
+**5. Out-of-bounds data can cross into durable state through the debrief**
+
+The system has an `out_of_bounds` table with encrypted `sensitive_core` for chat-originated OOB detection, but live conversation turns don't go through any OOB classification hook. The debrief reads the full transcript and can extract sensitive content into memories or observations without triggering the OOB safeguards. There's no `_call_oob_hook` path described for debrief-driven writes, unlike `send_bridge_candidate` which runs OOB checks before sharing.
+
+---
+
+### Concrete Guardrails for Sprint Briefs
+
+**Add to M1 (artifacts contract):**
+- Add `deleted_at timestamptz`, `expires_at timestamptz`, and `payload_version text` to `conversation_artifacts`.
+- Add `deleted_at timestamptz` and a reverse-lookup index `ON artifact_links(target_table, target_id)` to `artifact_links`.
+- Add `source_conversation_id uuid` to `memories`, `observations`, `distillations`, `commitments`, and `events` so reverse provenance is queryable without joining through `artifact_links`.
+- Encrypt `conversation_artifacts.payload` (as `payload_encrypted`) if it may contain summary text derived from sensitive transcripts.
+
+**Add to M3 (debrief):**
+- **Partner-share gate**: Before feeding transcript to the LLM, filter partner turns through `raw_message_visibility` using the partner's `partner_share` state. If `opt_out`, redact partner transcript text from the debrief input bundle (substitute `[partner content withheld by partner_share]`).
+- **OOB hook for durable writes**: Run `_call_oob_hook` on any memory/observation content extracted from transcript before writing — same pattern as `send_bridge_candidate`.
+- **Structured evidence in artifact_links**: Require `artifact_links.evidence` to include `{"transcript_turn_id": "...", "quote_text": "...", "char_offset": N}` for every `evidence_quote` relation — not optional/unstructured.
+- **Review-pending gate**: After debrief completes, set status to `review_pending` (not `completed`) and hold durable writes in a staging state until the user reviews. The existing `save_review` path in `synthesis.py` already demonstrates this pattern (user edits → then writes through). Extend this to debrief output.
+- **Add `debriefing` and `debrief_failed` to the `conversations.status` CHECK constraint** via migration.
+
+**Add to M4 (productization):**
+- **Bulk-rollback endpoint**: A single operation that, given a `conversation_id`, soft-deletes all `artifact_links` and marks linked durable rows with `deleted_at`. Leverage the reverse index from M1.
+- **Conversation retention config**: Add `live_conversation_retention_days` to `Settings`; a scheduled job expires conversations past retention, cascading to artifacts, and soft-deleting linked durable writes.
+
+---
+
+### Missing Schema Fields
+
+| Table | Missing Field | Purpose |
+|---|---|---|
+| `conversation_artifacts` | `deleted_at` | Soft-delete, audit trail |
+| `conversation_artifacts` | `expires_at` | Time-bound retention |
+| `conversation_artifacts` | `payload_version` | Schema evolution |
+| `conversation_artifacts` | `payload_encrypted` | AES-GCM for summary text |
+| `artifact_links` | `deleted_at` | Soft-delete |
+| `artifact_links` | *(index)* on `(target_table, target_id)` | Reverse provenance queries |
+| `memories`, `observations`, `distillations`, `commitments`, `events` | `source_conversation_id` | Direct back-link without join |
+| `memories`, `observations`, `distillations`, `commitments`, `events` | `deleted_at` | Soft-delete for rollback |
+| `conversations` | *(CHECK constraint)* missing `debriefing`, `completed`, `debrief_failed` | Status values M3 requires |

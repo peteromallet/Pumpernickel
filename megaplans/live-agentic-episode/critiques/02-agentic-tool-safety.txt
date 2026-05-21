@@ -1,0 +1,98 @@
+I've read all seven files. Here's the critique.
+
+---
+
+## Top 5 Implementation Hazards
+
+**1. `run_step` assumes step-based tool gating; non-chat turns have no steps.**
+
+`run_step` delegates tool gating to `_allowed_tools_for_step()`, which key off `ctx.current_step` against `STEP_ALLOWED_TOOLS`. Non-chat prep/debrief have no step skeleton. If the caller passes a flat allowed-tools set through `run_step`'s `allowed_tools` parameter instead, great — but `_run_agentic` *always* calls `_allowed_tools_for_step(ctx)` (line 1994). The new `run_agentic_nonchat_job` must bypass this and supply its own policy-aware set directly. If it accidentally reuses `_allowed_tools_for_step`, the model sees zero allowed tools (since `ctx.current_step` won't match any key) or a step-inappropriate set.
+
+**2. Orphan `tool_use` blocks when the model doesn't call the submit tool.**
+
+When `run_step` hits its iteration cap, it returns early with `messages` containing unpaired `tool_use` blocks (line 1036-1063). For read/consult phases, stubs are synthesized. For record/schedule, `_PostSendPhaseCapExceeded` is raised and caught gracefully. **None of these paths handle the "model exhausted its tool budget without calling the required submit tool" case.** The messages list returned will contain orphan tool_use blocks with no matching tool_results, and the next provider call (potentially in a retry) will 400. The non-chat runner must detect this, synthesize stubs for any orphaned tool_uses, and either retry with a correction prompt or fail the turn with `tool_submit_missing`.
+
+**3. `_finalize_turn_atomically` is hard-wired to inbound queue message lifecycle.**
+
+The function (line 1486) always calls either `_complete_messages_in_tx` or `_fail_messages_in_tx` on the claimed inbound message IDs. It also sets the lifecycle writer to `'inbound_queue'`. A non-chat turn with `conversation_id` and no inbound messages will break here — either because `message_ids` is empty (safe path, only `_complete_turn` runs) or because it's `None` and the code tries to iterate it. Worse, `_open_turn` currently inserts `triggered_by_message_id` from the triggering-message list, which makes no semantic sense for a prep/debrief turn. A separate finalization path — or a parameterized fork — is needed.
+
+**4. `_open_turn` stamps `triggered_by_message_id`; non-chat turns need `conversation_id` and `kind`.**
+
+The `bot_turns` insert (line 1412-1435) writes `triggered_by_message_id` from the first triggering message. The sprint plans call for `trigger_metadata.kind = "live_prep"` and a `conversation_id` column. The turn-open path must be forked or parameterized to set these columns and leave `triggered_by_message_id` null for non-chat turns. If the runner tries to reuse `_open_turn` as-is, the kind/conv_id metadata gets lost, breaking audit queries and artifact provenance.
+
+**5. Spend tracking fires on every provider call, but debrief's 500-tool budget amplifies cost-recording noise.**
+
+`_attempt_provider_call` calls `is_under_cap` and `record_llm_cost` per provider hop. A 500-tool debrief could trigger hundreds of small LLM calls (one per `tool_use` iteration), each recording fractional pennies. This works functionally but floods the spend log and may hit rate limits on the cost-recording path itself. The debrief runner should consider batching cost records or tolerating higher spend-log volume without degrading.
+
+---
+
+## What to Extract / Reuse vs. Leave Alone
+
+**Extract and reuse directly:**
+
+| Function | Why |
+|---|---|
+| `run_step()` (line 965) | The core loop: model call → tools → repeat. Already parameterized with `allowed_tools`, `max_tool_iterations`, `provider_chain`, spend-guard. Perfect for non-chat. |
+| `TurnContext` (turn_context.py) | Carries identity, pool, bot_spec, turn_plan, tool_call_log. Chat-specific fields (`sent_message_parts`, `before_paced_send`, `incremental_sending_enabled`) default safely. Non-chat runner just leaves them at defaults. |
+| `_resolve_provider_chain()` | Per-bot + per-user allowlist resolution. Identical for non-chat. |
+| `build_hot_context()` / `render_hot_context()` | The prep/debrief specs require normal hot context + bot persona. Direct reuse. |
+| `call_tool()` (registry) | Already context-agnostic; takes `TurnContext` and tool name. |
+| `_record_response_cost()` / `is_under_cap()` | Spend tracking. Identical for non-chat. |
+| `record_turn_event()` / turn audit | Already used by chat turns. Non-chat turns write the same `bot_turns` row. |
+
+**Leave alone — do NOT reuse:**
+
+| Function | Why |
+|---|---|
+| `_run_agentic()` (all of it) | Tightly coupled: message claiming, step skeleton, outbound send, OOB checking, reaction extraction, inbound queue finalization. Non-chat prep/debrief need none of this. |
+| `_finalize_turn_atomically()` | Hard-wired to inbound message lifecycle. |
+| `_open_turn()` | Stamps `triggered_by_message_id`; non-chat needs `conversation_id` + `kind`. |
+| `_allowed_tools_for_step()` | Step-phase gating doesn't apply. |
+| `send_outbound()` / `_resolve_outbound_text()` | Outbound must be impossible in non-chat. |
+
+**Extract with modification:**
+
+| Function | Modification |
+|---|---|
+| `_open_turn()` | Fork into `_open_nonchat_turn()` that accepts `kind`, `conversation_id`, and skips `triggered_by_message_id`. |
+| `_complete_turn()` | Reusable as-is if the non-chat turn row has the same shape; just ensure `final_output_message_id` stays null and `tool_call_count` is set. |
+
+---
+
+## Minimal Contract for `run_agentic_nonchat_job`
+
+```python
+async def run_agentic_nonchat_job(
+    *,
+    kind: Literal["live_prep", "live_debrief"],
+    user: User,
+    scope: InboundScope,
+    conversation_id: UUID,
+    system_task: str,                      # injected into seed messages as the orienting task
+    allowed_tools_policy: set[str],        # flat set, already filtered (no outbound, no disallowed writes)
+    required_submit_tool: str,             # e.g. "submit_live_brief" or "submit_live_debrief"
+    max_tool_iterations: int,              # 100 for prep, 500 for debrief
+    additional_seed_context: list[dict],   # prep brief, transcript, notes, etc.
+    pool: Any | None = None,
+) -> tuple[UUID, dict]:                   # (turn_id, submit_tool_payload)
+```
+
+**Guarantees the caller must enforce:**
+- `allowed_tools_policy` is pre-filtered: no outbound, no schedule (for prep), no writes (for prep). The runner trusts the caller.
+- `required_submit_tool` is in `allowed_tools_policy`.
+- Spend cap is checked once before entering the loop; each `run_step` call re-checks via its existing guard.
+
+**Internal behavior:**
+1. Open a `bot_turns` row with `trigger_metadata.kind = kind` and `conversation_id`.
+2. Build `TurnContext` from scope + user + bot_spec (no partner resolution unless the bot is dyadic and the debrief needs it — debrief specs suggest partner may be needed for dyad context).
+3. Build hot context + seed messages including `system_task` and `additional_seed_context`.
+4. Call `run_step()` in a loop (single pseudo-step: no `turn_plan` phase progression) with `max_tool_iterations` as the cap.
+5. After `run_step` returns, scan `messages` for a `tool_use` block matching `required_submit_tool`. Extract its input as the submit payload.
+6. If the submit tool was not called: synthesize orphan stubs, log `tool_submit_missing`, set `failure_reason`, and raise a specific error.
+7. On success: complete the turn row, persist the artifact, and return `(turn_id, submit_payload)`.
+
+**Failure modes:**
+- Spend cap hit → turn row gets `failure_reason=spend_cap`, no artifact written, retryable.
+- Submit tool not called → `failure_reason=tool_submit_missing`, retryable with correction prompt.
+- Provider chain exhausted → `failure_reason=llm_phase_failed`, retryable.
+- Bounded loop exceeded without submit → `failure_reason=tool_cap_exhausted_no_submit`, retryable.

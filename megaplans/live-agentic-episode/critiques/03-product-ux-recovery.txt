@@ -1,0 +1,61 @@
+## Critique: User-Facing States & Failure/Recovery Flows
+
+### Top 5 UX/Recovery Risks
+
+**1. Prep latency has no visible bridge between "submitted" and "ready"**
+
+Sprint 2 leaves prep execution mode as an open question ("prefer synchronous initially"), but agentic prep with 100 tool calls can easily take 30–120s. The current `POST /api/live/sessions` returns `status: "ready"` synchronously — there's no `preparing` response, no polling contract, and `AgendaCard` has only a binary loaded/error state with the static text "Catching up on where you are…". If prep goes async in Sprint 2, the UI breaks; if it stays sync, the user stares at a frozen screen.
+
+**2. Debrief has no user-facing progress and the review screen blocks blindly**
+
+Sprint 3 prefers background/polling for a 500-tool-cap debrief that could run minutes, but the current `POST /api/live/sessions/{id}/end` is synchronous and `ReviewScreen` receives a complete `SessionReview` prop — no loading state, no polling, no "debriefing…" indicator. `LiveScreen.handleEnd()` calls `onEnd()` immediately without waiting. A 3-minute debrief on the backend means the user hits "Stop" and sees… nothing, or a stale review, with no feedback.
+
+**3. Failed prep leaves the user in an unrecoverable dead-end between Sprint 2 and Sprint 4**
+
+Sprint 2's done criteria say "missing `submit_live_brief` fails visibly," but retry endpoints and `prep_failed` status only land in Sprint 4. Between S2 and S4, a failed prep creates a session stuck in `preparing` with no endpoint to retry or delete it. The current `AgendaCard` shows a generic error + "Back" — no retry button, no visibility into *why* prep failed, no path forward. That's a multi-sprint gap where every prep failure is a dead session.
+
+**4. Old conversations without artifacts silently break both AgendaCard and ReviewScreen**
+
+Sprint 4's backward-compat requirement ("existing sessions without artifacts still load") arrives last, but the gap is live from Sprint 1 onward. `AgendaCard` expects `items` on every `SessionCardPayload`; `ReviewScreen` expects `what_heard`, `what_decided`, etc. Sessions created before artifact schemas land (or during migration gaps) will hit empty arrays at best, rendering errors at worst. The "fallback views" strategy is mentioned but not designed — there's no artifact-existence query or graceful degradation path.
+
+**5. Sprint 4 is overloaded — status system, dual retry flows, debug endpoint, metrics, backward compat, docs**
+
+S4's scope spans: 8 status states, prep/debrief progress UI, retry endpoints for two different failure modes, an operator debug endpoint, structured metrics/logging, backward-compat loading, *and* docs. That's three distinct feature threads (UX, ops, compat) crammed into one sprint. The risk is that UI states (`debriefing`, `prep_failed`) get implemented without the necessary polling/WebSocket push infrastructure, creating brittle half-solutions.
+
+---
+
+### Missing Status/API States
+
+| Gap | What's Missing |
+|---|---|
+| **`preparing` response contract** | `POST /api/live/sessions` always returns `status: "ready"`. No response shape for async prep (e.g., `status: "preparing"` with an `estimate_sec` or a directive to poll). |
+| **Polling endpoint for prep status** | `GET /api/live/sessions/{id}/card` has no `preparing`-specific response — it would return 404 or a partial card. Need a lightweight status endpoint or a `status` field the UI can switch on. |
+| **`debriefing` status in review endpoint** | `GET /api/live/sessions/{id}/review` and `POST .../end` have no `debriefing` response shape. The UI can't render "Putting together your review…" |
+| **WebSocket prep/debrief push events** | The WS protocol has `phase`/`ready`/`bot_turn`/`bot_turn_error` but no `prep_progress`, `prep_complete`, `debrief_progress`, or `debrief_complete` event types. |
+| **Retry endpoints** | No `POST .../retry-prep` or `POST .../retry-debrief` — these only land in Sprint 4. |
+| **`prep_failed`/`debrief_failed` detail** | No API payload to communicate *why* prep/debrief failed (tool budget exhausted? missing submit? model error?). The UI can only show a generic error. |
+| **Abandoned session cleanup** | Open question in S4 about whether failed prep leaves an empty row — no `DELETE .../sessions/{id}` or cancel flow. |
+| **Artifact existence query** | No endpoint or field to distinguish "old session, no artifacts" from "new session, artifacts pending." The UI needs this to pick the right fallback view. |
+
+---
+
+### Suggested Sprint Split & Done Criteria Changes
+
+**Pull forward from Sprint 4 into Sprint 2:**
+- Add `preparing`/`prep_failed` status transitions and the `/api/live/sessions/{id}/card` contract for those states.
+- Add the Prep Retry endpoint (`POST .../retry-prep`) as part of S2's done criteria — waiting until S4 means every S2-S3 deploy has no recovery path.
+- Add a minimal `AgendaCard` loading/progress state that polls when status is `preparing`.
+
+**Pull forward from Sprint 4 into Sprint 3:**
+- Add `debriefing`/`debrief_failed` status transitions and review endpoint contracts.
+- Add the Debrief Retry endpoint as part of S3's done criteria.
+- Add a `ReviewScreen` loading state for `debriefing` with polling.
+- Add WebSocket push events for `debrief_progress`/`debrief_complete` so the LiveScreen→ReviewScreen transition isn't blind.
+
+**What Sprint 4 should then focus on:**
+- Backward-compat for old conversations (the fallback view logic, artifact-existence gating).
+- Operator debug endpoint and metrics/logging.
+- Docs/runbook.
+- Edge-case polish (retry idempotency, artifact revision linking, partner-shared debrief visibility).
+
+**Chain configuration nit:** `on_failure: abort: stop_chain` means one sprint failure kills all downstream work. Given S4 depends on S2/S3 for the recovery endpoints it's meant to polish, consider `on_failure: continue_chain` with a reviewer gate, or at minimum allow individual sprint retry without full chain abort.

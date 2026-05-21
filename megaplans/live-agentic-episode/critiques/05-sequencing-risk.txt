@@ -1,0 +1,58 @@
+## Sequencing Review: Live Agentic Episode Chain
+
+### Top 5 Sequencing Risks (ordered by blast radius)
+
+**1. M3 is a two-sprint milestone masquerading as one.** The debrief brief packs together (a) building the full debrief runner with input bundle construction, (b) the `submit_live_debrief` terminal tool, (c) provenance-linking *every* durable write type (memories, observations, distillations, commitments, events, scheduled jobs, topic status), and (d) retrofitting tool return payloads that don't expose created IDs. The provenance requirement alone — "If existing tool return payloads do not expose created IDs consistently, fix only the necessary return payloads in this sprint" — is a cross-cutting surgery touching every durable write tool. That's its own 1-2 week sprint. Combined with the debrief runner, M3 is easily 3-4 weeks of work.
+
+**2. M1 schema lock-in cascades into M2/M3/M4 with no rework buffer.** The `artifact_links` design (target_table/text + target_id/uuid) and the `bot_turns.conversation_id` decision are load-bearing for the entire chain. If artifact_links proves awkward against polymorphic durable write targets, or if payload_version is deferred and then needed, the rework hits M3's provenance phase hardest — which has no slack. The chain has `on_failure: stop_chain` and no intermediate validation gate between M1 and M2.
+
+**3. Prep sync/async ambiguity in M2 is an architectural fork, not a detail.** M2 says prep runs synchronously "initially if latency is acceptable" but preserves `preparing` status for long prep. This decision ripples into session creation API shape, UI loading states, error handling, and the M4 UX flows. If sync is chosen but agentic prep routinely takes 10-30s, the UX team in M4 must retrofit async polling under time pressure. This should be locked before M2 starts.
+
+**4. M4 is a catch-all dump (UI + retry + debug + metrics + docs + backward compat).** The debug endpoint alone asks for "related bot turns by conversation_id or metadata, artifacts by type/version, artifact links, tool call counts and failure classes" — that's a non-trivial API surface. Combine with UI status flows, retry endpoints, metrics/logging, runbook docs, and backward-compat testing, and M4 is optimistically 3 weeks of work in one 2-week box. Something gets cut, and it's usually operational visibility (metrics/debug) — precisely what you need when the new agentic flow ships.
+
+**5. No integration/e2e sprint before productization.** The chain goes directly from "debrief works in unit tests" (M3 done criteria) to "full happy path works from persona selection through review" (M4 done criteria). If debrief has integration issues with the live session lifecycle — trigger timing, status transitions, concurrent session handling, transcript availability — M4 inherits them as bug fixes with no buffer. A dedicated hardening sprint between feature work and productization would catch these.
+
+---
+
+### Verdict: 4 milestones → 5
+
+The chain should become **5 milestones**. The natural split:
+
+| # | Label | Scope |
+|---|-------|-------|
+| M1 | `artifacts-contract` | Schema, helpers, non-chat turn contract *(unchanged)* |
+| M2 | `agentic-live-prep` | Private selected-bot prep, `submit_live_brief` *(unchanged)* |
+| M3 | `agentic-live-debrief` | Debrief runner, `submit_live_debrief`, input bundle, status transitions, **no systematic provenance linking** |
+| M4 | `provenance-durable-writes` | Audit all durable write tool return payloads, ensure ID exposure, build systematic artifact→durable linking layer, tests per relation type |
+| M5 | `productization-recovery` | UI states, retry endpoints, debug endpoint, metrics, backward compat, docs *(slimmed from original M4)* |
+
+This gives each sprint a coherent theme and prevents provenance-linking from being a hidden subproject inside debrief.
+
+---
+
+### Specific Edits
+
+**1. Chain-level anti-scope (add to chain.yaml or README):**
+
+```yaml
+# Add after merge_policy in chain.yaml
+anti_scope:
+  - "No STT/TTS provider changes."
+  - "No new durable knowledge primitives (memories, observations, distillations remain the only targets)."
+  - "No multi-party live calls."
+  - "No full React UI redesign — only status/progress/retry surfaces."
+  - "No OAuth/auth changes."
+  - "No auto-deletion of failed conversations."
+```
+
+**2. M3 scope cut (remove provenance from M3):**
+
+Strike from M3 "In:" the line about linking durable writes and the "Provenance Requirement" section entirely. Move them to new M4. Change M3 done criteria from "Debrief can write at least one memory/observation in tests and link it to the debrief artifact" to "Debrief can write at least one memory/observation in tests" — linking is M4's concern.
+
+**3. M2 lock the sync/async decision:**
+
+Add to M2 "Locked Decisions": "Prep runs asynchronously: POST /api/live/sessions creates session in `preparing` status and returns immediately. Client polls or receives WebSocket/SSE status updates. Synchronous prep is explicitly out of scope." This removes the architectural fork and lets M4 UX be designed for async from the start.
+
+**4. M4 rescue (if staying at 4 milestones — fallback position):**
+
+If the chain *must* stay 4 milestones, cut M3's provenance requirement to a single durable write type (memories only) and declare all other link types out-of-scope for the chain. But strongly prefer 5 milestones.

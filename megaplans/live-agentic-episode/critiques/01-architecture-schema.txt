@@ -1,0 +1,84 @@
+I've read all five documents. Here's my adversarial architecture review.
+
+---
+
+## Top 5 Risks (by severity)
+
+### 1. **CRITICAL — Polymorphic `artifact_links` has zero referential integrity**
+`target_table` is a free-text field paired with a UUID `target_id`. There is no FK constraint on the target — you cannot enforce that `target_id` actually exists in `target_table`. This is the classic polymorphic-association anti-pattern. Consequences:
+
+- **Dangling references accumulate silently.** If a memory/observation/event is deleted, the link rots with no error.
+- **Table renames break links invisibly.** No migration will warn you that `artifact_links` still references the old table name.
+- **Queryability is crippled.** You cannot write a single JOIN — every consumer must branch on `target_table` or use dynamic SQL.
+- **The `relation` column overlaps semantically with `target_table`** (e.g., `extracted_memory` implies `target_table = 'memories'`), creating denormalized redundancy that will drift.
+
+**Severity: Critical.** This will cause data integrity failures within weeks of production use.
+
+### 2. **CRITICAL — Missing `payload_version` despite brief explicitly preferring it**
+The open question in M1 says "Prefer yes if migration/test scope stays contained." The proposed schema omits it entirely. Without versioned payloads:
+
+- Evolving `live_debrief` or `live_prep_brief` shapes requires guessing which version a row holds.
+- Every consumer must defensively handle unknown shapes (or crash).
+- Backfills become lossy — you can't distinguish v1 from v2 rows during migration.
+- This is already needed in Sprint 3 when the debrief payload shape is defined (`what_heard`, `what_decided`, etc.) — that shape *will* change.
+
+**Severity: Critical.** This is the cheapest column to add now and the most expensive to retrofit.
+
+### 3. **HIGH — `bot_turns` ↔ `conversations` linkage is unresolved**
+The open question asks whether to add a `conversation_id` column to `bot_turns` or keep it buried in `trigger_metadata` (JSON). The brief says "Prefer the column if it is low-risk." It is unequivocally low-risk — a nullable FK column with an index. But the decision is not locked.
+
+If `conversation_id` stays only in JSON:
+- "Find all bot_turns for this conversation" requires GIN-indexed JSON path queries, which are slow and opaque.
+- Sprint 4's debug endpoint (show related bot turns by `conversation_id`) becomes expensive.
+- Joining `conversation_artifacts.created_by_turn_id` back to conversations requires two hops through a JSON field.
+
+**Severity: High.** This blocks clean implementation in Sprints 2–4.
+
+### 4. **HIGH — No artifact revision/versioning model for retries**
+Sprint 4 states retries create "a new artifact revision; old artifacts remain auditable." But `conversation_artifacts` has no `revision_number`, `is_current`, or `superseded_by` column. Consumers (review UI, APIs) have no reliable way to determine which artifact is the current one. Sorting by `MAX(created_at)` is fragile — simultaneous retries, clock skew, or backfilled historical artifacts will break it.
+
+**Severity: High.** This is a guaranteed bug in Sprint 4's review screen fallback logic.
+
+### 5. **MEDIUM — `artifact_links` PK prevents multiple evidence records per link**
+The PK is `(artifact_id, target_table, target_id, relation)`. If a debrief extracts two separate transcript quotes as evidence for the same memory, you can only store one row. You could pack both into `evidence jsonb` as an array, but then you lose the ability to query or reference individual evidence items. Sprint 3 explicitly requires "cite transcript evidence for durable claims" — multiple citations per claim is the normal case, not the edge case.
+
+**Severity: Medium.** Workaroundable with arrays, but degrades queryability of evidence.
+
+---
+
+## Concrete Changes to the Chain/Briefs
+
+1. **`m1-artifacts-contract.md` — Schema changes:**
+   - Add `payload_version integer not null default 1` to `conversation_artifacts`.
+   - Add `revision_number integer not null default 1` to `conversation_artifacts`, with a unique constraint on `(conversation_id, artifact_type, revision_number)`.
+   - Relax `artifact_links` PK to `(artifact_id, target_table, target_id, relation, id)` with a surrogate `id uuid` PK, or add a `sub_index smallint` to allow multiple evidence rows per target. Define `evidence jsonb` schema: `{ transcript_turn_ids: uuid[], quotes: text[], confidence: float }`.
+   - Add a `CHECK` constraint on `artifact_links.target_table` restricting to the known set (`mediator.memories`, `mediator.observations`, etc.).
+   - Change `bot_id text` to `bot_id uuid` (or consistently `text` with a comment explaining why). Add FK reference to `user_id`.
+
+2. **`m2-agentic-live-prep.md` — Lock the `bot_turns.conversation_id` decision:**
+   - Add to Locked Decisions: "`mediator.bot_turns` gains a nullable `conversation_id uuid references mediator.conversations(id)`. Indexed. Populated for all prep/debrief/in-call turns."
+   - Strike the open question about it; the answer is settled.
+
+3. **`m3-agentic-live-debrief.md` — Specify evidence structure:**
+   - Add to Debrief Input Bundle: "Evidence citations must use structured references: `{turn_id, quote, confidence}`."
+   - Add to Provenance Requirement: "Each `artifact_links` row may appear multiple times per target with distinct evidence (transcript citations)."
+
+4. **`m4-productization-recovery.md` — Clarify current-artifact resolution:**
+   - Add to Locked Decisions: "Current artifact per type is `MAX(revision_number)` within `conversation_id, artifact_type`, not `MAX(created_at)`."
+
+---
+
+## Schema Invariants to Lock Before Sprint 1
+
+| # | Invariant | Rationale |
+|---|-----------|-----------|
+| 1 | `conversation_artifacts` rows are **immutable after creation** (except `revision_number` for retry disambiguation) | Enables auditability; retries create new rows, never mutate |
+| 2 | `artifact_links` is **append-only** — no UPDATE, no DELETE except cascade from artifact/conversation | Provenance must be lossless |
+| 3 | Every `bot_turn` with a non-chat `kind` MUST have `conversation_id` populated | Queryability invariant for Sprints 2–4 |
+| 4 | `artifact_type` is an **enum or CHECK-constrained text**, never free-form | Prevents type drift across the codebase |
+| 5 | `payload_version` is required on INSERT and must match a known version map | Consumers can branch on version safely |
+| 6 | All FK relationships use `ON DELETE CASCADE` from `conversations` → `conversation_artifacts` → `artifact_links` | Already specified; must be enforced in migration |
+| 7 | No artifact may reference a `conversation_id` that is not in `mediator.conversations` | Already specified via FK; validates the root-boundary invariant |
+| 8 | `artifact_links.target_table` is restricted to a closed set of durable tables | Prevents the polymorphic field from silently accepting garbage |
+
+These eight invariants, locked before Sprint 1 code is written, will prevent the five risks above from becoming production incidents. The two critical fixes (payload versioning and `artifact_links` referential integrity hardening) are one migration column and one CHECK constraint — cheap now, ruinous later.

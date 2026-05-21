@@ -1,0 +1,62 @@
+base_branch: main
+
+milestones:
+  - label: m1-artifacts-contract
+    idea: /Users/peteromalley/Documents/Veas/megaplans/live-agentic-episode/m1-artifacts-contract.md
+    branch: epic/live-agentic-episode-m1-artifacts-contract
+    profile: partnered
+    robustness: full
+    depth: medium
+    notes: "Foundation sprint: schema, provenance, non-chat turn contracts. Dialed down to partnered/full/medium; escalate if schema invariants start drifting."
+
+  - label: m2-agentic-live-prep
+    idea: /Users/peteromalley/Documents/Veas/megaplans/live-agentic-episode/m2-agentic-live-prep.md
+    branch: epic/live-agentic-episode-m2-agentic-live-prep
+    profile: directed
+    robustness: full
+    depth: medium
+    notes: "Replace shallow prep with private selected-bot agentic prep using normal hot context/tools and submit_live_brief."
+
+  - label: m3-agentic-live-debrief
+    idea: /Users/peteromalley/Documents/Veas/megaplans/live-agentic-episode/m3-agentic-live-debrief.md
+    branch: epic/live-agentic-episode-m3-agentic-live-debrief
+    profile: partnered
+    robustness: full
+    depth: medium
+    notes: "Private post-session debrief with durable writes, scheduling, feature flagging, and high tool budget. Systematic provenance linking lands in m4."
+
+  - label: m4-provenance-durable-writes
+    idea: /Users/peteromalley/Documents/Veas/megaplans/live-agentic-episode/m4-provenance-durable-writes.md
+    branch: epic/live-agentic-episode-m4-provenance-durable-writes
+    profile: partnered
+    robustness: full
+    depth: medium
+    notes: "Audit durable write tool return payloads, expose created IDs consistently, and link debrief-created durable records to conversation artifacts."
+
+  - label: m5-productization-recovery
+    idea: /Users/peteromalley/Documents/Veas/megaplans/live-agentic-episode/m5-productization-recovery.md
+    branch: epic/live-agentic-episode-m5-productization-recovery
+    profile: directed
+    robustness: full
+    depth: low
+    notes: "UI/ops/retry/recovery polish and backwards-compatible rollout."
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+merge_policy: review
+
+anti_scope:
+  - "No STT/TTS provider changes."
+  - "No new durable knowledge primitives."
+  - "No multi-party live calls beyond existing solo/dyad shape."
+  - "No full React UI redesign; only status, progress, retry, and review surfaces."
+  - "No OAuth/auth changes."
+  - "No auto-deletion of failed conversations."
+
+driver:
+  robustness: full
+  auto_approve: true
+  max_iterations: 80
+  poll_sleep: 8.0
