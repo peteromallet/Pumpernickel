@@ -101,6 +101,18 @@ def _summary_list_all_reminders(
     return f"list_all_reminders count={len(items)} ({kind_summary})"
 
 
+def _summary_submit_live_brief(
+    args: dict[str, Any], result: dict[str, Any]
+) -> str | None:
+    agenda = args.get("agenda") or {}
+    items = agenda.get("items") or []
+    has_notes = bool(args.get("notes"))
+    return (
+        f"submit_live_brief item_count={len(items)}"
+        f"{' notes_present' if has_notes else ''}"
+    )
+
+
 def _summary_send_message_part(
     args: dict[str, Any], result: dict[str, Any]
 ) -> str | None:
@@ -185,6 +197,7 @@ def _summary_list_recent_turns(
 TOOL_SUMMARIZERS: dict[
     str, Callable[[dict[str, Any], dict[str, Any]], str | None]
 ] = {
+    "submit_live_brief": _summary_submit_live_brief,
     "schedule_task": _summary_schedule_task,
     "schedule_checkin": _summary_schedule_checkin,
     "list_scheduled_tasks": _summary_list_scheduled_tasks,

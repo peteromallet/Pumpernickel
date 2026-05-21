@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-TurnStep = Literal["read", "consult", "respond", "record", "schedule", "done"]
+TurnStep = Literal["read", "consult", "respond", "record", "schedule", "done", "live_prep"]
 SkeletonName = Literal["quick_reply", "standard", "charged", "crisis", "silence_or_react"]
 
 SKELETONS: dict[SkeletonName, list[TurnStep]] = {
@@ -25,6 +25,7 @@ STEP_LABELS: dict[TurnStep, str] = {
     "record": "record durable state",
     "schedule": "schedule follow-up if warranted",
     "done": "done",
+    "live_prep": "live prep",
 }
 
 STEP_ORDER: dict[TurnStep, int] = {
@@ -34,6 +35,7 @@ STEP_ORDER: dict[TurnStep, int] = {
     "record": 3,
     "schedule": 4,
     "done": 5,
+    "live_prep": -1,
 }
 
 ACK_TEXTS = {

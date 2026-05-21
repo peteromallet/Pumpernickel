@@ -15,6 +15,7 @@ TODOs intentionally left in place:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -23,11 +24,16 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from app.bots.registry import BOT_SPECS, _maybe_register_staging_bots
+from app.bots.registry import BOT_SPECS, _maybe_register_staging_bots, primary_topic_id_for
 from app.config import get_settings
 from app.db import get_pool
 from app.services.auth import jwt as live_jwt
-from app.services.live.prep import produce_agenda, select_agenda_producer
+from app.services.live.prep import (
+    produce_agenda,
+    retry_live_prep,
+    run_live_prep_agentic_job,
+    select_agenda_producer,
+)
 from app.services.live.rate_limit import WS_RATE_LIMITER
 from app.services.live.schemas import PrepRequest, TurnRequest
 from app.services.live.stt import select_transcriber
@@ -103,6 +109,7 @@ class CreateSessionResponse(BaseModel):
     session_id: UUID
     mode: str
     status: str
+    prep_pending: bool = False
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -269,15 +276,15 @@ async def create_session(
     body: CreateSessionRequest,
     pool: Any = Depends(get_pool),
 ) -> CreateSessionResponse:
-    """Create a new live-voice conversation + run prep (Sprint 1).
+    """Create a new live-voice conversation + run prep (Sprint 2).
 
-    Calls :func:`app.services.live.prep.produce_agenda`, which inserts the
-    ``mediator.conversations`` row plus its ``conversation_items`` agenda
-    in a single transaction and seeds ``current_item_id``.
+    Inserts the ``mediator.conversations`` row in ``prepping`` status
+    up-front and returns immediately.  When ``LIVE_VOICE_PREP_PROVIDER=stub``
+    the legacy synchronous path is used instead (no async prep).
 
-    Sprint 1 uses :class:`StubAgendaProducer` (deterministic, no LLM key
-    required). Sprint 1b swaps in the real Anthropic Opus producer — same
-    call site, only the producer changes.
+    Agentic prep (default) schedules ``run_live_prep_agentic_job`` via
+    ``asyncio.create_task``.  The client polls ``/card`` to observe
+    ``prepping`` → ``ready`` or ``prep_failed``.
     """
     if not await _conversations_table_exists(pool):
         raise HTTPException(
@@ -295,27 +302,107 @@ async def create_session(
             detail=f"unknown bot_id={body.bot_id!r}; known: {known}",
         )
 
+    bot_spec = BOT_SPECS[body.bot_id]
     user_id = _resolve_test_user_id()  # TODO: replace with auth.uid() once magic-link lands.
-    request = PrepRequest(
-        user_id=str(user_id),
-        bot_id=body.bot_id,
-        steering_text=body.steering_text,
-        topic_slug=body.topic,
-    )
-    try:
-        result = await produce_agenda(pool, request, producer=select_agenda_producer())
-    except Exception as exc:
-        logger.exception("live_voice: prep failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"failed to prep live session: {exc}",
-        ) from exc
-
+    session_id = uuid4()
     mode = "steered" if (body.steering_text or "").strip() else "open"
+    steering = body.steering_text
+
+    # Resolve topic_id from the bot's primary_topic_slug.
+    topic_id: UUID | None = None
+    try:
+        topic_id = await primary_topic_id_for(pool, bot_spec)
+    except Exception:
+        logger.warning(
+            "live_voice: could not resolve primary topic for bot_id=%s, "
+            "leaving topic_id=NULL",
+            body.bot_id,
+        )
+
+    # Insert the conversations row in 'prepping' status up-front.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO mediator.conversations
+                    (id, user_id, bot_id, mode, steering_text, status,
+                     prep_summary, current_item_id, topic_id)
+                VALUES ($1, $2, $3, $4, $5, 'prepping', NULL, NULL, $6)
+                """,
+                session_id,
+                user_id,
+                body.bot_id,
+                mode,
+                steering,
+                topic_id,
+            )
+
+    # Determine the prep path.
+    producer = select_agenda_producer()
+
+    if producer is not None:
+        # Legacy synchronous path (stub, anthropic, or deepseek override).
+        request = PrepRequest(
+            user_id=str(user_id),
+            bot_id=body.bot_id,
+            steering_text=steering,
+            topic_slug=body.topic,
+        )
+        try:
+            result = await produce_agenda(pool, request, producer=producer)
+        except Exception as exc:
+            logger.exception("live_voice: legacy prep failed")
+            # Mark the session as prep_failed.
+            try:
+                from app.services.live.prep import _set_prep_failed
+                await _set_prep_failed(pool, session_id, str(exc))
+            except Exception:
+                logger.warning("live_voice: failed to mark prep_failed", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to prep live session: {exc}",
+            ) from exc
+        return CreateSessionResponse(
+            session_id=UUID(result.session_id),
+            mode=mode,
+            status="ready",
+            prep_pending=False,
+        )
+
+    # Agentic async path (default) — schedule background prep.
+    async def _background_prep() -> None:
+        try:
+            await run_live_prep_agentic_job(
+                conversation_id=session_id,
+                user_id=user_id,
+                bot_id=body.bot_id,
+                steering_text=steering,
+                topic_id=topic_id,
+                pool=pool,
+            )
+        except Exception:
+            logger.exception(
+                "live_voice: background prep crashed for session_id=%s",
+                session_id,
+            )
+            try:
+                from app.services.live.prep import _set_prep_failed
+                await _set_prep_failed(
+                    pool, session_id, "background prep task crashed"
+                )
+            except Exception:
+                logger.warning(
+                    "live_voice: failed to mark prep_failed after crash",
+                    exc_info=True,
+                )
+
+    asyncio.create_task(_background_prep())
+
     return CreateSessionResponse(
-        session_id=UUID(result.session_id),
+        session_id=session_id,
         mode=mode,
-        status="ready",
+        status="prepping",
+        prep_pending=True,
     )
 
 
@@ -324,7 +411,8 @@ async def get_session_card(session_id: UUID, pool: Any = Depends(get_pool)) -> d
     """Return the session card payload: prep_summary + items grouped by theme.
 
     The session card is what the user sees before pressing Start; the raw
-    agenda is never exposed. See ``docs/live-conversation-mode.md`` §UI.
+    agenda is never exposed.  Handles ``prepping`` / ``prep_failed`` / ``ready``
+    statuses (Sprint 2).
     """
     if not await _conversations_table_exists(pool):
         raise HTTPException(status_code=503, detail="live conversations not yet migrated")
@@ -332,7 +420,7 @@ async def get_session_card(session_id: UUID, pool: Any = Depends(get_pool)) -> d
     conv = await pool.fetchrow(
         """
         SELECT id, user_id, bot_id, mode, status, prep_summary,
-               current_item_id, started_at
+               current_item_id, started_at, session_fields
         FROM mediator.conversations
         WHERE id = $1
         """,
@@ -341,6 +429,41 @@ async def get_session_card(session_id: UUID, pool: Any = Depends(get_pool)) -> d
     if conv is None:
         raise HTTPException(status_code=404, detail="session not found")
 
+    status = conv["status"]
+
+    # Prepping: return pending flag, empty items.
+    if status == "prepping":
+        return {
+            "session_id": str(conv["id"]),
+            "bot_id": conv["bot_id"],
+            "mode": conv["mode"],
+            "status": "prepping",
+            "prep_pending": True,
+            "prep_summary": None,
+            "current_item_id": None,
+            "items": [],
+            "failure_reason": None,
+        }
+
+    # Prep failed: return failure reason from session_fields, empty items.
+    if status == "prep_failed":
+        failure_reason: str | None = None
+        sf = conv["session_fields"] or {}
+        if isinstance(sf, dict):
+            failure_reason = sf.get("prep_error")
+        return {
+            "session_id": str(conv["id"]),
+            "bot_id": conv["bot_id"],
+            "mode": conv["mode"],
+            "status": "prep_failed",
+            "prep_pending": False,
+            "prep_summary": None,
+            "current_item_id": None,
+            "items": [],
+            "failure_reason": failure_reason,
+        }
+
+    # Ready: existing behaviour (unchanged).
     items = await pool.fetch(
         """
         SELECT ci.id, ci.title, ci.intent, ci.ask, ci.done_when,
@@ -362,6 +485,7 @@ async def get_session_card(session_id: UUID, pool: Any = Depends(get_pool)) -> d
         "status": conv["status"],
         "prep_summary": conv["prep_summary"],
         "current_item_id": str(conv["current_item_id"]) if conv["current_item_id"] else None,
+        "prep_pending": False,
         "items": [
             {
                 "id": str(row["id"]),
@@ -381,6 +505,74 @@ async def get_session_card(session_id: UUID, pool: Any = Depends(get_pool)) -> d
             }
             for row in items
         ],
+        "failure_reason": None,
+    }
+
+
+@router.post("/api/live/sessions/{session_id}/prep/retry")
+async def retry_prep(
+    session_id: UUID,
+    pool: Any = Depends(get_pool),
+) -> dict[str, Any]:
+    """Retry a failed live-prep session.
+
+    Only accepts sessions in ``prep_failed`` status (409 otherwise).
+    Resets status to ``prepping`` and schedules a new agentic prep task.
+    """
+    if not await _conversations_table_exists(pool):
+        raise HTTPException(status_code=503, detail="live conversations not yet migrated")
+
+    row = await pool.fetchrow(
+        "SELECT id, status FROM mediator.conversations WHERE id = $1",
+        session_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    if row["status"] != "prep_failed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot retry prep for session in status={row['status']!r}; "
+                f"only 'prep_failed' sessions are retryable"
+            ),
+        )
+
+    # Update to 'prepping' so the retry can proceed.
+    await pool.execute(
+        "UPDATE mediator.conversations SET status = 'prepping' WHERE id = $1",
+        session_id,
+    )
+
+    # Schedule the retry as a background task.
+    async def _background_retry() -> None:
+        try:
+            await retry_live_prep(
+                conversation_id=session_id,
+                pool=pool,
+            )
+        except Exception:
+            logger.exception(
+                "live_voice: background retry prep crashed for session_id=%s",
+                session_id,
+            )
+            try:
+                from app.services.live.prep import _set_prep_failed
+                await _set_prep_failed(
+                    pool, session_id, "background retry task crashed"
+                )
+            except Exception:
+                logger.warning(
+                    "live_voice: failed to mark prep_failed after retry crash",
+                    exc_info=True,
+                )
+
+    asyncio.create_task(_background_retry())
+
+    return {
+        "session_id": str(session_id),
+        "status": "prepping",
+        "prep_pending": True,
     }
 
 
