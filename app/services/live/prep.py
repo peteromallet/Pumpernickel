@@ -36,6 +36,7 @@ from app.services.live.bot_profile import (
     live_bot_profile_context,
     user_from_live_row,
 )
+from app.services.topic_filter import join_artifact_topics
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,21 @@ class AgendaProducer(Protocol):
     async def __call__(self, request: PrepRequest, context: dict[str, Any]) -> Agenda: ...
 
 
-async def gather_prep_context(pool: Any, user_id: UUID, bot_id: str) -> dict[str, Any]:
+def _record_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except Exception:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
+
+
+async def gather_prep_context(
+    pool: Any,
+    user_id: UUID,
+    bot_id: str,
+    topic_id: UUID | None = None,
+) -> dict[str, Any]:
     """Collect the inputs Opus needs to build a useful agenda.
 
     Pulls:
@@ -131,42 +146,74 @@ async def gather_prep_context(pool: Any, user_id: UUID, bot_id: str) -> dict[str
         context["bot_profile"] = live_bot_profile_context(bot_id)
 
     try:
+        topic_join = join_artifact_topics("t", "$2") if topic_id is not None else ""
+        topic_args = (topic_id,) if topic_id is not None else ()
         themes = await pool.fetch(
-            """
-            SELECT id, slug, label
-            FROM themes
-            WHERE user_id = $1 AND bot_id = $2
-            ORDER BY updated_at DESC NULLS LAST, created_at DESC
+            f"""
+            SELECT t.id, t.title, t.description, t.status, t.sentiment, t.health,
+                   t.last_reinforced_at, t.last_active_at, t.updated_at
+            FROM themes t
+            {topic_join}
+            WHERE t.status = 'active'
+              AND (t.recorded_by_bot_id = $1 OR t.recorded_by_bot_id IS NULL)
+            ORDER BY COALESCE(t.last_reinforced_at, t.last_active_at, t.updated_at, t.first_seen_at) DESC
             LIMIT 20
             """,
-            user_id,
             bot_id,
+            *topic_args,
         )
         context["themes"] = [
-            {"id": str(t["id"]), "slug": t["slug"], "label": t["label"]} for t in themes
+            {
+                "id": str(t["id"]),
+                "title": t["title"],
+                "description": t["description"],
+                "status": t["status"],
+                "sentiment": t["sentiment"],
+                "health": t["health"],
+            }
+            for t in themes
         ]
     except Exception:
         logger.info("prep: themes table not queryable for this user/bot", exc_info=True)
         context["themes"] = []
 
     try:
+        topic_join = join_artifact_topics("d", "$3") if topic_id is not None else ""
+        topic_args = (topic_id,) if topic_id is not None else ()
         distillations = await pool.fetch(
-            """
-            SELECT id, content, kind, theme_id, created_at
-            FROM distillations
-            WHERE user_id = $1 AND bot_id = $2
-            ORDER BY created_at DESC
+            f"""
+            SELECT d.id, d.content, d.confidence, d.status, d.visibility,
+                   d.shareable_summary,
+                   COALESCE(d.related_theme_ids, '{{}}'::uuid[]) AS related_theme_ids,
+                   d.updated_at, d.created_at,
+                   COALESCE(d.recorded_by_bot_id, tm.bot_id) AS visibility_bot_id
+            FROM distillations d
+            LEFT JOIN messages tm ON tm.id = d.triggering_message_id
+            {topic_join}
+            WHERE d.status = 'active'
+              AND d.source_user_ids && ARRAY[$1]::uuid[]
+              AND (
+                    COALESCE(d.recorded_by_bot_id, tm.bot_id) = $2
+                    OR COALESCE(d.recorded_by_bot_id, tm.bot_id) IS NULL
+                  )
+            ORDER BY d.updated_at DESC, d.created_at DESC
             LIMIT 20
             """,
             user_id,
             bot_id,
+            *topic_args,
         )
         context["distillations"] = [
             {
                 "id": str(d["id"]),
                 "content": d["content"],
-                "kind": d.get("kind"),
-                "theme_id": str(d["theme_id"]) if d["theme_id"] else None,
+                "confidence": _record_value(d, "confidence"),
+                "visibility": _record_value(d, "visibility"),
+                "shareable_summary": _record_value(d, "shareable_summary"),
+                "related_theme_ids": [
+                    str(theme_id)
+                    for theme_id in (_record_value(d, "related_theme_ids", []) or [])
+                ],
             }
             for d in distillations
         ]
@@ -256,7 +303,7 @@ async def run_live_prep_agentic_job(
     user = user_from_live_row(user_id, user_row)
 
     # ── 4. Gather prep context (themes, distillations, bot profile) ─────
-    context = await gather_prep_context(pool, user_id, bot_id)
+    context = await gather_prep_context(pool, user_id, bot_id, topic_id=topic_id)
 
     # ── 5. Resolve bot spec ─────────────────────────────────────────────
     try:
@@ -678,7 +725,7 @@ async def produce_agenda(
     ``None`` (backward-compatible path), a new row is inserted.
     """
     user_uuid = UUID(request.user_id)
-    context = await gather_prep_context(pool, user_uuid, request.bot_id)
+    context = await gather_prep_context(pool, user_uuid, request.bot_id, topic_id=None)
 
     agenda = await producer(request, context)  # already schema-validated by the caller
 

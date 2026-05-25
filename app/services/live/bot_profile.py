@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from app.bots.registry import BOT_SPECS, get_bot_spec
+from app.config import get_settings
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ def live_bot_profile_context(
             assistant_name=spec.display_name,
             user=user,
             partner=partner,
-            prompt_version=spec.bot_spec_version,
+            prompt_version=get_settings().system_prompt_version,
         )
     except AttributeError:
         # DEBT-041: BotSpec.render_system_prompt accesses partner.name

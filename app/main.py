@@ -510,7 +510,7 @@ app.include_router(live_voice.router)
 app.include_router(auth_magic_link.router)
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 async def root() -> RedirectResponse:
     return RedirectResponse(url="/live/", status_code=307)
 
