@@ -194,7 +194,10 @@ async def sweep_orphaned_prepping(
             session_fields = COALESCE(session_fields, '{}'::jsonb)
                              || jsonb_build_object('prep_error', 'orphaned')
         WHERE status IN ('prepping', 'preparing')
-          AND created_at < $1
+          AND COALESCE(
+                (session_fields->>'prep_started_at')::timestamptz,
+                created_at
+              ) < $1
         """,
         cutoff,
     )

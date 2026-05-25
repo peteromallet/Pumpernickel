@@ -811,6 +811,10 @@ class TestMissingSubmit:
             "- 'prep_error' - 'prep_failure_reason'" in s
             for s in update_calls
         ), f"Expected retry to clear stale prep errors; got {update_calls}"
+        assert any(
+            "prep_started_at" in s
+            for s in update_calls
+        ), f"Expected retry to refresh prep_started_at; got {update_calls}"
 
     async def test_retry_rejects_non_prep_failed(self) -> None:
         """retry_live_prep raises ValueError for non-prep_failed sessions."""
@@ -853,8 +857,8 @@ class TestOrphanRecovery:
 
         for s, args in update_calls:
             sql_flat = s.replace("\n", " ")
-            assert "created_at <" in sql_flat, (
-                f"Expected 'created_at <' in sweep SQL: {sql_flat}"
+            assert "prep_started_at" in sql_flat and "created_at" in sql_flat, (
+                f"Expected sweep to use prep_started_at fallback: {sql_flat}"
             )
             assert ("prepping" in sql_flat or "preparing" in sql_flat), (
                 f"Expected 'prepping' or 'preparing' in WHERE filter: {sql_flat}"

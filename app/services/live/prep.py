@@ -500,7 +500,10 @@ async def retry_live_prep(
         "SET status = 'preparing', "
         "    session_fields = (COALESCE(session_fields, '{}'::jsonb) "
         "        - 'prep_error' - 'prep_failure_reason') "
-        "        || jsonb_build_object('retry_count', $2::int) "
+        "        || jsonb_build_object("
+        "            'retry_count', $2::int, "
+        "            'prep_started_at', now()"
+        "        ) "
         "WHERE id = $1",
         conversation_id,
         retry_number,
