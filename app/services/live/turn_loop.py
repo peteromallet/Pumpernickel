@@ -1,4 +1,4 @@
-"""Sprint 3 — Haiku per-turn caller.
+"""Sprint 3 — live per-turn caller.
 
 Contract (:class:`TurnCaller`): given a fresh user transcript, return one
 :class:`~app.services.live.schemas.TurnEmission`.  The orchestrator then
@@ -11,8 +11,9 @@ Ships two impls:
   current item, and notes a single "fact".  Wire protocol is identical to
   the real Haiku caller.
 * :class:`AnthropicHaikuTurnCaller` — calls Claude Haiku 4.5 with the
-  agenda prompt-cached.  Selected when ``LIVE_VOICE_TURN_PROVIDER=anthropic``
-  AND ``ANTHROPIC_API_KEY`` is a real key.  Schema-validated.
+  agenda prompt-cached.  Selected when ``LIVE_VOICE_TURN_PROVIDER=anthropic``.
+* :class:`DeepseekTurnCaller` — calls DeepSeek JSON mode.  Used as the
+  production fallback when Anthropic is present but unavailable.
 """
 
 from __future__ import annotations
@@ -42,6 +43,35 @@ class TurnCaller(Protocol):
     async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission: ...
 
 
+class FallbackTurnCaller:
+    """Try a primary turn caller, then a secondary caller before surfacing failure."""
+
+    def __init__(
+        self,
+        primary: TurnCaller,
+        fallback: TurnCaller,
+        *,
+        primary_name: str,
+        fallback_name: str,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.primary_name = primary_name
+        self.fallback_name = fallback_name
+
+    async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission:
+        try:
+            return await self.primary.call(request, context)
+        except Exception as exc:
+            logger.warning(
+                "turn_loop: %s turn caller failed; falling back to %s: %s",
+                self.primary_name,
+                self.fallback_name,
+                exc,
+            )
+            return await self.fallback.call(request, context)
+
+
 def select_turn_caller() -> "TurnCaller":
     provider = (os.environ.get("LIVE_VOICE_TURN_PROVIDER") or "").strip().lower()
     anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
@@ -54,8 +84,23 @@ def select_turn_caller() -> "TurnCaller":
     if provider == "deepseek":
         return DeepseekTurnCaller()
     if provider == "anthropic":
+        if has_deepseek:
+            return FallbackTurnCaller(
+                AnthropicHaikuTurnCaller(),
+                DeepseekTurnCaller(),
+                primary_name="anthropic",
+                fallback_name="deepseek",
+            )
         return AnthropicHaikuTurnCaller()
-    # Auto-select: prefer a real Anthropic key (matches design), else Deepseek, else stub.
+    # Auto-select: keep the designed Anthropic path, but never let an
+    # unavailable Anthropic account block live replies when DeepSeek is configured.
+    if has_anthropic and has_deepseek:
+        return FallbackTurnCaller(
+            AnthropicHaikuTurnCaller(),
+            DeepseekTurnCaller(),
+            primary_name="anthropic",
+            fallback_name="deepseek",
+        )
     if has_anthropic:
         return AnthropicHaikuTurnCaller()
     if has_deepseek:

@@ -9,7 +9,8 @@ import pytest
 
 from app.bots.base import BotSpec
 from app.bots.registry import BOT_SPECS
-from app.services.live.turn_loop import load_turn_context
+from app.services.live.schemas import TurnEmission, TurnRequest
+from app.services.live.turn_loop import FallbackTurnCaller, load_turn_context, select_turn_caller
 
 
 class _TurnFakePool:
@@ -95,3 +96,44 @@ async def test_load_turn_context_includes_selected_bot_profile(
     assert profile["display_name"] == "Tante Rosi"
     assert profile["primary_topic_slug"] == "pregnancy"
     assert "pregnancy prompt for Maya" in profile["system_prompt"]
+
+
+def test_select_turn_caller_wraps_anthropic_with_deepseek_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prod regression: a billing-blocked Anthropic key must not silence live turns."""
+
+    monkeypatch.delenv("LIVE_VOICE_TURN_PROVIDER", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real-looking")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-real-looking")
+
+    caller = select_turn_caller()
+
+    assert isinstance(caller, FallbackTurnCaller)
+    assert caller.primary_name == "anthropic"
+    assert caller.fallback_name == "deepseek"
+
+
+@pytest.mark.anyio
+async def test_fallback_turn_caller_uses_secondary_after_primary_failure() -> None:
+    class Primary:
+        async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission:
+            raise RuntimeError("credit balance too low")
+
+    class Secondary:
+        async def call(self, request: TurnRequest, context: dict[str, Any]) -> TurnEmission:
+            return TurnEmission(utterance=f"reply to {request.user_transcript_final}")
+
+    caller = FallbackTurnCaller(
+        Primary(),
+        Secondary(),
+        primary_name="anthropic",
+        fallback_name="deepseek",
+    )
+
+    emission = await caller.call(
+        TurnRequest(session_id=str(uuid4()), user_transcript_final="Hey, can you hear me?"),
+        {},
+    )
+
+    assert emission.utterance == "reply to Hey, can you hear me?"
