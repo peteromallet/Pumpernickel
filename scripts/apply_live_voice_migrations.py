@@ -17,6 +17,13 @@ Migrations applied (in order):
   0043_auth_magic_links.sql             — Discord magic-link audit
   0044_live_session_latency.sql         — per-stage latency spans
   0045_live_session_spend.sql           — per-session spend cents
+  0049_messages_bot_turn_id.sql         — bot turn link on messages
+  0050_habits_topic.sql                 — habits topic seed
+  0051_conversation_artifacts.sql       — live conversation artifacts
+  0052_live_prep_failed.sql             — prep retry status
+  0053_live_debrief_statuses.sql        — debrief retry statuses
+  0054_artifact_links_widen_checks.sql  — wider artifact provenance checks
+  0055_live_product_statuses.sql        — canonical live conversation statuses
 
 The `auth.uid()` reference in 0042 RLS policies relies on Supabase's
 auth schema being present. On vanilla Postgres targets, run the
@@ -46,6 +53,11 @@ MIGRATIONS = (
     "0045_live_session_spend.sql",
     "0049_messages_bot_turn_id.sql",
     "0050_habits_topic.sql",
+    "0051_conversation_artifacts.sql",
+    "0052_live_prep_failed.sql",
+    "0053_live_debrief_statuses.sql",
+    "0054_artifact_links_widen_checks.sql",
+    "0055_live_product_statuses.sql",
 )
 
 

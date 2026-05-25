@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from resident_chat_runtime.diagnostics import build_startup_diagnostics
 from resident_chat_runtime.env import EnvSetting, read_env_settings
@@ -507,6 +508,12 @@ app.include_router(admin.router)
 app.include_router(whatsapp_router.router)
 app.include_router(live_voice.router)
 app.include_router(auth_magic_link.router)
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/live/", status_code=307)
+
 
 # Serve the React build for the live-voice UI at /live, but only if the build
 # exists.  Local dev that hasn't run `vite build` yet should still boot.
