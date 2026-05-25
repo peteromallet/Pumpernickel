@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -385,6 +386,31 @@ async def run_live_prep_agentic_job(
         )
 
     # ── 10. Persist outcome ─────────────────────────────────────────────
+    if not (result.success and result.brief):
+        logger.warning(
+            "live_prep_agentic: non-chat job did not submit; "
+            "using context fallback conversation_id=%s reason=%s",
+            conversation_id,
+            result.failure_reason,
+        )
+        try:
+            result = await _build_fallback_nonchat_result(
+                request=PrepRequest(
+                    user_id=str(user_id),
+                    bot_id=bot_id,
+                    steering_text=steering,
+                    topic_slug=getattr(bot_spec, "primary_topic_slug", None),
+                ),
+                context=context,
+                failed_result=result,
+            )
+        except Exception:
+            logger.exception(
+                "live_prep_agentic: failed to build fallback brief "
+                "conversation_id=%s",
+                conversation_id,
+            )
+
     if result.success and result.brief:
         artifact_id = await _persist_prep_success(
             pool,
@@ -519,6 +545,40 @@ def _coerce_uuid(value: Any) -> UUID:
     if isinstance(value, UUID):
         return value
     return UUID(str(value))
+
+
+def _slug_from_title(title: Any) -> str | None:
+    raw = str(title or "").strip().lower()
+    if not raw:
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return slug or None
+
+
+async def _build_fallback_nonchat_result(
+    *,
+    request: PrepRequest,
+    context: dict[str, Any],
+    failed_result: NonchatJobResult,
+) -> NonchatJobResult:
+    agenda = await StubAgendaProducer()(request, context)
+    return NonchatJobResult(
+        success=True,
+        brief={
+            "agenda": agenda.model_dump(mode="json"),
+            "notes": (
+                "Context fallback brief generated after the agentic prep turn "
+                f"did not submit a structured brief: {failed_result.failure_reason}"
+            ),
+        },
+        failure_reason=None,
+        turn_id=failed_result.turn_id,
+        tool_call_count=failed_result.tool_call_count,
+        extras={
+            **dict(failed_result.extras),
+            "fallback_reason": failed_result.failure_reason,
+        },
+    )
 
 
 def _build_prep_system_task(
@@ -896,7 +956,9 @@ class StubAgendaProducer:
         participants_shape = bot_profile.get("participants_shape") or "solo"
         topic_label = str(topic_slug).replace("_", " ")
         themes = context.get("themes") or []
-        first_theme_slug = themes[0]["slug"] if themes else None
+        first_theme_slug = _slug_from_title(
+            themes[0].get("slug") or themes[0].get("title")
+        ) if themes else None
         if participants_shape == "dyad":
             anchor_ask = "What is the relationship moment you most want us to understand?"
             context_title = "What each side is carrying"

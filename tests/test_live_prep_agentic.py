@@ -662,13 +662,13 @@ class TestLivePrepToolGating:
 
 
 class TestMissingSubmit:
-    """Verify that prep fails visibly when the model returns text without
-    calling submit_live_brief."""
+    """Verify prep falls back when the model returns text without calling
+    submit_live_brief."""
 
     async def test_plain_text_without_submit_fails_prep(
         self, monkeypatch: Any
     ) -> None:
-        """Provider returns plain text only -> status='prep_failed'."""
+        """Provider returns plain text only -> context fallback agenda is ready."""
         user_id = uuid4()
         conversation_id = uuid4()
         topic_id = uuid4()
@@ -711,13 +711,16 @@ class TestMissingSubmit:
             pool=pool,
         )
 
-        assert result.success is False
-        assert result.failure_reason == "live_prep_text_no_submit"
+        assert result.success is True
+        assert result.failure_reason is None
+        assert result.brief is not None
+        assert result.extras["fallback_reason"] == "live_prep_text_no_submit"
 
-        # Status must have been set to prep_failed.
-        assert pool.updated_status == "prep_failed", (
-            f"Expected status='prep_failed', got {pool.updated_status}"
+        # Status must still become ready with a persisted fallback artifact.
+        assert pool.updated_status == "ready", (
+            f"Expected status='ready', got {pool.updated_status}"
         )
+        assert pool.inserted_artifact_payloads
 
     async def test_prep_failed_persists_error_in_session_fields(
         self, monkeypatch: Any
