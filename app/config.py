@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     live_debrief_tool_call_cap: int = Field(default=500, ge=1, le=5000)
     # ── Live prep agentic settings ──────────────────────────────────────
     live_prep_tool_cap: int = Field(default=100, ge=1, le=500)
+    live_prep_timeout_s: float = Field(default=90.0, ge=5.0, le=600.0)
     live_prep_allow_consult: bool = Field(default=False)
     live_prep_orphan_timeout_minutes: int = Field(default=10, ge=1, le=60)
     consult_timeout_s: float = Field(default=20.0, ge=1.0, le=120.0)

@@ -16,6 +16,7 @@ asynchronously; this module provides the entrypoint.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -36,6 +37,8 @@ from app.services.live.bot_profile import (
     live_bot_profile_context,
     user_from_live_row,
 )
+from app.services.live.status import canonicalize_status
+from app.services.nonchat_agentic import NonchatJobResult
 from app.services.topic_filter import join_artifact_topics
 
 logger = logging.getLogger(__name__)
@@ -255,7 +258,6 @@ async def run_live_prep_agentic_job(
 
     from app.services.live import artifacts as live_artifacts
     from app.services.nonchat_agentic import run_agentic_nonchat_job
-    from app.services.live.status import canonicalize_status
 
     _start = _time.monotonic()
     settings = get_settings()
@@ -319,8 +321,6 @@ async def run_live_prep_agentic_job(
         )
         # Update status to prep_failed before returning.
         await _set_prep_failed(pool, conversation_id, "unknown bot_id")
-        from app.services.nonchat_agentic import NonchatJobResult
-
         return NonchatJobResult(
             success=False,
             brief=None,
@@ -352,20 +352,37 @@ async def run_live_prep_agentic_job(
         "bot_id": bot_id,
     }
 
-    result = await run_agentic_nonchat_job(
-        kind="live_prep",
-        user=user,
-        conversation_id=conversation_id,
-        system_task=system_task,
-        max_tool_iterations=settings.live_prep_tool_cap,
-        pool=pool,
-        bot_spec=bot_spec,
-        bot_id=bot_id,
-        topic_id=resolved_topic_id,
-        partner=partner,
-        hot_context=hot_context,
-        trigger_metadata=trigger_meta,
-    )
+    try:
+        result = await asyncio.wait_for(
+            run_agentic_nonchat_job(
+                kind="live_prep",
+                user=user,
+                conversation_id=conversation_id,
+                system_task=system_task,
+                max_tool_iterations=settings.live_prep_tool_cap,
+                pool=pool,
+                bot_spec=bot_spec,
+                bot_id=bot_id,
+                topic_id=resolved_topic_id,
+                partner=partner,
+                hot_context=hot_context,
+                trigger_metadata=trigger_meta,
+            ),
+            timeout=settings.live_prep_timeout_s,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "live_prep_agentic: timed out conversation_id=%s timeout_s=%.1f",
+            conversation_id,
+            settings.live_prep_timeout_s,
+        )
+        result = NonchatJobResult(
+            success=False,
+            brief=None,
+            failure_reason="live_prep_timeout",
+            turn_id=None,
+            tool_call_count=0,
+        )
 
     # ── 10. Persist outcome ─────────────────────────────────────────────
     if result.success and result.brief:
@@ -609,6 +626,23 @@ async def _persist_prep_success(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT status
+                FROM mediator.conversations
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                conversation_id,
+            )
+            if row is None:
+                raise ValueError(f"conversation_id={conversation_id} not found")
+            if canonicalize_status(row["status"]) != "preparing":
+                raise ValueError(
+                    f"conversation_id={conversation_id} has status={row['status']!r}; "
+                    "not persisting stale prep result"
+                )
+
             # Persist conversation items.
             for order_hint, item in enumerate(agenda.items):
                 await conn.execute(

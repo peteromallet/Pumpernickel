@@ -490,7 +490,7 @@ async def get_session_card(session_id: UUID, pool: Any = Depends(get_pool)) -> d
         failure_reason: str | None = None
         sf = conv["session_fields"] or {}
         if isinstance(sf, dict):
-            failure_reason = sf.get("prep_error")
+            failure_reason = sf.get("prep_error") or sf.get("prep_failure_reason")
         return {
             "session_id": str(conv["id"]),
             "bot_id": conv["bot_id"],
