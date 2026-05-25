@@ -5,7 +5,7 @@
 # and is served by FastAPI at /live (see app/main.py).
 
 [phases.setup]
-nixPkgs = ["nodejs_20"]
+nixPkgs = ["python311", "nodejs_20"]
 
 [phases.build]
 cmds = [
