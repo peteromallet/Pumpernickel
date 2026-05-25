@@ -472,7 +472,8 @@ async def retry_live_prep(
     await pool.execute(
         "UPDATE mediator.conversations "
         "SET status = 'preparing', "
-        "    session_fields = session_fields "
+        "    session_fields = (COALESCE(session_fields, '{}'::jsonb) "
+        "        - 'prep_error' - 'prep_failure_reason') "
         "        || jsonb_build_object('retry_count', $2::int) "
         "WHERE id = $1",
         conversation_id,
@@ -489,10 +490,10 @@ async def retry_live_prep(
 
     result = await run_live_prep_agentic_job(
         conversation_id=conversation_id,
-        user_id=UUID(row["user_id"]),
+        user_id=_coerce_uuid(row["user_id"]),
         bot_id=row["bot_id"],
         steering_text=row["steering_text"],
-        topic_id=UUID(row["topic_id"]) if row["topic_id"] else None,
+        topic_id=_coerce_uuid(row["topic_id"]) if row["topic_id"] else None,
         pool=pool,
     )
 
@@ -512,6 +513,12 @@ async def retry_live_prep(
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────
+
+
+def _coerce_uuid(value: Any) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    return UUID(str(value))
 
 
 def _build_prep_system_task(

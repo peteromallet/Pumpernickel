@@ -136,16 +136,15 @@ class PrepFakePool:
         topic_id: UUID | None = None,
         session_fields: dict[str, Any] | None = None,
     ) -> None:
-        # Return id fields as strings so UUID(row["..."]) works.
         self._fetchrow_map["FROM mediator.conversations"] = {
             "id": conversation_id,
-            "user_id": str(user_id),
-            "partner_user_id": str(partner_user_id) if partner_user_id is not None else None,
+            "user_id": user_id,
+            "partner_user_id": partner_user_id,
             "bot_id": bot_id,
             "mode": "open",
             "steering_text": steering_text,
             "status": status,
-            "topic_id": str(topic_id) if topic_id is not None else None,
+            "topic_id": topic_id,
             "session_fields": session_fields or {},
             "prep_summary": None,
             "current_item_id": None,
@@ -793,6 +792,7 @@ class TestMissingSubmit:
         result = await retry_live_prep(conversation_id, pool)
 
         assert result.success is True
+        assert isinstance(result, NonchatJobResult)
 
         # Verify the UPDATE to 'preparing' happened before the re-run.
         update_calls = [
@@ -804,6 +804,10 @@ class TestMissingSubmit:
             "preparing" in s and "prep_failed" not in s
             for s in update_calls
         ), f"Expected an UPDATE to 'preparing' before retry; got {update_calls}"
+        assert any(
+            "- 'prep_error' - 'prep_failure_reason'" in s
+            for s in update_calls
+        ), f"Expected retry to clear stale prep errors; got {update_calls}"
 
     async def test_retry_rejects_non_prep_failed(self) -> None:
         """retry_live_prep raises ValueError for non-prep_failed sessions."""
