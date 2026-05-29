@@ -1,0 +1,35 @@
+base_branch: main
+
+# Epic: Discord-authored conversation agendas.
+# Design context: megaplans/discord-agenda-authoring-brief.md
+# Sprint 2 depends on Sprint 1's auth/ownership contract + list-sessions endpoint.
+
+milestones:
+  - label: s1-identity
+    idea: /Users/peteromalley/Documents/Veas/megaplans/discord-agenda-epic-sprint1-identity.md
+    branch: epic/live-voice-identity
+    profile: partnered          # tier 3 — cross-cutting (HTTP+WS+frontend+RLS); decision difficulty moderate (existing magic-link + RLS to build on)
+    robustness: thorough        # stakes raise the gate: wrong ownership check = cross-user data exposure; thorough also brings prep to map current auth flow
+    depth: low                  # codebase known; planner can bump to medium via override if auth threading needs deliberation
+    notes: "partnered/thorough — security-gated identity foundation. Hand-off: ownership contract + GET /api/live/sessions shape."
+
+  - label: s2-authoring
+    idea: /Users/peteromalley/Documents/Veas/megaplans/discord-agenda-epic-sprint2-authoring.md
+    branch: epic/discord-agenda-tools
+    profile: directed           # tier 2 — spec-shaped brief, execution against known patterns (add_memory tool template, upcoming_items hot-context pattern)
+    robustness: full            # default; one critique pass catches the silent-write step-placement trap
+    depth: low
+    notes: "directed/full — direct-write agenda tools. Depends on s1 identity contract."
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+
+merge_policy: review            # review each sprint's PR before merge given the security-sensitive s1
+
+driver:
+  robustness: full
+  auto_approve: true
+  max_iterations: 60
+  poll_sleep: 8.0
