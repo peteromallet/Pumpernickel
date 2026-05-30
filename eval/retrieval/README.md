@@ -174,6 +174,41 @@ python -m eval.retrieval.runner --adapter baseline
 python -m eval.retrieval.runner --adapter stub
 ```
 
+### Run the semantic and hybrid adapters
+
+```bash
+python -m eval.retrieval.runner --adapter semantic   # cosine over embeddings
+python -m eval.retrieval.runner --adapter hybrid      # RRF(keyword, semantic)
+```
+
+The `semantic` adapter (`SemanticRetriever`) embeds every corpus message and
+the query and ranks scope-filtered candidates by cosine similarity. The
+`hybrid` adapter (`HybridRetriever`) fuses the keyword (ILIKE) and semantic
+rankings with Reciprocal Rank Fusion (k=60).
+
+**Embedding backend selection** (`eval/retrieval/embeddings.py`,
+`get_default_embedder`), in priority order:
+
+1. OpenAI `text-embedding-3-small` — used only if `OPENAI_API_KEY` is already
+   in the environment (the key is never read, logged, or hardcoded by this code;
+   the openai SDK reads it). 
+2. Local sentence-transformers `all-MiniLM-L6-v2` — used if importable; runs
+   fully offline.
+3. TF-IDF char-ngram **floor** — NOT a real embedding; a deterministic sanity
+   floor used only when neither real backend is available. Reports must label it
+   as such.
+
+Corpus embeddings are cached to disk under `eval/retrieval/.embedding_cache/`
+(gitignored) so reruns are cheap and need no network. A `--comparison`-style
+side-by-side of all three retrievers lives in
+`reports/comparison_report.md`.
+
+Adapter tests use a tiny deterministic fake embedder so they need no network:
+
+```bash
+pytest tests/test_retrieval_eval_semantic.py -v
+```
+
 ### Custom paths
 
 ```bash
