@@ -26,3 +26,6 @@ backups/
 *.dump
 *.log
 supabase/.temp/
+
+# Retrieval eval embedding cache (regenerated on demand)
+eval/retrieval/.embedding_cache/
