@@ -1,0 +1,53 @@
+base_branch: main
+
+# Xen v1 — message search & navigation into the app + every agent's hot context.
+# Plan: megaplans/xen-v1-epic-plan.md. Each milestone has a self-contained brief.
+# Dials per the plan's recommended-dials table. Sequential; later depend on earlier.
+# NOTE: launch only AFTER the eval-harness branch (PR #11 + fairness re-eval) is
+# merged to main, so M0 extends a harness that's actually present on main.
+
+milestones:
+  - label: m0-eval
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m0-eval-extension-brief.md
+    branch: epic/xen-m0-eval
+    profile: directed          # offline test code over an existing harness; low blast radius
+    robustness: full
+    depth: low
+    notes: "Fairness re-eval + deterministic simple-nav assertions + hot-context-inclusion metric. Gate for M1."
+
+  - label: m1-retriever
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m1-retriever-index-brief.md
+    branch: epic/xen-m1-retriever
+    profile: premium           # highest-risk: pgvector on the pooler, async embed worker, gated prod backfill, visibility correctness, reverses README invariant
+    robustness: thorough
+    depth: high
+    notes: "pgvector per-message + tsvector/GIN + RRF hybrid, async embed-on-write, out-of-band 5432 backfill (scripted, gated, NOT auto-run), visibility+suppress view. Default LOCAL embeddings (no data egress) unless vendor approved."
+
+  - label: m2-tools
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m2-tool-surface-brief.md
+    branch: epic/xen-m2-tools
+    profile: partnered         # tool registry + verbatim-integrity semantics; correctness-sensitive but bounded
+    robustness: full
+    depth: medium
+    notes: "SIMPLE nav verbs (messages_before(anchor=id|current), open_thread/scroll, before-ID, topic_recent) + COMPLEX search(mode=exact|semantic) with speaker labels + edit/retraction surfacing, in registry for all bots."
+
+  - label: m3-hotcontext
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m3-hot-context-brief.md
+    branch: epic/xen-m3-hotcontext
+    profile: partnered         # edits the heart (hot_context.py), token-budget sensitive; queries bounded over M1's retriever
+    robustness: full
+    depth: medium
+    notes: "New bounded 'previous on this topic' section for every agent + window-edge cursor that makes anchor='current' deterministic."
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+
+merge_policy: review          # babysit-merge after verifying each milestone — M1 touches a live DB invariant; do not auto-merge unreviewed
+
+driver:
+  robustness: full
+  auto_approve: true
+  max_iterations: 80
+  poll_sleep: 8.0
