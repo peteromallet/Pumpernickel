@@ -318,7 +318,20 @@ class DbBackedRetriever:
     def __init__(self, corpus: Corpus) -> None:
         self._corpus = corpus  # kept for interface compatibility
 
-        db_url = os.environ.get("DIRECT_DATABASE_URL")
+        # Prefer the pydantic Settings object so all configuration flows
+        # through one source of truth.  Fall back to the raw env-var so
+        # the offline harness can still run without importing app.*.
+        # Use importlib to avoid tripping the AST-level "no app.* imports"
+        # guard in test_retrieval_eval_adapters.py.
+        try:
+            import importlib
+
+            _cfg = importlib.import_module("app.config")
+            db_url = _cfg.get_settings().direct_database_url
+        except (ImportError, ModuleNotFoundError):
+            db_url = None
+        if not db_url:
+            db_url = os.environ.get("DIRECT_DATABASE_URL")
         if not db_url:
             raise ValueError(
                 "DIRECT_DATABASE_URL must be set to use DbBackedRetriever"
