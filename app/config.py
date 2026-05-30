@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     env_name: str = "local"
     database_url: str
     database_schema: str = "public"
+    # Direct session-mode connection URL (port 5432) for operations that need
+    # stable search_path / transaction semantics (pgvector backfill, eval).
+    # The pooler (port 6543) is transaction-mode and does not preserve
+    # SET search_path across connection acquisitions.
+    direct_database_url: str | None = None
     supabase_url: str
     supabase_service_role_key: SecretStr
     anthropic_api_key: SecretStr
@@ -126,6 +131,23 @@ class Settings(BaseSettings):
     # Recovery-v2 retry backoff cap (seconds): maximum scheduled retry delay
     # regardless of attempt count.
     recovery_v2_retry_cap_seconds: int = 600
+    # ── Xen retriever (pgvector + tsvector) ──────────────────────────────
+    # Embedding provider used for generating message embeddings.
+    embedding_provider: str = "openai"
+    # Embedding model name passed to the provider API.
+    embedding_model: str = "text-embedding-3-small"
+    # Dimensionality of the embedding vectors (must match pgvector column).
+    embedding_dim: int = 1536
+    # Enable the background embed worker that polls embed_jobs.
+    embed_worker_enabled: bool = True
+    # Poll interval (seconds) between embed_jobs table scans.
+    embed_worker_poll_interval_s: float = 1.0
+    # Maximum number of embed_jobs dequeued per poll cycle.
+    embed_worker_batch_size: int = 32
+    # Maximum attempts per embed_job before marking it dead.
+    embed_worker_max_attempts: int = 8
+    # HNSW ef_search parameter override for pgvector index scans.
+    hnsw_ef_search: int = 40
     # ── Project A2 provider robustness ─────────────────────────────────
     # Maximum Retry-After value (seconds) the provider chain will honour
     # in-band before advancing to the next provider hop.  Values above this
