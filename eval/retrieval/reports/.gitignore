@@ -1,0 +1,3 @@
+# Local, regenerable embedding cache (binary .npy keyed by corpus content hash).
+# Reproduced on demand by eval/retrieval/embeddings.py — never commit.
+.emb_cache/

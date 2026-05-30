@@ -1,183 +1,47 @@
 {
   "adapter_name": "StubSemanticRetriever",
-  "corpus_path": "/Users/peteromalley/Documents/Veas/eval/retrieval/corpus.yaml",
-  "golden_set_path": "/Users/peteromalley/Documents/Veas/eval/retrieval/golden_set.yaml",
+  "corpus_path": "/Users/peteromalley/Documents/Veas/.claude/worktrees/agent-aae9b9820205716dc/eval/retrieval/corpus.yaml",
+  "golden_set_path": "/Users/peteromalley/Documents/Veas/.claude/worktrees/agent-aae9b9820205716dc/eval/retrieval/golden_set.yaml",
   "overall": {
     "recall@1": 0.0,
     "recall@5": 0.0,
     "recall@10": 0.0,
     "mrr": 0.0,
-    "n": 28
+    "n": 62
   },
   "by_query_type": {
-    "topic_recall": {
-      "recall@1": 0.0,
-      "recall@5": 0.0,
-      "recall@10": 0.0,
-      "mrr": 0.0,
-      "n": 6
-    },
     "verbatim_quote": {
       "recall@1": 0.0,
       "recall@5": 0.0,
       "recall@10": 0.0,
       "mrr": 0.0,
-      "n": 8
+      "n": 14
     },
     "paraphrase": {
       "recall@1": 0.0,
       "recall@5": 0.0,
       "recall@10": 0.0,
       "mrr": 0.0,
-      "n": 10
+      "n": 22
     },
     "cross_thread": {
       "recall@1": 0.0,
       "recall@5": 0.0,
       "recall@10": 0.0,
       "mrr": 0.0,
-      "n": 4
+      "n": 14
+    },
+    "topic_recall": {
+      "recall@1": 0.0,
+      "recall@5": 0.0,
+      "recall@10": 0.0,
+      "mrr": 0.0,
+      "n": 12
     }
   },
   "per_case": [
     {
       "case_id": "GC01",
-      "query": "What's the status of the Nexus project authentication module?",
-      "query_type": "topic_recall",
-      "scope": "topic",
-      "expected_count": 3,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m003",
-        "m004",
-        "m047"
-      ],
-      "notes": "Topic-scoped recall for auth module discussions. m003 asks about auth module, m004 describes OAuth2 token refresh edge cases, m047 shows null pointer exception in AuthService.java (media_analysis-only signal).\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC02",
-      "query": "What bugs have been reported in the Nexus project?",
-      "query_type": "topic_recall",
-      "scope": "topic",
-      "expected_count": 7,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m010",
-        "m014",
-        "m016",
-        "m020",
-        "m052",
-        "m053",
-        "m058"
-      ],
-      "notes": "Topic-scoped bug recall across both nexus threads. Rate limiting (m010), payment processor duplication (m014/m016/m020), null pointer fix (m052), hotfix deployment (m053), rate-limit improvement followup (m058).\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC03",
-      "query": "What's the plan for the Saturday hike?",
-      "query_type": "topic_recall",
-      "scope": "thread",
-      "expected_count": 9,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m023",
-        "m025",
-        "m027",
-        "m031",
-        "m032",
-        "m035",
-        "m036",
-        "m054",
-        "m055"
-      ],
-      "notes": "Thread-scoped recall of hike planning messages. Excludes dinner-thread messages despite shared topic_weekend_plans. Includes weather updates (m054 rain forecast, m055 ponchos/mud).\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC04",
-      "query": "Where are we eating dinner Saturday night?",
-      "query_type": "topic_recall",
-      "scope": "thread",
-      "expected_count": 6,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m037",
-        "m038",
-        "m039",
-        "m042",
-        "m044",
-        "m056"
-      ],
-      "notes": "Thread-scoped dinner plans. m051 excluded because its bare content ('Look at the menu') carries no restaurant signal without media_analysis interpretation by a semantic retriever.\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC05",
-      "query": "What are our weekend plans?",
-      "query_type": "topic_recall",
-      "scope": "topic",
-      "expected_count": 8,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m023",
-        "m025",
-        "m027",
-        "m031",
-        "m037",
-        "m038",
-        "m042",
-        "m044"
-      ],
-      "notes": "Topic-scoped recall across both weekend threads (hike + dinner). Must return messages from thread_weekend_hike and thread_weekend_dinner.\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC06",
-      "query": "Has anyone mentioned performance problems or scaling concerns?",
-      "query_type": "topic_recall",
-      "scope": "all",
-      "expected_count": 7,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m006",
-        "m008",
-        "m009",
-        "m010",
-        "m011",
-        "m012",
-        "m058"
-      ],
-      "notes": "Corpus-wide recall for performance/scaling. Schema review blockers (m006), caching architecture discussion (m008), benchmarking proposal (m009), rate limiting issues and resolution (m010/m011/m012/m058).\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC07",
       "query": "I told you so",
       "query_type": "verbatim_quote",
       "scope": "all",
@@ -187,14 +51,14 @@
       "expected_ids": [
         "m013"
       ],
-      "notes": "Verbatim terse reply. Exact match on full message content. Tests retrieval of emotionally-loaded short messages.\n",
+      "notes": "Exact terse reply.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
       "reciprocal_rank": 0.0
     },
     {
-      "case_id": "GC08",
+      "case_id": "GC02",
       "query": "fine.",
       "query_type": "verbatim_quote",
       "scope": "all",
@@ -204,50 +68,34 @@
       "expected_ids": [
         "m007"
       ],
-      "notes": "Verbatim one-word reply. Tests that low-signal messages are retrievable by exact substring match.\n",
+      "notes": "One-word reply, exact match.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
       "reciprocal_rank": 0.0
     },
     {
-      "case_id": "GC09",
-      "query": "sure",
-      "query_type": "verbatim_quote",
-      "scope": "all",
-      "expected_count": 1,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m022"
-      ],
-      "notes": "Verbatim one-word reply confirming a hotfix was pushed. m002 also contains 'Sure' (about sprint review) but the intended target is the hotfix confirmation context. Tight expected set tests semantic precision.\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC10",
+      "case_id": "GC03",
       "query": "osso buco",
       "query_type": "verbatim_quote",
       "scope": "all",
-      "expected_count": 3,
+      "expected_count": 4,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m038",
-        "m044",
-        "m051"
+        "m081",
+        "m087",
+        "m090",
+        "m091"
       ],
-      "notes": "Verbatim substring across threads. m038 and m044 in thread_weekend_dinner content, m051 in media_analysis.description (Luigi's PDF menu). Tests media_analysis fallback in baseline adapter.\n",
+      "notes": "Substring across dinner thread + media menu (m090).",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
       "reciprocal_rank": 0.0
     },
     {
-      "case_id": "GC11",
+      "case_id": "GC04",
       "query": "Blue Ridge",
       "query_type": "verbatim_quote",
       "scope": "all",
@@ -255,38 +103,21 @@
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m023",
-        "m031",
-        "m035",
-        "m043",
-        "m044",
-        "m050"
+        "m061",
+        "m069",
+        "m073",
+        "m086",
+        "m087",
+        "m077"
       ],
-      "notes": "Verbatim substring across threads. Appears in both weekend hike and dinner threads. m050 ('See attached') has Blue Ridge only in media_analysis.explanation (trailhead parking photo).\n",
+      "notes": "Appears in hike+dinner threads; m077 media.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
       "reciprocal_rank": 0.0
     },
     {
-      "case_id": "GC12",
-      "query": "CI pipeline is green",
-      "query_type": "verbatim_quote",
-      "scope": "all",
-      "expected_count": 1,
-      "retrieved_count": 0,
-      "ranked_ids": [],
-      "expected_ids": [
-        "m057"
-      ],
-      "notes": "Verbatim match against multi-word phrase. Also has media_analysis with Jenkins build #1847 details and PostGIS extension version bump.\n",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
-    },
-    {
-      "case_id": "GC13",
+      "case_id": "GC05",
       "query": "idempotency key",
       "query_type": "verbatim_quote",
       "scope": "all",
@@ -294,10 +125,154 @@
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m016",
-        "m020"
+        "m021",
+        "m025"
       ],
-      "notes": "Verbatim match against near-duplicate incident pair. Both m016 and m020 describe the same payment processor bug with overlapping wording.\n",
+      "notes": "Near-duplicate Nexus payment-bug pair.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC06",
+      "query": "rate limiting",
+      "query_type": "verbatim_quote",
+      "scope": "thread",
+      "expected_count": 2,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m010",
+        "m029"
+      ],
+      "notes": "Thread-scoped: only m010 is in kickoff; m029 in bugs is scoped out.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC07",
+      "query": "httpOnly cookies",
+      "query_type": "verbatim_quote",
+      "scope": "all",
+      "expected_count": 2,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m213",
+        "m218"
+      ],
+      "notes": "Security thread exact phrase.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC08",
+      "query": "worker pool",
+      "query_type": "verbatim_quote",
+      "scope": "all",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m050",
+        "m052",
+        "m054",
+        "m058"
+      ],
+      "notes": "Atlas incident; m058 in media summary too.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC09",
+      "query": "osso buco",
+      "query_type": "verbatim_quote",
+      "scope": "thread",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m090"
+      ],
+      "notes": "Scoped to dinner thread; media menu match.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC10",
+      "query": "kitchen faucet",
+      "query_type": "verbatim_quote",
+      "scope": "all",
+      "expected_count": 2,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m133",
+        "m142"
+      ],
+      "notes": "Repairs thread + media photo (m142); bathroom faucet m144 is distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC11",
+      "query": "half marathon",
+      "query_type": "verbatim_quote",
+      "scope": "all",
+      "expected_count": 2,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m190",
+        "m191"
+      ],
+      "notes": "Fitness running thread.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC12",
+      "query": "Lisbon flights",
+      "query_type": "verbatim_quote",
+      "scope": "all",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m145"
+      ],
+      "notes": "Exact bigram only in m145.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC13",
+      "query": "running shoes",
+      "query_type": "verbatim_quote",
+      "scope": "all",
+      "expected_count": 2,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m196",
+        "m197"
+      ],
+      "notes": "Fitness thread exact phrase.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -305,18 +280,16 @@
     },
     {
       "case_id": "GC14",
-      "query": "rate limiting",
+      "query": "sure",
       "query_type": "verbatim_quote",
       "scope": "thread",
-      "expected_count": 3,
+      "expected_count": 1,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m010",
-        "m011",
-        "m012"
+        "m027"
       ],
-      "notes": "Verbatim match within thread scope. m010 introduces rate limiting issue, m011 references Sarah's prior report, m012 describes the burst limit fix. m058 (rate limiting followup in thread_nexus_bugs) excluded by scope.\n",
+      "notes": "Terse hotfix confirmation, scoped.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -324,7 +297,7 @@
     },
     {
       "case_id": "GC15",
-      "query": "login system status",
+      "query": "login integration",
       "query_type": "paraphrase",
       "scope": "all",
       "expected_count": 1,
@@ -333,7 +306,7 @@
       "expected_ids": [
         "m004"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (login, system, status) do not appear in m004 content ('The OAuth2 integration is mostly done. Just need to handle token refresh edge cases.'). No media_analysis. ILIKE baseline returns [].\n",
+      "notes": "'login integration' is a substring of m004 ('OAuth2 login integration'). Baseline can hit m004; semantic must also rank it over the security-thread login mentions. (overlap: login integration)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -341,7 +314,7 @@
     },
     {
       "case_id": "GC16",
-      "query": "migration scripts delayed",
+      "query": "migration scripts blocked",
       "query_type": "paraphrase",
       "scope": "all",
       "expected_count": 1,
@@ -350,7 +323,7 @@
       "expected_ids": [
         "m006"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (migration, scripts, delayed) do not appear in m006 content ('Those are blocked on the schema review. Jenkins flagged three compatibility issues.'). No media_analysis. ILIKE returns [].\n",
+      "notes": "'migration scripts' substring of m005/m006/m016; the 'blocked' status answer is m006. Baseline returns the lexical set ordered by recency; semantic prefers the blocked one. (overlap: migration scripts blocked)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -358,16 +331,16 @@
     },
     {
       "case_id": "GC17",
-      "query": "UV protection reminder",
+      "query": "don't forget sunscreen",
       "query_type": "paraphrase",
       "scope": "all",
       "expected_count": 1,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m029"
+        "m067"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (UV, protection, reminder) do not appear in m029 content ('Don't forget sunscreen this time. Remember what happened at Shenandoah.'). Uses 'UV' instead of 'sun' because 'sun' would match inside 'sunscreen' as ILIKE substring. No media_analysis. ILIKE returns [].\n",
+      "notes": "'sunscreen' substring of m067. Realistic reminder phrasing. (overlap: sunscreen)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -375,7 +348,7 @@
     },
     {
       "case_id": "GC18",
-      "query": "in-memory cache architecture",
+      "query": "caching layer",
       "query_type": "paraphrase",
       "scope": "all",
       "expected_count": 1,
@@ -384,7 +357,7 @@
       "expected_ids": [
         "m008"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (in-memory, cache, architecture) do not appear in m008 content ('I've been thinking about the caching layer. Redis cluster might be overkill for our scale.'). Neither 'in-memory' nor 'architecture' appear as substrings in the content. No media_analysis. ILIKE returns [].\n",
+      "notes": "'caching layer' substring of m008. Query is the user's term; m009 ('benchmark the cache') is a lexical neighbor semantic should also relate. (overlap: caching layer)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -392,16 +365,17 @@
     },
     {
       "case_id": "GC19",
-      "query": "meal beverage planning",
+      "query": "duplicating transaction",
       "query_type": "paraphrase",
       "scope": "all",
-      "expected_count": 1,
+      "expected_count": 2,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
+        "m019",
         "m025"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (meal, beverage, planning) do not appear in m025 content ('I'll pack sandwiches. You bring the water filters.'). Note: original query used 'food and drink logistics' but 'and' appears inside 'sandwiches' as ILIKE substring. No media_analysis. ILIKE returns [].\n",
+      "notes": "'duplicating transaction' substring of m019; m025 is the near-duplicate. Orion m176/m177 same-shape billing bug is a different-topic distractor. (overlap: duplicating transaction)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -409,16 +383,17 @@
     },
     {
       "case_id": "GC20",
-      "query": "schedule coordination",
+      "query": "apartment search",
       "query_type": "paraphrase",
       "scope": "all",
-      "expected_count": 1,
+      "expected_count": 2,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m043"
+        "m127",
+        "m128"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (schedule, coordination) do not appear in m043 content ('Perfect timing. We should be back from Blue Ridge by 4 PM latest.'). No media_analysis. ILIKE returns [].\n",
+      "notes": "'apartment search' substring of m127; m128 (movers) is the paired action needing meaning. Baseline gets m127 only. (overlap: apartment search)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -426,16 +401,18 @@
     },
     {
       "case_id": "GC21",
-      "query": "NPE resolution",
+      "query": "dishes in the sink",
       "query_type": "paraphrase",
       "scope": "all",
-      "expected_count": 1,
+      "expected_count": 3,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m052"
+        "m094",
+        "m096",
+        "m105"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (NPE, resolution) do not appear in m052 content ('The null pointer from earlier - fixed it. Was a missing null guard on the session factory injection path.'). No media_analysis. ILIKE returns [].\n",
+      "notes": "'dishes' phrasing overlaps m094 ('dishes ... in the sink'); the fairness/resolution targets m096/m105 need meaning. Baseline gets m094. (overlap: dishes in the sink)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -443,16 +420,16 @@
     },
     {
       "case_id": "GC22",
-      "query": "test environment throttle",
+      "query": "car repair",
       "query_type": "paraphrase",
       "scope": "all",
       "expected_count": 1,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m010"
+        "m109"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (test, environment, throttle) do not appear in m010 content ('The API rate limiting is causing issues in staging. Users hitting 429s during peak.'). No media_analysis. ILIKE returns [].\n",
+      "notes": "'car repair' substring of m109. Realistic search term; semantic also relates m117/m118 (same incident) but answer is m109. (overlap: car repair)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -460,16 +437,17 @@
     },
     {
       "case_id": "GC23",
-      "query": "sunburn story",
+      "query": "query latency",
       "query_type": "paraphrase",
       "scope": "all",
-      "expected_count": 1,
+      "expected_count": 2,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m030"
+        "m036",
+        "m037"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (sunburn, story) do not appear in m030 content ('How could I forget? I looked like a tomato for a week.'). Message describes sunburn via metaphor (tomato). No media_analysis. ILIKE returns [].\n",
+      "notes": "'query latency' substring of m036; m037 has the p95 number. Video-call latency m047 is a same-word distractor semantic should de-rank. (overlap: query latency)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -477,16 +455,16 @@
     },
     {
       "case_id": "GC24",
-      "query": "weekend logistics",
+      "query": "window seat",
       "query_type": "paraphrase",
       "scope": "all",
       "expected_count": 1,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m046"
+        "m150"
       ],
-      "notes": "PARAPHRASE (ILIKE MISS): Zero keyword overlap. Query words (weekend, logistics) do not appear in m046 content ('Already on my checklist. Along with the water filters for the morning hike.'). No media_analysis. ILIKE returns [].\n",
+      "notes": "'window seat' substring of m150. Direct keyword search. (overlap: window seat)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -494,23 +472,17 @@
     },
     {
       "case_id": "GC25",
-      "query": "What are the weekend plans for food?",
-      "query_type": "cross_thread",
-      "scope": "topic",
-      "expected_count": 8,
+      "query": "rollback plan",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 2,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m025",
-        "m037",
-        "m038",
-        "m039",
-        "m042",
-        "m044",
-        "m051",
-        "m056"
+        "m183",
+        "m185"
       ],
-      "notes": "CROSS_THREAD: Query targets topic_weekend_plans which spans thread_weekend_hike (hike food logistics: m025) and thread_weekend_dinner (dinner plans: m037-m056). Topic-scoped retrieval must return messages from BOTH threads. m051 is media_analysis-only (Luigi's menu PDF).\n",
+      "notes": "'rollback' substring of m183/m185 ('rollback plan'/'rollback steps'). m184 (the actual fallback mechanism) needs meaning. (overlap: rollback)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -518,24 +490,16 @@
     },
     {
       "case_id": "GC26",
-      "query": "What deployment issues have come up?",
-      "query_type": "cross_thread",
-      "scope": "topic",
-      "expected_count": 9,
+      "query": "drafty window",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m006",
-        "m010",
-        "m014",
-        "m016",
-        "m019",
-        "m020",
-        "m053",
-        "m057",
-        "m058"
+        "m137"
       ],
-      "notes": "CROSS_THREAD: Deployment issues span thread_nexus_kickoff (schema review blockers m006, rate limiting m010, CI pipeline m057) and thread_nexus_bugs (payment processor duplication m014/m016/m020, hotfix deployment m019/m053, rate-limit followup m058). Topic scope must cover both threads.\n",
+      "notes": "'drafty' substring of m137; also m138 summary list. Answer is the report m137. (overlap: drafty window)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -543,21 +507,16 @@
     },
     {
       "case_id": "GC27",
-      "query": "performance and scaling discussions",
-      "query_type": "cross_thread",
-      "scope": "topic",
-      "expected_count": 6,
+      "query": "rooftop reservation",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m008",
-        "m009",
-        "m010",
-        "m011",
-        "m012",
-        "m058"
+        "m085"
       ],
-      "notes": "CROSS_THREAD: Performance discussions appear in both nexus threads. Caching and benchmarking (m008/m009) in kickoff thread, rate limiting (m010/m011/m012) in kickoff, rate-limit followup (m058) in bugs thread.\n",
+      "notes": "'rooftop' + 'reservation' both in m085. m093 uses 'reservations' = doubts (same-word distractor) semantic should reject. (overlap: rooftop / reservation)",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
@@ -565,28 +524,690 @@
     },
     {
       "case_id": "GC28",
-      "query": "Saturday morning plans",
-      "query_type": "cross_thread",
-      "scope": "topic",
-      "expected_count": 8,
+      "query": "token theft risk",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 2,
       "retrieved_count": 0,
       "ranked_ids": [],
       "expected_ids": [
-        "m023",
-        "m026",
-        "m027",
-        "m028",
-        "m031",
-        "m035",
-        "m054",
-        "m055"
+        "m212",
+        "m213"
       ],
-      "notes": "CROSS_THREAD: Saturday morning references across both weekend threads. Hike thread has trail planning and timing (m023/m026/m027/m028/m031/m035), plus weather updates (m054 rain forecast, m055 ponchos). Dinner thread messages linked via timing references.\n",
+      "notes": "'token theft risk' substring of m213; m212 (the local-storage finding) needs meaning. Many other 'token' mentions are distractors (m018 gift token). (overlap: token theft risk)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC29",
+      "query": "sunburn anecdote",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m068"
+      ],
+      "notes": "[HARD zero-overlap] HARD: m068 says 'looked like a tomato' — no shared substring. Baseline [].",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC30",
+      "query": "NPE fix",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m015"
+      ],
+      "notes": "[HARD zero-overlap] HARD: m015 says 'null pointer ... fixed it' — acronym, no substring. Baseline [].",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC31",
+      "query": "demoralized after the launch",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m059"
+      ],
+      "notes": "[HARD zero-overlap] HARD: m059 'feeling pretty down' — 'demoralized' shares no substring; 'launch' appears in m059? no. Baseline [].",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC32",
+      "query": "UV protection",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m067"
+      ],
+      "notes": "[HARD zero-overlap] HARD: 'UV protection' vs 'sunscreen' — synonym only, no substring. Baseline [].",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC33",
+      "query": "food and drinks to pack",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m063"
+      ],
+      "notes": "[HARD zero-overlap] HARD: m063 'pack the sandwiches ... water filters' — synonyms, no shared substring. Baseline [].",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC34",
+      "query": "hiding money stress",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 2,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m111",
+        "m112"
+      ],
+      "notes": "'money' substring of m111 ('stress about money'); 'hiding' substring of m112. Baseline can hit both lexically; tests ranking + recall. (overlap: money / hiding)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC35",
+      "query": "brute force",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 2,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m216",
+        "m218"
+      ],
+      "notes": "'brute force' substring of m216/m218. Realistic term; semantic should also surface m212 (the vuln) via meaning though it's not expected here. (overlap: brute force)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC36",
+      "query": "partitioning the events table",
+      "query_type": "paraphrase",
+      "scope": "all",
+      "expected_count": 1,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m040"
+      ],
+      "notes": "Substring of m040; m041 ('Daily partitioning') and m038/m039 (index on events table) are strong lexical neighbors — tests precision. (overlap: partitioning the events table)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC37",
+      "query": "bring food",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 6,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m063",
+        "m080",
+        "m081",
+        "m087",
+        "m090",
+        "m091"
+      ],
+      "notes": "'food' substring of m069/m073 (hike) — baseline catches the hike-food mentions but misses the dinner thread (Luigi's m080-m091), which needs meaning to span. (overlap: food)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC38",
+      "query": "deploy",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 6,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m006",
+        "m010",
+        "m019",
+        "m025",
+        "m028",
+        "m219"
+      ],
+      "notes": "'deploy' substring of m019/m025 (bugs). Baseline catches the bugs-thread deploy mentions; the kickoff schema-block m006 and security-fix m219 need meaning to span the topic. (overlap: deploy)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC39",
+      "query": "overkill for our scale",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m008",
+        "m009",
+        "m010",
+        "m012"
+      ],
+      "notes": "'scale' substring of m008. Baseline gets m008; benchmarking m009 and rate-limit m010/m012 (the scaling responses) need meaning. (overlap: scale)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC40",
+      "query": "login flow",
+      "query_type": "cross_thread",
+      "scope": "all",
+      "expected_count": 6,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m003",
+        "m004",
+        "m167",
+        "m168",
+        "m212",
+        "m213"
+      ],
+      "notes": "'login flow' substring of m168 (Orion). Baseline gets m168; the Nexus auth (m003/m004/m212/m213) needs meaning to span both projects. (overlap: login flow)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC41",
+      "query": "Lisbon",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 5,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m145",
+        "m149",
+        "m156",
+        "m158",
+        "m160"
+      ],
+      "notes": "'Lisbon' substring of m145/m149 (flights) and m156 (itinerary). Baseline gets the literal Lisbon mentions; tram/Belem itinerary items (m158/m160) need meaning. Barcelona m154 distractor. (overlap: Lisbon)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC42",
+      "query": "rate limiting",
+      "query_type": "cross_thread",
+      "scope": "all",
+      "expected_count": 5,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m010",
+        "m012",
+        "m171",
+        "m172",
+        "m216"
+      ],
+      "notes": "'rate limiting' substring across Nexus kickoff (m010), Orion (m171), security (m216). Baseline has a real lexical shot here; m012/m172 (the fixes) partly need meaning. Hardest verbatim-style cross-thread. (overlap: rate limiting)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC43",
+      "query": "broken",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m133",
+        "m135",
+        "m137",
+        "m138"
+      ],
+      "notes": "'broken' substring of m136 (a neighbor, not expected) — the actual broken-items (faucet m133, fan m135, window m137) are described without the word 'broken', so semantics carry it. Baseline likely 0 here. (overlap: broken (weak))",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC44",
+      "query": "training plan",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 5,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m192",
+        "m194",
+        "m197",
+        "m205",
+        "m206"
+      ],
+      "notes": "'training' substring of m192/m194 (running). Baseline catches running-side; the gym schedule (m205/m206) is the cross-thread part needing meaning. (overlap: training)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC45",
+      "query": "budget",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m108",
+        "m110",
+        "m111",
+        "m115"
+      ],
+      "notes": "'budget' substring of m115 (money thread). Baseline gets m115; the bill/spending/stress lead-up (m108/m110/m111) needs meaning. Chores thread excluded by topic+meaning. (overlap: budget)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC46",
+      "query": "duplicate charge",
+      "query_type": "cross_thread",
+      "scope": "all",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m019",
+        "m025",
+        "m176",
+        "m177"
+      ],
+      "notes": "'charge' substring of m176 (Orion billing). Baseline gets the Orion side; Nexus transaction-dup m019/m025 spans the other project by meaning. Email-dup m030/m031 same-word distractor. (overlap: charge)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC47",
+      "query": "6 AM Saturday",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 5,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m061",
+        "m065",
+        "m069",
+        "m073",
+        "m075"
+      ],
+      "notes": "'6 AM' substring of m065/m069/m073. Baseline catches the timing lines; trail/forecast logistics (m061/m075) need meaning. Dinner thread excluded by meaning. (overlap: 6 AM)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC48",
+      "query": "audit findings",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m212",
+        "m216",
+        "m218",
+        "m219"
+      ],
+      "notes": "'audit findings' substring of m218 (+m221 media, a neighbor). Baseline gets m218; the local-storage finding m212, rate-limit fix m216, push m219 need meaning. Office-door m222 same-word distractor. (overlap: audit findings)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC49",
+      "query": "Atlas is down",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m049",
+        "m052",
+        "m056",
+        "m058"
+      ],
+      "notes": "'Atlas is down' substring of m049. Baseline gets m049; worker-pool cause m052, recovery m056, postmortem m058 need meaning. m059 'feeling down' same-word distractor. (overlap: Atlas is down)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC50",
+      "query": "other apartments",
+      "query_type": "cross_thread",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m121",
+        "m122",
+        "m125",
+        "m127"
+      ],
+      "notes": "'other apartments' substring of m122. Baseline gets m122; lease decision m121, requirements m125, search split m127 need meaning. Chess-move m132 same-word distractor. (overlap: other apartments)",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC51",
+      "query": "authentication module",
+      "query_type": "topic_recall",
+      "scope": "topic",
+      "expected_count": 3,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m003",
+        "m004",
+        "m014"
+      ],
+      "notes": "'authentication module' substring of m003 (+m014 media). Baseline gets those; OAuth2 status m004 needs meaning.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC52",
+      "query": "payment processor",
+      "query_type": "topic_recall",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m010",
+        "m019",
+        "m025",
+        "m032"
+      ],
+      "notes": "'payment processor' substring of m019/m025. Baseline gets payment dup; rate-limit m010 and app-crash m032 (other Nexus bugs) need meaning.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC53",
+      "query": "Blue Ridge hike",
+      "query_type": "topic_recall",
+      "scope": "thread",
+      "expected_count": 5,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m061",
+        "m063",
+        "m069",
+        "m073",
+        "m075"
+      ],
+      "notes": "'Blue Ridge' substring of m061/m069/m073. Baseline catches those; food/forecast logistics m063/m075 need meaning. Whitetail m079 distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC54",
+      "query": "dinner",
+      "query_type": "topic_recall",
+      "scope": "thread",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m080",
+        "m081",
+        "m085",
+        "m087"
+      ],
+      "notes": "'dinner' substring of m080/m087. Baseline gets those; Luigi's name m081, reservation m085 need meaning. Marco's m092 distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC55",
+      "query": "latency",
+      "query_type": "topic_recall",
+      "scope": "all",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m008",
+        "m010",
+        "m036",
+        "m037"
+      ],
+      "notes": "'latency' substring of m036/m037 (Atlas). Baseline gets Atlas perf; Nexus cache m008 + rate-limit m010 (cross-topic perf) need meaning. Video-call latency m047 distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC56",
+      "query": "feels equal",
+      "query_type": "topic_recall",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m096",
+        "m098",
+        "m100",
+        "m105"
+      ],
+      "notes": "'equal' substring of m100. Baseline gets m100; the fairness conflict m096/m098/m105 needs meaning. Mostly meaning-driven.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC57",
+      "query": "Belem tower",
+      "query_type": "topic_recall",
+      "scope": "thread",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m156",
+        "m158",
+        "m159",
+        "m160"
+      ],
+      "notes": "'Belem' substring of m158/m159/m160. Baseline gets Belem mentions; the relaxed-itinerary framing m156 needs meaning. Roller-coaster m165 distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC58",
+      "query": "gym membership",
+      "query_type": "topic_recall",
+      "scope": "thread",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m201",
+        "m205",
+        "m206",
+        "m210"
+      ],
+      "notes": "'gym membership' substring of m201 (+m210 media). Baseline gets those; schedule m205/m206 needs meaning. Split m211 distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC59",
+      "query": "Atlas launch",
+      "query_type": "topic_recall",
+      "scope": "topic",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m034",
+        "m042",
+        "m044",
+        "m045"
+      ],
+      "notes": "'Atlas launch' substring of m034. Baseline gets m034; deadline/burnout/slip m042/m044/m045 need meaning.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC60",
+      "query": "beta rollout",
+      "query_type": "topic_recall",
+      "scope": "thread",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m179",
+        "m180",
+        "m182",
+        "m185"
+      ],
+      "notes": "'beta rollout' substring of m179. Baseline gets m179; ramp plan m180/m182 and runbook m185 need meaning. Ad-campaign m188 distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC61",
+      "query": "call the landlord",
+      "query_type": "topic_recall",
+      "scope": "thread",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m133",
+        "m135",
+        "m137",
+        "m138"
+      ],
+      "notes": "'landlord' substring of m134 (a neighbor) and m138. The broken items m133/m135/m137 are described without 'landlord' — need meaning. Data-leak m143 distractor.",
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "reciprocal_rank": 0.0
+    },
+    {
+      "case_id": "GC62",
+      "query": "half marathon training",
+      "query_type": "topic_recall",
+      "scope": "thread",
+      "expected_count": 4,
+      "retrieved_count": 0,
+      "ranked_ids": [],
+      "expected_ids": [
+        "m190",
+        "m192",
+        "m194",
+        "m197"
+      ],
+      "notes": "'half marathon' substring of m190/m191; 'training' in m192/m194. Baseline catches those; shoes m197 needs meaning. 10K m200 distractor.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.0,
       "reciprocal_rank": 0.0
     }
   ],
-  "generated_at": "2026-05-30T00:28:48.316959+00:00"
+  "generated_at": "2026-05-30T02:00:33.727256+00:00"
 }

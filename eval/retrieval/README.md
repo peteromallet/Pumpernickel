@@ -27,33 +27,43 @@ The corpus deliberately exercises six failure modes for naive string matching:
 | Category | What it tests | Why ILIKE struggles |
 |---|---|---|
 | **Terse replies** | One-word / low-signal messages (`"fine."`, `"sure"`, `"I told you so."`) | ILIKE matches only if the query contains the exact word; semantic meaning is lost. |
-| **Paraphrase pairs** | Target message wording diverges completely from natural query phrasing — e.g. a message about *"the idempotency key check failing under concurrent requests"* queried as *"transaction duplicate bug"* | ILIKE requires character-level substring overlap. Paraphrase cases in this harness share **zero** common substrings with their queries, so ILIKE returns `[]`. |
-| **Cross-thread continuations** | The same `topic_id` appears across two different `thread_id` values. A topic-scoped query must return messages from **all** threads sharing that topic. | ILIKE can find the lexical hits, but the **scope filter** is the key differentiator — thread-scoped queries must exclude the other thread's hits, while topic-scoped queries must include both. |
-| **Near-duplicate incidents** | Two messages describe the same event with wording differing by one detail (e.g. a payment processor bug). | Both contain overlapping keywords, so ILIKE finds both — but a semantic system should surface the more complete / authoritative one first. |
-| **Media-analysis-only signal** | Messages whose `content` is generic (`"Check this out"`, `"See attached"`) with all semantically relevant information in `media_analysis.{explanation,description,summary}`. | ILIKE baseline **does** search these fields (see adapter docs), but only if the query substring appears there — it cannot *understand* the media description. |
+| **Paraphrase pairs** | Target wording restates the query's intent with synonyms / different phrasing — e.g. a message *"the OAuth2 login integration is mostly done"* queried as `login integration` or `caching layer` for *"I've been thinking about the caching layer"*. | ILIKE matches the whole `text_contains` argument as one substring. A restated query rarely matches verbatim, so ILIKE either misses or ranks by recency rather than meaning. |
+| **Cross-thread continuations** | The same `topic_id` appears across two different `thread_id` values. A topic-scoped query must return messages from **all** threads sharing that topic. | ILIKE can find a lexical hit in *one* thread, but the topic answer spans **both** threads; the second thread usually restates the topic in different words, so substring matching leaves recall low. |
+| **Near-duplicate incidents** | Two messages describe the same event with wording differing by one detail, plus **decoy** incidents that share words but are the wrong answer (e.g. Nexus payment-transaction duplication vs. a notification-email duplication vs. Orion billing double-charge). | ILIKE finds all lexical matches indiscriminately; a semantic system should rank the right incident and reject the same-word decoy. |
+| **Same-word-different-meaning distractors** | Words reused with a different sense: API `rate` limiting vs. customer-satisfaction `rate`; software `crash` vs. a roller-coaster scare; dinner `reservation` vs. having `reservations` (doubts); a chess `move` vs. an apartment `move`. | ILIKE has no way to tell the senses apart — these are pure lexical traps that hurt its precision. |
+| **Media-analysis-only signal** | Messages whose `content` is generic (`"Check this out"`, `"See attached"`) with all relevant information in `media_analysis.{explanation,description,summary}`. | ILIKE baseline **does** search these fields, but only if the query substring appears there — it cannot *understand* the media description. |
 
-### Why the ILIKE baseline loses on paraphrase and cross-thread cases
+### Fairness: the baseline gets a real lexical shot (this rebuild)
 
-This is the **point** of the harness. The `IlikeBaselineRetriever` is a
-pure-Python reimplementation of case-insensitive substring matching across
-`content`, `media_analysis.explanation`, `media_analysis.description`, and
-`media_analysis.summary`. It has zero semantic understanding:
+> **History.** The first version of this harness deliberately built every
+> paraphrase / cross-thread query to share **zero** substrings with its target,
+> pinning the ILIKE baseline at exactly 0% on those types. That floored the
+> baseline artificially and inflated the semantic lift (recall@10 0.26 → 0.87,
+> ~3x+). **This rebuild fixes that bias** so the comparison is trustworthy.
 
-- **Paraphrase cases**: Every golden case tagged `query_type: paraphrase` has
-  been verified to share **no character-level substring** between the query and
-  the target message content (and no `media_analysis` bridges the gap). The
-  baseline will return an empty list — recall = 0 — for all of them. This is the
-  **baseline floor** that any semantic retriever must beat.
+The `IlikeBaselineRetriever` is a pure-Python reimplementation of production
+`search_messages` ILIKE semantics: it matches the **whole query string** as a
+case-insensitive substring (`content ILIKE '%query%'`) across `content` and the
+three `media_analysis` fields. To give it a *fair* shot:
 
-- **Cross-thread cases**: The baseline applies scope filtering correctly
-  (`thread_id` / `topic_id`), so it finds the right messages via substring
-  matching. But a retriever that cannot resolve `topic_id` associations across
-  threads will fail on the **scope correctness** dimension even if it has good
-  lexical recall. The contrast is deliberate: cross-thread cases isolate the
-  **scoping** failure mode from the **lexical** failure mode.
+- **Paraphrase / cross-thread / topic-recall queries are short, keyword-style
+  search phrases** — the way a user or agent actually drives `search_messages` —
+  and most of them contain a contiguous substring that genuinely appears in at
+  least one expected target. The baseline therefore scores **nonzero** on these
+  types. The semantic win has to come from *meaning*: pulling restated/synonym
+  targets the baseline misses, spanning the second thread of a topic, and
+  out-ranking same-word decoys — not from an artificial zero-overlap floor.
 
-The contrast between high verbatim recall (GC07–GC14) and zero paraphrase
-recall (GC15–GC24) is the harness's reason to exist.
+- **A labeled minority of paraphrase cases are genuinely zero-overlap** (synonym
+  only, marked `[HARD zero-overlap]` in the golden-set notes, e.g. `UV protection`
+  → *"sunscreen"*, `NPE fix` → *"null pointer ... fixed it"*). These preserve a
+  pure-semantic ceiling measurement but do **not** dominate.
+
+The generator `_generate_fixtures.py` prints a fairness audit showing, per query
+type, how many cases the whole-query substring can match — confirming the
+baseline is no longer 0% on paraphrase/cross-thread. See
+`reports/comparison_report.md` for the fair three-way numbers (baseline vs
+semantic vs hybrid) that **supersede** the first run's inflated figures.
 
 ## 3. Scope-model divergence: harness vs. production `search_messages`
 
@@ -141,37 +151,64 @@ The loader (`eval/retrieval/loader.py`) enforces these at load time:
    - `scope == 'all'` must have `thread_id` and `topic_id` omitted or `None`.
    Violations raise `ValueError`.
 
-### Paraphrase case design notes
+### Editing the fixtures
 
-To create a valid paraphrase case (where ILIKE is expected to miss):
+The corpus and golden set are **generated** by `_generate_fixtures.py`; do not
+hand-edit `corpus.yaml` / `golden_set.yaml` (they carry a "DO NOT hand-edit"
+header). Edit the generator's `THREADS` / `CASES` data and re-run it.
 
-1. Write a `query` whose words share **no** character-level substrings with the
-   target message's `content` or any `media_analysis` field.
-2. Verify: `python -c "q='your query'; m='target message content'; print(q.lower() in m.lower())"`
-   should print `False` for the message content and every media_analysis
-   field value.
-3. Set `query_type: paraphrase`.
-4. Add a note explaining why ILIKE will miss (which "danger" substrings were
-   avoided, e.g. "Note: avoided 'sun' because it matches inside 'sunscreen'").
+#### Paraphrase case design notes (fair)
+
+A *fair* paraphrase case restates the query's intent and shares **some** real
+lexical overlap with at least one expected target, so the keyword baseline can
+score nonzero:
+
+1. Write a short, keyword-style `query` (what a user would type into search),
+   containing a contiguous phrase that appears in an expected target.
+2. Make the *right* answer require meaning — e.g. several messages share the
+   phrase but only one matches the intent, or the second half of the expected
+   set restates the topic with synonyms the baseline can't reach.
+3. Set `query_type: paraphrase`. Document the shared substring in the note
+   (the generator emits `(overlap: ...)`).
+4. For a genuinely hard synonym-only case, set `hard_zero=True`; it is labeled
+   `[HARD zero-overlap]` and is expected to be a baseline miss. Keep these a
+   minority.
+
+Run `python -m eval.retrieval._generate_fixtures` — it validates all
+`expected_message_ids` exist and prints the per-type fairness audit.
 
 ## 5. How to run
 
 ### Prerequisites
 
 - Python 3.11+
-- `pip install pydantic pyyaml`
-- No database, no API keys, no network required.
+- Baseline / stub: `pip install pydantic pyyaml` — no database, no API keys, no
+  network.
+- Semantic / hybrid: additionally `pip install sentence-transformers numpy` and
+  the `all-MiniLM-L6-v2` model present in the local Hugging Face cache (the
+  embedder forces `HF_HUB_OFFLINE=1`, so it never hits the network). Corpus
+  embeddings are cached to `reports/.emb_cache/` keyed by a content hash, so
+  re-runs are deterministic and fast.
 
-### Run the baseline adapter
+### Run an adapter
 
 ```bash
-python -m eval.retrieval.runner --adapter baseline
+python -m eval.retrieval.runner --adapter baseline   # today's keyword/ILIKE
+python -m eval.retrieval.runner --adapter semantic   # dense MiniLM cosine
+python -m eval.retrieval.runner --adapter hybrid     # RRF(baseline, semantic)
+python -m eval.retrieval.runner --adapter stub       # empty (proves the seam)
 ```
 
-### Run the stub adapter (proves the pluggable seam)
+### Regenerate fixtures + the fair comparison report
 
 ```bash
-python -m eval.retrieval.runner --adapter stub
+# Rebuild corpus.yaml + golden_set.yaml deterministically (prints fairness audit)
+python -m eval.retrieval._generate_fixtures
+# Run all three adapters, then build reports/comparison_report.md
+python -m eval.retrieval.runner --adapter baseline
+python -m eval.retrieval.runner --adapter semantic
+python -m eval.retrieval.runner --adapter hybrid
+python -m eval.retrieval._make_comparison
 ```
 
 ### Run the semantic and hybrid adapters

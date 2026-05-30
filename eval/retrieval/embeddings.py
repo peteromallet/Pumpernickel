@@ -1,180 +1,112 @@
-"""Embedding backends for the semantic retriever.
+"""Local, offline sentence-embedding backend for the retrieval eval harness.
 
-This module is intentionally self-contained and MUST NOT import from app.*.
-It provides a small `Embedder` protocol plus three concrete backends, chosen
-in this priority order by `get_default_embedder()`:
+Wraps sentence-transformers `all-MiniLM-L6-v2` (384-dim) so the semantic and
+hybrid retrievers can score messages by cosine similarity. Everything runs
+locally: the model is loaded from the on-disk Hugging Face cache and corpus
+embeddings are cached to a `.npy` file keyed by a content hash, so repeated
+runs are deterministic and require no network.
 
-1. OpenAIEmbedder       -- text-embedding-3-small, used ONLY if OPENAI_API_KEY
-                           is already present in the environment. The key is
-                           never logged or hardcoded.
-2. SentenceTransformerEmbedder
-                        -- local all-MiniLM-L6-v2 (sentence-transformers).
-                           No network at query time once the model is cached.
-3. TfidfFloorEmbedder   -- a TF-IDF / char-ngram vector. This is NOT a real
-                           embedding; it is a deterministic "floor" sanity
-                           backend used only when neither real backend is
-                           available. It is clearly labelled as such.
+MUST NOT import anything from app.* — this module is a self-contained eval
+utility.
 
-All backends expose `embed(texts: list[str]) -> np.ndarray` returning an
-(N, dim) float32 array, plus a stable `.name` used for the on-disk cache key.
-
-Embeddings are cached to disk (see `cache.py`) keyed by backend name + a hash
-of the input text, so reruns are cheap and require no network.
+Design notes:
+- Determinism: the model runs in eval mode with a fixed input order; MiniLM is
+  deterministic on CPU for a given input. We additionally cache the corpus
+  matrix to disk so re-runs read identical vectors.
+- Offline: we set HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE before importing the
+  library so a missing-network environment never blocks on a download attempt
+  (the model is expected to already be in the local cache).
+- Lazy import: `sentence_transformers` and `numpy` are imported inside the
+  class so that the baseline adapter and the rest of the harness stay
+  dependency-free for callers that never touch semantics.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
-from typing import Protocol, runtime_checkable
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
-
-
-@runtime_checkable
-class Embedder(Protocol):
-    """Protocol for embedding backends."""
-
-    #: Stable identifier used as part of the on-disk cache key.
-    name: str
-
-    def embed(self, texts: list[str]) -> np.ndarray:
-        """Embed a list of texts into an (N, dim) float32 array."""
-        ...
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np  # noqa: F401
 
 
-# ---------------------------------------------------------------------------
-# OpenAI backend (text-embedding-3-small)
-# ---------------------------------------------------------------------------
+DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / "reports" / ".emb_cache"
 
 
-class OpenAIEmbedder:
-    """OpenAI text-embedding-3-small backend.
+class MiniLMEmbedder:
+    """Deterministic, offline embedder over all-MiniLM-L6-v2.
 
-    Only usable when OPENAI_API_KEY is present in the environment. The key is
-    read by the openai SDK itself; this class never reads, stores, logs, or
-    prints it.
+    Embeddings are L2-normalized so that a plain dot product equals cosine
+    similarity. Corpus embeddings are cached to disk keyed by a hash of the
+    (model_name, ordered texts) so re-runs are byte-identical without recompute.
     """
 
-    name = "openai-text-embedding-3-small"
+    def __init__(
+        self,
+        model_name: str = DEFAULT_MODEL_NAME,
+        *,
+        cache_dir: Path | None = None,
+    ) -> None:
+        self.model_name = model_name
+        self._cache_dir = cache_dir or _DEFAULT_CACHE_DIR
+        self._model = None  # lazy
 
-    def __init__(self, model: str = "text-embedding-3-small") -> None:
-        from openai import OpenAI  # lazy import
+    # -- model loading -----------------------------------------------------
 
-        self._model = model
-        self._client = OpenAI()  # reads OPENAI_API_KEY from env
+    def _ensure_model(self):
+        if self._model is None:
+            # Force offline so a download attempt never wedges the run.
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+            from sentence_transformers import SentenceTransformer
 
-    def embed(self, texts: list[str]) -> np.ndarray:
+            self._model = SentenceTransformer(self.model_name, device="cpu")
+            self._model.eval()
+        return self._model
+
+    # -- embedding ---------------------------------------------------------
+
+    def _encode(self, texts: list[str]):
+        import numpy as np
+
         if not texts:
-            return np.zeros((0, 1536), dtype=np.float32)
-        # Replace empty strings; the API rejects empty inputs.
-        cleaned = [t if t.strip() else " " for t in texts]
-        resp = self._client.embeddings.create(model=self._model, input=cleaned)
-        vecs = [d.embedding for d in resp.data]
-        return np.asarray(vecs, dtype=np.float32)
-
-
-# ---------------------------------------------------------------------------
-# Local sentence-transformers backend (all-MiniLM-L6-v2)
-# ---------------------------------------------------------------------------
-
-
-class SentenceTransformerEmbedder:
-    """Local sentence-transformers backend (default: all-MiniLM-L6-v2)."""
-
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
-        from sentence_transformers import SentenceTransformer  # lazy import
-
-        self._model_name = model_name
-        self._model = SentenceTransformer(model_name)
-        # Normalise the name for cache keying.
-        self.name = f"sentence-transformers-{model_name}"
-
-    def embed(self, texts: list[str]) -> np.ndarray:
-        if not texts:
-            dim = self._model.get_sentence_embedding_dimension()
-            return np.zeros((0, dim), dtype=np.float32)
-        vecs = self._model.encode(
+            return np.zeros((0, 384), dtype=np.float32)
+        model = self._ensure_model()
+        vecs = model.encode(
             texts,
+            batch_size=64,
             convert_to_numpy=True,
-            normalize_embeddings=False,
+            normalize_embeddings=True,
             show_progress_bar=False,
         )
-        return np.asarray(vecs, dtype=np.float32)
+        return vecs.astype(np.float32)
 
+    def embed_query(self, text: str):
+        """Return an L2-normalized 1-D embedding for a single query string."""
+        return self._encode([text])[0]
 
-# ---------------------------------------------------------------------------
-# TF-IDF / char-ngram FLOOR backend (NOT a real embedding)
-# ---------------------------------------------------------------------------
+    def embed_corpus(self, texts: list[str]):
+        """Return an L2-normalized (N, 384) matrix for ordered corpus texts.
 
+        Cached to disk keyed by a hash of (model_name, texts). The cache is a
+        plain .npy matrix; if the corpus text changes the hash changes and a
+        fresh matrix is computed and stored.
+        """
+        import numpy as np
 
-class TfidfFloorEmbedder:
-    """Deterministic TF-IDF char-ngram vectoriser used as a sanity FLOOR.
+        key = hashlib.sha256(
+            ("␟".join([self.model_name, *texts])).encode("utf-8")
+        ).hexdigest()[:16]
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = self._cache_dir / f"corpus_{key}.npy"
 
-    This is NOT a semantic embedding. It captures lexical / sub-word overlap
-    only and exists solely so the harness can still produce *some* dense-vector
-    comparison when neither OpenAI nor sentence-transformers is available.
-    Results from this backend must be labelled "TF-IDF floor (not a real
-    embedding)" in any report.
+        if cache_path.exists():
+            return np.load(cache_path)
 
-    It must be `fit` on the full corpus + queries before embedding so the
-    vocabulary is shared; the SemanticRetriever handles that by fitting on the
-    corpus and transforming queries against the same fitted vectoriser.
-    """
-
-    name = "tfidf-char-ngram-floor"
-
-    def __init__(self) -> None:
-        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy
-
-        self._vectorizer = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(3, 5),
-            lowercase=True,
-        )
-        self._fitted = False
-
-    def fit(self, texts: list[str]) -> None:
-        self._vectorizer.fit(texts if texts else [" "])
-        self._fitted = True
-
-    def embed(self, texts: list[str]) -> np.ndarray:
-        if not self._fitted:
-            # Fit lazily on whatever we're given (degrades gracefully).
-            self.fit(texts)
-        if not texts:
-            return np.zeros((0, len(self._vectorizer.vocabulary_)), dtype=np.float32)
-        mat = self._vectorizer.transform(texts)
-        return mat.toarray().astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
-# Backend selection
-# ---------------------------------------------------------------------------
-
-
-def get_default_embedder() -> tuple[Embedder, bool]:
-    """Pick the best available embedding backend.
-
-    Returns:
-        (embedder, is_real_embedding) where is_real_embedding is False only
-        for the TF-IDF floor backend.
-
-    Priority:
-        1. OpenAI text-embedding-3-small  (iff OPENAI_API_KEY already set)
-        2. sentence-transformers all-MiniLM-L6-v2  (iff importable)
-        3. TF-IDF char-ngram floor  (sklearn; labelled not-a-real-embedding)
-    """
-    if os.environ.get("OPENAI_API_KEY"):
-        try:
-            return OpenAIEmbedder(), True
-        except Exception:
-            pass  # fall through to local backends
-
-    try:
-        import sentence_transformers  # noqa: F401
-
-        return SentenceTransformerEmbedder(), True
-    except Exception:
-        pass
-
-    return TfidfFloorEmbedder(), False
+        matrix = self._encode(texts)
+        np.save(cache_path, matrix)
+        return matrix

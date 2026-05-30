@@ -1,10 +1,14 @@
 """Retriever adapters for the retrieval evaluation harness.
 
-Defines the Retriever protocol and two implementations:
+Defines the Retriever protocol and its implementations:
 - IlikeBaselineRetriever: Pure-python re-implementation of the ILIKE shape
   from the production search_messages (case-insensitive substring match across
   content and media_analysis fields).
 - StubSemanticRetriever: Returns empty list deterministically.
+- SemanticRetriever: Cosine similarity over local MiniLM dense embeddings,
+  with the same scope filtering and deterministic tiebreaker as the baseline.
+- HybridRetriever: Reciprocal Rank Fusion (RRF) of the baseline and semantic
+  rankings.
 
 MUST NOT import anything from app.* — this module is a pure-python
 re-implementation from documentation only.
@@ -12,9 +16,47 @@ re-implementation from documentation only.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from eval.retrieval.schema import Corpus, CorpusMessage, Scope
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from eval.retrieval.embeddings import MiniLMEmbedder
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def message_text(msg: CorpusMessage) -> str:
+    """Return the full searchable text for a message.
+
+    Concatenates content with any media_analysis explanation/description/summary
+    so semantic scoring sees the same signal the ILIKE baseline can match on.
+    Deterministic field order: content, explanation, description, summary.
+    """
+    parts: list[str] = [msg.content]
+    ma = msg.media_analysis
+    if ma is not None:
+        for field in ("explanation", "description", "summary"):
+            val = ma.get(field)
+            if isinstance(val, str) and val:
+                parts.append(val)
+    return " ".join(parts)
+
+
+def _scope_filter(
+    messages: list[CorpusMessage],
+    scope: Scope,
+    thread_id: str | None,
+    topic_id: str | None,
+) -> list[CorpusMessage]:
+    if scope == "thread":
+        return [m for m in messages if m.thread_id == thread_id]
+    if scope == "topic":
+        return [m for m in messages if m.topic_id == topic_id]
+    return list(messages)
 
 
 class Retriever(Protocol):
@@ -142,135 +184,29 @@ class StubSemanticRetriever:
         return []
 
 
-# ---------------------------------------------------------------------------
-# Shared helpers for semantic / hybrid retrievers
-# ---------------------------------------------------------------------------
-
-
-def message_text(msg: CorpusMessage) -> str:
-    """Build the text used to embed a message.
-
-    Concatenates content with the same media_analysis fields the ILIKE
-    baseline searches (explanation / description / summary), so the semantic
-    and keyword retrievers see the same source material — the only difference
-    is matching by meaning vs. matching by substring.
-    """
-    parts: list[str] = [msg.content]
-    ma = msg.media_analysis
-    if isinstance(ma, dict):
-        for field in ("explanation", "description", "summary"):
-            val = ma.get(field)
-            if isinstance(val, str) and val.strip():
-                parts.append(val)
-    return "\n".join(parts)
-
-
-def _scope_candidates(
-    corpus: Corpus, scope: Scope, thread_id: str | None, topic_id: str | None
-) -> list[CorpusMessage]:
-    """Apply the same scope filter the baseline uses."""
-    candidates = corpus.messages
-    if scope == "thread":
-        return [m for m in candidates if m.thread_id == thread_id]
-    if scope == "topic":
-        return [m for m in candidates if m.topic_id == topic_id]
-    return list(candidates)
-
-
 class SemanticRetriever:
-    """Dense-vector semantic retriever.
+    """Dense-embedding retriever using cosine similarity over MiniLM vectors.
 
-    Embeds every corpus message once (cached to disk), embeds the query at
-    retrieve time, and ranks scope-filtered candidates by cosine similarity.
+    Builds an L2-normalized embedding matrix over the full corpus text
+    (content + media_analysis) once, then for each query embeds it and ranks
+    candidates by cosine similarity (= dot product, since vectors are
+    normalized). Applies the SAME scope filter as the baseline so the only
+    difference being measured is lexical-vs-semantic matching, not scoping.
 
-    Scope filtering is identical to ``IlikeBaselineRetriever`` so the two are
-    directly comparable; the only difference is the scoring function.
-
-    Ranking is by cosine descending, with a deterministic ``(sent_at, id)``
-    DESC tiebreaker matching the baseline so equal scores never produce
-    unstable ordering.
+    Ranking: primary key cosine score DESC; deterministic tiebreaker
+    (sent_at DESC, id DESC) matches the baseline so equal-score ties are
+    resolved identically across adapters.
     """
 
-    def __init__(
-        self,
-        corpus: Corpus,
-        embedder=None,
-        *,
-        cache_dir=None,
-        use_cache: bool = True,
-    ) -> None:
-        import numpy as np
-
-        from eval.retrieval.embeddings import get_default_embedder
+    def __init__(self, corpus: Corpus, embedder: "MiniLMEmbedder | None" = None) -> None:
+        from eval.retrieval.embeddings import MiniLMEmbedder
 
         self._corpus = corpus
-        self._np = np
-
-        if embedder is None:
-            embedder, is_real = get_default_embedder()
-            self.is_real_embedding = is_real
-        else:
-            self.is_real_embedding = getattr(embedder, "is_real_embedding", True)
-        self._embedder = embedder
-        self.backend_name = getattr(embedder, "name", embedder.__class__.__name__)
-
-        ids = [m.id for m in corpus.messages]
-        texts = [message_text(m) for m in corpus.messages]
-
-        # TF-IDF floor must be fit on the full corpus vocabulary first.
-        if hasattr(embedder, "fit") and not getattr(embedder, "_fitted", False):
-            embedder.fit(texts)
-
-        matrix = self._embed(texts, cache_dir=cache_dir, use_cache=use_cache)
-        self._ids = ids
-        self._id_to_row = {mid: i for i, mid in enumerate(ids)}
-        self._matrix = self._l2_normalize(matrix)
-
-    def _embed(self, texts, *, cache_dir, use_cache):
-        # The TF-IDF floor backend shares a fitted vocabulary across calls and
-        # is cheap, so caching it to disk is both unnecessary and unsafe
-        # (vectors are vocabulary-relative). Only cache real embedders.
-        if use_cache and self.is_real_embedding:
-            from eval.retrieval.cache import EmbeddingCache
-
-            cache = EmbeddingCache(self.backend_name, cache_dir=cache_dir)
-            return cache.embed_cached(texts, self._embedder.embed)
-        return self._embedder.embed(texts)
-
-    def _l2_normalize(self, mat):
-        np = self._np
-        mat = np.asarray(mat, dtype=np.float32)
-        if mat.size == 0:
-            return mat
-        norms = np.linalg.norm(mat, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        return mat / norms
-
-    def _embed_query(self, query: str):
-        vec = self._embedder.embed([query])
-        return self._l2_normalize(vec)[0]
-
-    def score_candidates(
-        self,
-        query: str,
-        scope: Scope,
-        *,
-        thread_id: str | None = None,
-        topic_id: str | None = None,
-    ) -> list[tuple[CorpusMessage, float]]:
-        """Return (message, cosine) for scope-filtered candidates, ranked."""
-        candidates = _scope_candidates(self._corpus, scope, thread_id, topic_id)
-        if not candidates:
-            return []
-        qvec = self._embed_query(query)
-        scored: list[tuple[CorpusMessage, float]] = []
-        for msg in candidates:
-            row = self._matrix[self._id_to_row[msg.id]]
-            scored.append((msg, float(qvec @ row)))
-        # Cosine DESC, then (sent_at, id) DESC tiebreaker (baseline parity).
-        scored.sort(key=lambda x: (x[0].sent_at, x[0].id), reverse=True)
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored
+        self._embedder = embedder or MiniLMEmbedder()
+        self._messages = list(corpus.messages)
+        texts = [message_text(m) for m in self._messages]
+        self._matrix = self._embedder.embed_corpus(texts)  # (N, 384)
+        self._index_by_id = {m.id: i for i, m in enumerate(self._messages)}
 
     def retrieve(
         self,
@@ -281,42 +217,50 @@ class SemanticRetriever:
         topic_id: str | None = None,
         limit: int = 50,
     ) -> list[str]:
-        scored = self.score_candidates(
-            query, scope, thread_id=thread_id, topic_id=topic_id
-        )
-        return [m.id for m, _ in scored[:limit]]
+        candidates = _scope_filter(self._messages, scope, thread_id, topic_id)
+        if not candidates:
+            return []
+
+        qvec = self._embedder.embed_query(query)
+        scored: list[tuple[float, CorpusMessage]] = []
+        for msg in candidates:
+            row = self._matrix[self._index_by_id[msg.id]]
+            score = float(row @ qvec)  # cosine, vectors are normalized
+            scored.append((score, msg))
+
+        # Sort by (score DESC, sent_at DESC, id DESC) deterministically.
+        scored.sort(key=lambda t: (t[0], t[1].sent_at, t[1].id), reverse=True)
+        return [m.id for _, m in scored[:limit]]
 
 
 class HybridRetriever:
-    """Reciprocal Rank Fusion (RRF) of ILIKE keyword and semantic rankings.
+    """Reciprocal Rank Fusion (RRF) of the baseline and semantic rankings.
 
-    This is the retriever the Xen design proposes. For each candidate, RRF
-    sums ``1 / (k + rank)`` across the keyword and semantic rankings (rank is
-    1-indexed; a retriever that does not rank a document contributes nothing
-    for it). The standard ``k = 60`` constant is used.
+    For each candidate, RRF score = sum over rankers of 1 / (k + rank), where
+    rank is 1-indexed and k=60 (Cormack et al. default). A document missing
+    from a ranker simply contributes nothing from that ranker. This rewards
+    documents ranked highly by *either* retriever and is robust to score-scale
+    differences between lexical and semantic scorers.
 
-    Scope filtering is shared with both sub-retrievers. Final tiebreaker is
-    ``(sent_at, id)`` DESC for determinism.
+    Both sub-rankers are queried over the full candidate set (limit large)
+    before fusion so the fusion sees complete rankings, then the fused list is
+    truncated to `limit`. Deterministic tiebreaker (sent_at DESC, id DESC).
     """
+
+    RRF_K = 60
 
     def __init__(
         self,
         corpus: Corpus,
-        semantic: SemanticRetriever | None = None,
+        embedder: "MiniLMEmbedder | None" = None,
         *,
-        embedder=None,
-        rrf_k: int = 60,
-        cache_dir=None,
-        use_cache: bool = True,
+        baseline: IlikeBaselineRetriever | None = None,
+        semantic: SemanticRetriever | None = None,
     ) -> None:
         self._corpus = corpus
-        self._rrf_k = rrf_k
-        self._baseline = IlikeBaselineRetriever(corpus)
-        self._semantic = semantic or SemanticRetriever(
-            corpus, embedder=embedder, cache_dir=cache_dir, use_cache=use_cache
-        )
-        self.backend_name = self._semantic.backend_name
-        self.is_real_embedding = self._semantic.is_real_embedding
+        self._baseline = baseline or IlikeBaselineRetriever(corpus)
+        self._semantic = semantic or SemanticRetriever(corpus, embedder)
+        self._msg_by_id = {m.id: m for m in corpus.messages}
 
     def retrieve(
         self,
@@ -327,29 +271,19 @@ class HybridRetriever:
         topic_id: str | None = None,
         limit: int = 50,
     ) -> list[str]:
-        k = self._rrf_k
-
-        # Keyword ranking (already scope-filtered + ordered).
-        kw_ranked = self._baseline.retrieve(
-            query, scope, thread_id=thread_id, topic_id=topic_id, limit=10**9
-        )
-        # Semantic ranking over the same scope.
-        sem_scored = self._semantic.score_candidates(
-            query, scope, thread_id=thread_id, topic_id=topic_id
-        )
-        sem_ranked = [m.id for m, _ in sem_scored]
+        full = len(self._corpus.messages)
+        kwargs = dict(scope=scope, thread_id=thread_id, topic_id=topic_id, limit=full)
+        lex = self._baseline.retrieve(query, **kwargs)
+        sem = self._semantic.retrieve(query, **kwargs)
 
         rrf: dict[str, float] = {}
-        for rank, mid in enumerate(kw_ranked, start=1):
-            rrf[mid] = rrf.get(mid, 0.0) + 1.0 / (k + rank)
-        for rank, mid in enumerate(sem_ranked, start=1):
-            rrf[mid] = rrf.get(mid, 0.0) + 1.0 / (k + rank)
+        for ranking in (lex, sem):
+            for rank, mid in enumerate(ranking, start=1):
+                rrf[mid] = rrf.get(mid, 0.0) + 1.0 / (self.RRF_K + rank)
 
-        # Deterministic tiebreaker: (sent_at, id) DESC.
-        by_id = {m.id: m for m in self._corpus.messages}
-        fused = sorted(
-            rrf.items(),
-            key=lambda kv: (kv[1], by_id[kv[0]].sent_at, kv[0]),
-            reverse=True,
-        )
-        return [mid for mid, _ in fused[:limit]]
+        def sort_key(mid: str) -> tuple[float, object, str]:
+            msg = self._msg_by_id[mid]
+            return (rrf[mid], msg.sent_at, msg.id)
+
+        fused = sorted(rrf.keys(), key=sort_key, reverse=True)
+        return fused[:limit]

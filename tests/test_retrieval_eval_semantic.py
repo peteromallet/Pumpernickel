@@ -41,13 +41,24 @@ class FakeEmbedder:
     def __init__(self, dim: int = 64) -> None:
         self._dim = dim
 
-    def embed(self, texts: list[str]) -> np.ndarray:
+    def _embed(self, texts: list[str]) -> np.ndarray:
         out = np.zeros((len(texts), self._dim), dtype=np.float32)
         for i, t in enumerate(texts):
             for tok in t.lower().split():
                 h = int(hashlib.sha256(tok.encode()).hexdigest(), 16)
                 out[i, h % self._dim] += 1.0
-        return out
+        # L2-normalize so dot product == cosine, matching MiniLMEmbedder's
+        # contract (SemanticRetriever scores via plain dot product).
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return out / norms
+
+    # SemanticRetriever's embedder interface: embed_corpus + embed_query.
+    def embed_corpus(self, texts: list[str]) -> np.ndarray:
+        return self._embed(texts)
+
+    def embed_query(self, text: str) -> np.ndarray:
+        return self._embed([text])[0]
 
 
 def _corpus() -> Corpus:
@@ -101,7 +112,7 @@ def _golden() -> GoldenSet:
 
 
 def _make_semantic(corpus: Corpus) -> SemanticRetriever:
-    return SemanticRetriever(corpus, embedder=FakeEmbedder(), use_cache=False)
+    return SemanticRetriever(corpus, embedder=FakeEmbedder())
 
 
 def _make_hybrid(corpus: Corpus) -> HybridRetriever:

@@ -428,4 +428,7 @@ def test_cli_default_paths_direct_call() -> None:
 
     assert isinstance(report, EvalReport)
     assert report.adapter_name == "IlikeBaselineRetriever"
-    assert report.overall["n"] == 28  # 28 golden cases
+    # n equals the number of cases in the shipped golden set (do not hardcode a
+    # count: the fair golden set was scaled up, so derive it from the file).
+    shipped = load_golden_set(_SHIPPED_GOLDEN, corpus=load_corpus(_SHIPPED_CORPUS))
+    assert report.overall["n"] == len(shipped.cases)

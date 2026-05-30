@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from eval.retrieval.adapters import IlikeBaselineRetriever, StubSemanticRetriever
+import pytest
+
+from eval.retrieval.adapters import (
+    HybridRetriever,
+    IlikeBaselineRetriever,
+    SemanticRetriever,
+    StubSemanticRetriever,
+    message_text,
+)
 from eval.retrieval.schema import Corpus, CorpusMessage
 
 
@@ -289,3 +297,113 @@ def test_adapters_module_has_no_app_imports():
                 assert not node.module.startswith(
                     "app."
                 ), f"adapters.py imports from app.*: {node.module}"
+
+
+# ---------------------------------------------------------------------------
+# message_text helper
+# ---------------------------------------------------------------------------
+
+
+def test_message_text_concatenates_media_in_field_order():
+    """message_text appends media_analysis fields in explanation/description/summary order."""
+    msg = CorpusMessage(
+        id="m001",
+        thread_id="t",
+        topic_id="x",
+        sender="A",
+        recipient="B",
+        sent_at=datetime(2025, 5, 1, tzinfo=timezone.utc),
+        content="See attached",
+        media_analysis={"summary": "SUM", "explanation": "EXP", "description": "DESC"},
+    )
+    assert message_text(msg) == "See attached EXP DESC SUM"
+
+
+def test_message_text_plain_content():
+    msg = CorpusMessage(
+        id="m001",
+        thread_id="t",
+        topic_id="x",
+        sender="A",
+        recipient="B",
+        sent_at=datetime(2025, 5, 1, tzinfo=timezone.utc),
+        content="just content",
+    )
+    assert message_text(msg) == "just content"
+
+
+# ---------------------------------------------------------------------------
+# SemanticRetriever / HybridRetriever
+#
+# These require the local MiniLM model + numpy + sentence-transformers. If the
+# backend is unavailable (e.g. no cached model / no deps), the tests skip so the
+# core harness suite still runs dependency-free.
+# ---------------------------------------------------------------------------
+
+
+def _semantic_or_skip(corpus: Corpus):
+    try:
+        return SemanticRetriever(corpus)
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"semantic backend unavailable: {exc}")
+
+
+def test_semantic_finds_paraphrase_baseline_misses():
+    """Semantic should retrieve a meaning-match the ILIKE baseline cannot."""
+    corpus = _make_test_corpus()
+    sem = _semantic_or_skip(corpus)
+    # "production outage" is a paraphrase of m001 "The server is down in production".
+    results = sem.retrieve("production outage", scope="all", limit=5)
+    assert "m001" in results
+    # Baseline returns [] for the same query (verified in another test).
+    assert IlikeBaselineRetriever(corpus).retrieve("production outage", scope="all", limit=5) == []
+
+
+def test_semantic_respects_thread_scope():
+    corpus = _make_test_corpus()
+    sem = _semantic_or_skip(corpus)
+    results = sem.retrieve("anything", scope="thread", thread_id="thread_b", limit=50)
+    assert all(
+        corpus.messages[int(r[1:]) - 1].thread_id == "thread_b" for r in results
+    )
+
+
+def test_semantic_is_deterministic():
+    corpus = _make_test_corpus()
+    sem = _semantic_or_skip(corpus)
+    a = sem.retrieve("server down", scope="all", limit=10)
+    b = sem.retrieve("server down", scope="all", limit=10)
+    assert a == b
+
+
+def test_semantic_limit_truncation():
+    corpus = _make_test_corpus()
+    sem = _semantic_or_skip(corpus)
+    results = sem.retrieve("the", scope="all", limit=3)
+    assert len(results) <= 3
+
+
+def test_hybrid_fuses_baseline_and_semantic():
+    """Hybrid should return a non-empty fused ranking covering both rankers' hits."""
+    corpus = _make_test_corpus()
+    try:
+        hyb = HybridRetriever(corpus)
+    except Exception as exc:  # pragma: no cover
+        pytest.skip(f"semantic backend unavailable: {exc}")
+    # Verbatim hit (baseline) plus paraphrase ability (semantic).
+    results = hyb.retrieve("server is down", scope="all", limit=10)
+    assert "m001" in results
+    # Deterministic.
+    assert results == hyb.retrieve("server is down", scope="all", limit=10)
+
+
+def test_hybrid_respects_scope():
+    corpus = _make_test_corpus()
+    try:
+        hyb = HybridRetriever(corpus)
+    except Exception as exc:  # pragma: no cover
+        pytest.skip(f"semantic backend unavailable: {exc}")
+    results = hyb.retrieve("game", scope="topic", topic_id="topic_y", limit=50)
+    assert all(
+        corpus.messages[int(r[1:]) - 1].topic_id == "topic_y" for r in results
+    )

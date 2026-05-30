@@ -19,13 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from eval.retrieval.adapters import (
-    HybridRetriever,
-    IlikeBaselineRetriever,
-    Retriever,
-    SemanticRetriever,
-    StubSemanticRetriever,
-)
+from eval.retrieval.adapters import IlikeBaselineRetriever, Retriever, StubSemanticRetriever
 from eval.retrieval.loader import load_corpus, load_golden_set
 from eval.retrieval.metrics import (
     aggregate,
@@ -309,13 +303,13 @@ def main(argv: list[str] | None = None) -> EvalReport:
     elif adapter_name == "stub":
         retriever = StubSemanticRetriever(corpus)
     elif adapter_name == "semantic":
+        from eval.retrieval.adapters import SemanticRetriever
+
         retriever = SemanticRetriever(corpus)
-        print(f"Embedding backend: {retriever.backend_name} "
-              f"(real_embedding={retriever.is_real_embedding})")
     elif adapter_name == "hybrid":
+        from eval.retrieval.adapters import HybridRetriever
+
         retriever = HybridRetriever(corpus)
-        print(f"Embedding backend: {retriever.backend_name} "
-              f"(real_embedding={retriever.is_real_embedding})")
     else:
         raise ValueError(f"Unknown adapter: {adapter_name}")
 
