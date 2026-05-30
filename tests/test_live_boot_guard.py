@@ -44,7 +44,19 @@ def _reset_settings_cache():
     get_settings.cache_clear()
 
 
+_RAILWAY_SIGNAL_VARS = (
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+)
+
+
 def _prime(monkeypatch, extra: dict[str, str]) -> None:
+    # Start from a clean slate: clear any Railway deploy markers and ENV_NAME
+    # that might leak in from the host environment so the deploy-signal logic is
+    # exercised deterministically.  Cases re-add what they need via ``extra``.
+    for var in (*_RAILWAY_SIGNAL_VARS, "ENV_NAME"):
+        monkeypatch.delenv(var, raising=False)
     for k, v in {**_BASE_ENV, **extra}.items():
         monkeypatch.setenv(k, v)
     get_settings.cache_clear()
@@ -58,7 +70,7 @@ def _prime(monkeypatch, extra: dict[str, str]) -> None:
     [
         ("local", False),
         ("test", False),
-        ("staging", False),
+        ("staging", True),  # staging holds real-ish data → requires auth
         ("dev", False),
         ("ci", False),
         ("production", True),
@@ -69,8 +81,39 @@ def _prime(monkeypatch, extra: dict[str, str]) -> None:
     ],
 )
 def test_is_production_inference(monkeypatch, env_name, expected):
+    """env_name-only inference (no Railway deploy signal present)."""
     _prime(monkeypatch, {"ENV_NAME": env_name})
     assert Settings().is_production is expected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Railway deploy-signal inference (fail-OPEN regression coverage)
+# ─────────────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("signal_var", _RAILWAY_SIGNAL_VARS)
+def test_railway_signal_without_env_name_is_production(monkeypatch, signal_var):
+    """A real Railway deploy that simply never set ENV_NAME must be treated as
+    production.  ENV_NAME is unset ⇒ Settings.env_name defaults to "local", but
+    the RAILWAY_* deploy marker overrides that default ⇒ is_production True.
+
+    This is the fail-OPEN the review found: pre-hardening, this resolved to
+    is_production=False and the boot guard stayed dormant.
+    """
+    _prime(monkeypatch, {signal_var: "production"})  # ENV_NAME intentionally unset
+    assert "ENV_NAME" not in __import__("os").environ
+    assert Settings().is_production is True
+
+
+def test_railway_signal_with_explicit_local_opts_out(monkeypatch):
+    """RAILWAY present but ENV_NAME explicitly "local" ⇒ NOT production.
+
+    The explicit developer opt-out must still win even inside a deployed
+    container (e.g. a Railway-hosted dev box).
+    """
+    _prime(
+        monkeypatch,
+        {"RAILWAY_ENVIRONMENT": "production", "ENV_NAME": "local"},
+    )
+    assert Settings().is_production is False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +167,47 @@ async def test_lifespan_refuses_prod_with_auth_off(monkeypatch):
     _prime(
         monkeypatch,
         {"ENV_NAME": "production", "LIVE_VOICE_AUTH_ENABLED": "false"},
+    )
+    monkeypatch.setattr(main_mod, "db_lifespan", _noop_db_lifespan)
+
+    with pytest.raises(RuntimeError, match="live_voice_auth_enabled must be True"):
+        async with main_mod.lifespan(_FakeApp()):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_lifespan_refuses_railway_deploy_missing_env_name(monkeypatch):
+    """Fail-OPEN regression: a Railway deploy that forgot ENV_NAME (so it
+    defaults to "local") AND left auth off must still refuse to boot.
+
+    Pre-hardening this booted wide-open because env_name="local" ⇒
+    is_production=False ⇒ guard dormant.
+    """
+    import app.main as main_mod
+
+    _prime(
+        monkeypatch,
+        {
+            "RAILWAY_ENVIRONMENT": "production",  # ENV_NAME intentionally unset
+            "LIVE_VOICE_AUTH_ENABLED": "false",
+        },
+    )
+    monkeypatch.setattr(main_mod, "db_lifespan", _noop_db_lifespan)
+
+    with pytest.raises(RuntimeError, match="live_voice_auth_enabled must be True"):
+        async with main_mod.lifespan(_FakeApp()):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_lifespan_refuses_staging_with_auth_off(monkeypatch):
+    """Staging holds real-ish data, so the guard must fire there too when auth
+    is off."""
+    import app.main as main_mod
+
+    _prime(
+        monkeypatch,
+        {"ENV_NAME": "staging", "LIVE_VOICE_AUTH_ENABLED": "false"},
     )
     monkeypatch.setattr(main_mod, "db_lifespan", _noop_db_lifespan)
 

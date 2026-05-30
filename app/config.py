@@ -9,6 +9,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_SEED_BOT = "mediator"
 
+# Environment-variable names that a Railway-deployed container sets in every
+# running instance.  Their mere presence is a positive signal that we are in a
+# real deploy, which ``Settings.is_production`` treats as production unless
+# ``ENV_NAME`` explicitly opts out (see ``_DEV_OPT_OUT_ENV_NAMES``).
+_RAILWAY_DEPLOY_SIGNAL_VARS: tuple[str, ...] = (
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+)
+
+
+def _railway_deploy_signal_present() -> bool:
+    """True when any Railway deploy marker is present in the environment."""
+    return any(
+        os.environ.get(var, "").strip() for var in _RAILWAY_DEPLOY_SIGNAL_VARS
+    )
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -225,23 +242,52 @@ class Settings(BaseSettings):
                 result[bot_id] = value
         return result
 
-    # Non-production environment identifiers.  Anything outside this set is
-    # treated as production by ``is_production`` (fail-safe: an unrecognised
-    # env name is assumed to be prod so the boot guards engage).
-    _NON_PROD_ENV_NAMES: frozenset[str] = frozenset(
-        {"local", "test", "tests", "staging", "stage", "dev", "development", "ci"}
+    # Environment names that explicitly opt OUT of production treatment.  An
+    # operator who sets ``ENV_NAME`` to one of these is consciously declaring a
+    # developer / CI environment, even inside a deployed Railway container.
+    #
+    # NOTE: ``staging`` is deliberately NOT in this set.  Staging holds
+    # real-ish data, so the live-voice auth boot guard must fire there too;
+    # staging is treated as production-equivalent for auth purposes.
+    _DEV_OPT_OUT_ENV_NAMES: frozenset[str] = frozenset(
+        {"local", "test", "tests", "dev", "development", "ci"}
     )
 
     @property
     def is_production(self) -> bool:
-        """True when the configured environment looks like production.
+        """True when the running environment should be treated as production.
 
-        Production is inferred from ``env_name`` (the repo's existing
-        environment convention).  Recognised non-prod names are local / test /
-        staging / dev / ci; anything else — including the empty string — is
-        treated as production so security guards fail safe.
+        Two independent, fail-SAFE signals drive this:
+
+        1. **Positive deploy signal (Railway).**  Railway injects ``RAILWAY_*``
+           vars into every deployed container.  If any is present we treat the
+           process as production UNLESS ``ENV_NAME`` is *explicitly* set to a
+           recognised developer / CI value (local / dev / development / test /
+           ci).  This closes the fail-OPEN where a real deploy simply never set
+           ``ENV_NAME`` (default ``"local"``) and slipped past the guard.
+
+        2. **Explicit env-name.**  Independent of Railway, any ``env_name``
+           that is not a recognised dev opt-out (including ``staging`` and the
+           empty string) is treated as production so security guards engage.
+
+        Local dev (no ``RAILWAY_*`` present + default ``env_name="local"``)
+        resolves to non-production, so nothing changes for developers.
         """
-        return self.env_name.strip().lower() not in self._NON_PROD_ENV_NAMES
+        name = self.env_name.strip().lower()
+        is_dev_opt_out = name in self._DEV_OPT_OUT_ENV_NAMES
+        if _railway_deploy_signal_present():
+            # Inside a real Railway deploy, the dev opt-out only applies when
+            # ENV_NAME was set *explicitly* in the environment.  A deploy that
+            # simply forgot ENV_NAME leaves ``env_name`` at its "local" default,
+            # which must NOT shield it — that was the fail-OPEN.  So require an
+            # explicit env-var to honour the opt-out; otherwise it's production.
+            explicit_dev_opt_out = (
+                is_dev_opt_out and os.environ.get("ENV_NAME", "").strip() != ""
+            )
+            return not explicit_dev_opt_out
+        # No deploy signal: fall back to explicit env-name inference (staging
+        # and any unrecognised name — including "" — count as production).
+        return not is_dev_opt_out
 
     @cached_property
     def live_voice_ops_user_id_set(self) -> frozenset[str]:
