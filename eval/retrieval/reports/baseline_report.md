@@ -3,7 +3,7 @@
 - **Adapter:** IlikeBaselineRetriever
 - **Corpus:** /Users/peteromalley/Documents/Veas/eval/retrieval/corpus.yaml
 - **Golden Set:** /Users/peteromalley/Documents/Veas/eval/retrieval/golden_set.yaml
-- **Generated:** 2026-05-31T22:17:24.652983+00:00
+- **Generated:** 2026-05-31T23:40:42.736783+00:00
 - **Cases:** 70
 
 ## Overall Metrics

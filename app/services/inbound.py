@@ -17,6 +17,11 @@ from app.models.user import claim_onboarding_welcome, upsert_user
 from app.services import routing, system_state
 from app.services.charge import classify_charge
 from app.services.crypto import encrypt_value
+from app.services.message_embedding_lifecycle import (
+    enqueue_message_embed,
+    enqueue_message_embedding_drop,
+    enqueue_message_reembed,
+)
 from app.services.messaging import send_outbound
 from app.services.scope import InboundScope, InboundTransport
 from app.services.scheduled_job_handlers import seed_weekly_reflections
@@ -77,29 +82,50 @@ def _edit_target_id(message: dict[str, Any]) -> str | None:
 async def _handle_edit(pool: Any, target_id: str, new_content: str) -> None:
     # DEBT-090: UPDATE targets only whatsapp_message_id without bot_id.
     # Accepted sprint debt per SD-006 (no broad queue semantics redesign).
-    await pool.execute(
+    row = await pool.fetchrow(
         """
+        WITH target AS (
+            SELECT id, content AS old_content
+            FROM messages
+            WHERE whatsapp_message_id = $3
+        )
         UPDATE messages
         SET edit_history = COALESCE(edit_history, '[]'::jsonb)
                 || jsonb_build_array(jsonb_build_object('content', content, 'at', now())),
             content = $1,
             content_encrypted = $2,
             edited_at = now()
-        WHERE whatsapp_message_id = $3
+        FROM target
+        WHERE messages.id = target.id
+        RETURNING messages.id, messages.content, messages.media_analysis, target.old_content
         """,
         new_content,
         encrypt_value(new_content),
         target_id,
     )
+    if row is not None and row["old_content"] != row["content"]:
+        await enqueue_message_reembed(
+            pool,
+            message_id=row["id"],
+            content=row["content"],
+            media_analysis=row["media_analysis"],
+        )
 
 
 async def _handle_delete(pool: Any, target_id: str) -> None:
     # DEBT-090: DELETE targets only whatsapp_message_id without bot_id.
     # Accepted sprint debt per SD-006 (no broad queue semantics redesign).
-    await pool.execute(
-        "UPDATE messages SET deleted_at = now() WHERE whatsapp_message_id = $1",
+    row = await pool.fetchrow(
+        """
+        UPDATE messages
+        SET deleted_at = now()
+        WHERE whatsapp_message_id = $1
+        RETURNING id
+        """,
         target_id,
     )
+    if row is not None:
+        await enqueue_message_embedding_drop(pool, message_id=row["id"])
 
 
 def _reaction_sentiment(emoji: str | None) -> str:
@@ -278,7 +304,7 @@ async def _insert_message(
     bot_id: str | None = None,
     topic_id: UUID | None = None,
 ):
-    return await pool.fetchrow(
+    row = await pool.fetchrow(
         """
         INSERT INTO messages
             (direction, sender_id, content, content_encrypted, processing_state, whatsapp_message_id, sent_at,
@@ -300,6 +326,14 @@ async def _insert_message(
         bot_id,
         topic_id,
     )
+    if row is not None:
+        await enqueue_message_embed(
+            pool,
+            message_id=row["id"],
+            content=content,
+            media_analysis=media_analysis,
+        )
+    return row
 
 
 async def _coalescer_add(

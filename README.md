@@ -35,6 +35,7 @@ Mirror these variables in local `.env` and Railway environment variables:
 
 - `ENV_NAME`
 - `DATABASE_URL`
+- `DIRECT_DATABASE_URL` for pgvector backfill, HNSW index work, and DB-backed retrieval evals that need a direct session-mode connection
 - `DATABASE_SCHEMA`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
@@ -68,6 +69,19 @@ Mirror these variables in local `.env` and Railway environment variables:
 - `SUPABASE_STORAGE_BUCKET`
 - `MEDIA_FETCH_TIMEOUT_S`
 - `DATA_ENCRYPTION_KEY`
+- `EMBEDDING_PROVIDER` default `openai`
+- `EMBEDDING_MODEL` default `text-embedding-3-small`
+- `EMBEDDING_DIMENSION` default `1536`
+- `QUERY_EMBED_TIMEOUT_S` default `0.4`
+- `QUERY_EMBED_CACHE_TTL_S` default `300`
+- `QUERY_EMBED_CACHE_MAX_ENTRIES` default `1024`
+- `RETRIEVAL_HNSW_EF_SEARCH` default `80`
+- `EMBEDDING_WORKER_ENABLED` default `false`
+- `EMBEDDING_WORKER_POLL_INTERVAL_S` default `5.0`
+- `EMBEDDING_WORKER_BATCH_SIZE` default `32`
+- `EMBEDDING_BACKFILL_BATCH_SIZE` default `64`
+- `EMBEDDING_BACKFILL_RATE_LIMIT_PER_MIN` default `60`
+- `EMBEDDING_BACKFILL_COVERAGE_THRESHOLD` default `0.95`
 
 Optional values may be left blank when unused. Secret values must only live in
 local `.env`, Railway variables, or the relevant provider control plane.
@@ -88,8 +102,24 @@ The migrations use guarded DDL where practical so accidental re-runs are safer,
 but they are forward migrations rather than a general migration manager.
 
 It creates 11 spec tables plus the operational `llm_spend_log` and
-`pacing_events` tables. It enables only `pgcrypto`; it must not create pgvector,
-embedding columns, or vector storage.
+`pacing_events` tables. The foundation enables only `pgcrypto`. Migration
+`0056_retrieval_index.sql` is the explicit Xen v1 M1 reversal that introduces
+`pgvector`, retrieval FTS artifacts, async embedding jobs, and vector storage.
+Apply it outside local/test only after human sign-off: app traffic stays on the
+pooled database URL, while production embedding backfill and any HNSW
+`CREATE INDEX CONCURRENTLY` work must use a direct session-mode connection and
+the gated backfill/ops workflow, not an application startup path or migration
+transaction.
+
+The production embedding default is `EMBEDDING_PROVIDER=openai`,
+`EMBEDDING_MODEL=text-embedding-3-small`, and `EMBEDDING_DIMENSION=1536`.
+Startup settings validation rejects mismatched known model/dimension pairs:
+OpenAI `text-embedding-3-small` must stay at 1536 dimensions, and local
+`bge-small` must stay at 384 dimensions. Custom registered embedders may use
+their own positive dimension under a non-built-in provider name, but query and
+corpus embeddings still have to match the configured model and dimension.
+Local `bge-small` support is optional/lazy; default unit tests should use fake
+embedders and must not require hosted embedding calls.
 
 After applying the migration to Supabase or a scratch Postgres database, verify
 the foundation schema before deploying:

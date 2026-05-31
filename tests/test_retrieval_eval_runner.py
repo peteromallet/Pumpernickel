@@ -578,6 +578,24 @@ def test_m1_gate_fails_paraphrase_below_threshold() -> None:
     assert exc_info.value.code == 1
 
 
+def test_m1_gate_fails_with_clear_diagnostic_when_paraphrase_coverage_missing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """M1 gate reports insufficient embedding coverage instead of a vague zero score."""
+    from eval.retrieval._make_comparison import _assert_m1_gate
+
+    baseline = _make_fake_baseline()
+    semantic = _make_fake_report(paraphrase_recall10=0.0, n=0)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _assert_m1_gate(baseline, semantic)
+
+    assert exc_info.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "paraphrase coverage is insufficient for M1 gate" in stderr
+    assert "by_query_type['paraphrase'].n is 0" in stderr
+
+
 def test_m1_gate_fails_verbatim_below_baseline() -> None:
     """M1 gate exits non-zero when verbatim_quote recall@1 < baseline."""
     from eval.retrieval._make_comparison import _assert_m1_gate

@@ -82,13 +82,15 @@ def run_eval(
     per_case_results: list[dict[str, Any]] = []
 
     for case in golden_set.cases:
+        extra_scope = dict(case.extra_scope or {})
+        extra_scope.setdefault("query_type", case.query_type)
         ranked_ids = retriever.retrieve(
             query=case.query,
             scope=case.scope,
             thread_id=case.thread_id,
             topic_id=case.topic_id,
             limit=limit,
-            **(case.extra_scope or {}),
+            **extra_scope,
         )
 
         case_result: dict[str, Any] = {

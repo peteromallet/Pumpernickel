@@ -87,26 +87,50 @@ class FakeConnection:
         self.pool = pool
 
     async def execute(self, sql: str, *args) -> str:
+        self.pool.connection_events.append(
+            ("execute", self.pool.transaction_depth, " ".join(sql.split()), args)
+        )
         return await self.pool.execute(sql, *args)
 
     async def fetchrow(self, sql: str, *args):
+        self.pool.connection_events.append(
+            ("fetchrow", self.pool.transaction_depth, " ".join(sql.split()), args)
+        )
         return await self.pool.fetchrow(sql, *args)
 
     async def fetchval(self, sql: str, *args):
+        self.pool.connection_events.append(
+            ("fetchval", self.pool.transaction_depth, " ".join(sql.split()), args)
+        )
         return await self.pool.fetchval(sql, *args)
 
     async def fetch(self, sql: str, *args):
+        self.pool.connection_events.append(
+            ("fetch", self.pool.transaction_depth, " ".join(sql.split()), args)
+        )
         return await self.pool.fetch(sql, *args)
 
     def transaction(self) -> "FakeTransactionContext":
-        return FakeTransactionContext()
+        return FakeTransactionContext(self.pool)
 
 
 class FakeTransactionContext:
+    def __init__(self, pool: "FakePool") -> None:
+        self.pool = pool
+
     async def __aenter__(self) -> None:
+        self.pool.transaction_depth += 1
+        self.pool.transaction_entries += 1
+        self.pool.connection_events.append(
+            ("transaction_enter", self.pool.transaction_depth, "", ())
+        )
         return None
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
+        self.pool.connection_events.append(
+            ("transaction_exit", self.pool.transaction_depth, "", ())
+        )
+        self.pool.transaction_depth -= 1
         return False
 
 
@@ -134,6 +158,11 @@ class FakePool:
         self.closed = False
         self.users = {}
         self.messages = {}
+        self.message_embeddings = {}
+        self.embed_jobs = {}
+        self.connection_events: list[tuple[str, int, str, tuple[Any, ...]]] = []
+        self.transaction_depth = 0
+        self.transaction_entries = 0
         self.bot_turns = {}
         self.turn_audit_events = []
         self.llm_spend_log = {}
@@ -175,6 +204,95 @@ class FakePool:
         # S7: Hector fitness — commitments and events tables (T15).
         self.commitments: dict[UUID, dict[str, Any]] = {}
         self.events: dict[UUID, dict[str, Any]] = {}
+
+    def _canonical_searchable_text(self, row: dict[str, Any]) -> str:
+        if "canonical_text" in row:
+            return row.get("canonical_text") or ""
+        analysis = row.get("media_analysis") or {}
+        if isinstance(analysis, str):
+            try:
+                analysis = json.loads(analysis)
+            except json.JSONDecodeError:
+                analysis = {"summary": analysis}
+        analysis_parts = []
+        if isinstance(analysis, dict):
+            analysis_parts = [
+                str(analysis.get(key) or "")
+                for key in ("explanation", "description", "summary")
+                if analysis.get(key)
+            ]
+        return "\n".join(
+            [
+                row.get("content") or "",
+                "\n".join(analysis_parts),
+                row.get("transcript") or "",
+            ]
+        )
+
+    def _searchable_message_row(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        if row.get("deleted_at") is not None:
+            return None
+        if row.get("search_suppressed_at") is not None:
+            return None
+        return {
+            "message_id": row["id"],
+            "canonical_text": self._canonical_searchable_text(row),
+            "sent_at": row.get("sent_at"),
+            "sender_id": row.get("sender_id"),
+            "recipient_id": row.get("recipient_id"),
+            "bot_id": row.get("bot_id", "mediator"),
+            "topic_id": row.get(
+                "topic_id", UUID("00000000-0000-4000-8000-000000000001")
+            ),
+            "dyad_id": row.get("dyad_id"),
+            "thread_owner_user_id": row.get("thread_owner_user_id")
+            or row.get("sender_id"),
+            "thread_owner_partner_share": row.get(
+                "thread_owner_partner_share", row.get("partner_share", "private")
+            ),
+            "active_oob_severity": row.get("active_oob_severity"),
+        }
+
+    def _row_matches_retrieval_visibility(
+        self, row: dict[str, Any], args: tuple[Any, ...]
+    ) -> bool:
+        values = list(args)
+        row_bot_id = row.get("bot_id")
+        bot_id = next(
+            (
+                value
+                for value in values
+                if isinstance(value, str) and value == row_bot_id
+            ),
+            None,
+        )
+        uuid_values = [value for value in values if isinstance(value, UUID)]
+        uuid_lists = [
+            set(value)
+            for value in values
+            if isinstance(value, list) and all(isinstance(item, UUID) for item in value)
+        ]
+        topic_id = uuid_values[1] if len(uuid_values) > 1 else None
+        dyad_id = uuid_values[2] if len(uuid_values) > 2 else None
+        thread_owner = uuid_values[3] if len(uuid_values) > 3 else None
+        participants = uuid_lists[0] if uuid_lists else None
+
+        if bot_id is not None and row.get("bot_id") != bot_id:
+            return False
+        if topic_id is not None and row.get("topic_id") != topic_id:
+            return False
+        if dyad_id is not None and row.get("dyad_id") not in (None, dyad_id):
+            return False
+        if thread_owner is not None and row.get("thread_owner_user_id") != thread_owner:
+            return False
+        if participants is not None:
+            if row.get("thread_owner_user_id") not in participants:
+                return False
+            if row.get("sender_id") not in participants and row.get("recipient_id") not in participants:
+                return False
+        if row.get("active_oob_severity") in {"firm", "hard"}:
+            return False
+        return True
 
     def link_topic(
         self, artifact_table: str, artifact_id: UUID, topic_id: UUID
@@ -230,6 +348,52 @@ class FakePool:
 
     async def fetchrow(self, sql: str, *args):
         compact = " ".join(sql.split())
+        if compact.startswith("SELECT message_id, canonical_text FROM mediator.v_searchable_messages"):
+            row = self.messages.get(args[0])
+            return self._searchable_message_row(row) if row is not None else None
+        if compact.startswith("SELECT id, deleted_at, search_suppressed_at FROM mediator.messages"):
+            row = self.messages.get(args[0])
+            if row is None:
+                return None
+            return {
+                "id": row["id"],
+                "deleted_at": row.get("deleted_at"),
+                "search_suppressed_at": row.get("search_suppressed_at"),
+            }
+        if compact.startswith("SELECT id, message_id, job_kind") and "FROM mediator.embed_jobs" in compact:
+            message_id, job_kind, content_hash_value = args
+            matches = [
+                job
+                for job in self.embed_jobs.values()
+                if job["message_id"] == message_id
+                and job["job_kind"] == job_kind
+                and job["status"] in {"pending", "processing"}
+                and job.get("content_hash") == content_hash_value
+            ]
+            matches.sort(key=lambda row: (row.get("created_at"), str(row["id"])))
+            return matches[0] if matches else None
+        if compact.startswith("INSERT INTO mediator.embed_jobs"):
+            message_id, job_kind, model, dimension, content_hash_value, now = args
+            job_id = uuid4()
+            row = {
+                "id": job_id,
+                "message_id": message_id,
+                "job_kind": job_kind,
+                "status": "pending",
+                "model": model,
+                "dimension": dimension,
+                "content_hash": content_hash_value,
+                "attempts": 0,
+                "last_error": None,
+                "next_attempt_at": now,
+                "locked_at": None,
+                "locked_by": None,
+                "created_at": now,
+                "updated_at": now,
+                "completed_at": None,
+            }
+            self.embed_jobs[job_id] = row
+            return row
         if compact.startswith("INSERT INTO users"):
             name, phone, timezone = args
             existing = next(
@@ -399,7 +563,7 @@ class FakePool:
                 "media_url": row.get("media_url"),
             }
         if compact.startswith(
-            "SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at FROM messages WHERE id=$1 AND ( sender_id = ANY($2::uuid[]) OR recipient_id = ANY($2::uuid[]) )"
+            "SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at, media_analysis FROM messages WHERE id=$1 AND ( sender_id = ANY($2::uuid[]) OR recipient_id = ANY($2::uuid[]) )"
         ):
             message_id, user_ids = args[:2]
             bot_filter = args[2] if len(args) > 2 else None
@@ -420,10 +584,11 @@ class FakePool:
                 "content": row.get("content"),
                 "whatsapp_message_id": row.get("whatsapp_message_id"),
                 "deleted_at": row.get("deleted_at"),
+                "media_analysis": row.get("media_analysis"),
             }
         if (
             compact.startswith(
-                "SELECT id, direction, sender_id, recipient_id, media_type, media_url, deleted_at"
+                "SELECT id, direction, sender_id, recipient_id, content, media_type, media_url, media_analysis, deleted_at"
             )
             and "FROM messages" in compact
         ):
@@ -445,6 +610,39 @@ class FakePool:
             ):
                 return None
             return row
+        if compact.startswith("WITH target AS ( SELECT id, content AS old_content"):
+            new_content = args[0]
+            content_encrypted = args[1] if len(args) == 3 else None
+            wa_id = args[-1]
+            for message in self.messages.values():
+                if message["whatsapp_message_id"] != wa_id:
+                    continue
+                old_content = message.get("content")
+                message["edit_history"] = [
+                    {
+                        "content": old_content,
+                        "at": datetime.now(UTC).isoformat(),
+                    }
+                ]
+                message["content"] = new_content
+                if content_encrypted is not None:
+                    message["content_encrypted"] = content_encrypted
+                message["edited_at"] = datetime.now(UTC)
+                return {
+                    "id": message["id"],
+                    "content": message.get("content"),
+                    "media_analysis": message.get("media_analysis"),
+                    "old_content": old_content,
+                }
+            return None
+        if compact.startswith("UPDATE messages SET deleted_at"):
+            wa_id = args[0]
+            for message in self.messages.values():
+                if message["whatsapp_message_id"] != wa_id:
+                    continue
+                message["deleted_at"] = datetime.now(UTC)
+                return {"id": message["id"]}
+            return None
         if compact.startswith("INSERT INTO messages"):
             if "direction, recipient_id" in compact:
                 # Outbound: basic form appends (bot_id, topic_id).
@@ -2347,6 +2545,118 @@ class FakePool:
 
     async def fetch(self, sql: str, *args):
         compact = " ".join(sql.split())
+        if (
+            "FROM mediator.v_searchable_messages m" in compact
+            or "JOIN mediator.v_searchable_messages m" in compact
+        ):
+            rows = []
+            is_semantic = "FROM mediator.message_embeddings e" in compact
+            if is_semantic:
+                query_terms = []
+            else:
+                query_text = next((arg for arg in args if isinstance(arg, str)), "")
+                query_terms = [
+                    term.casefold()
+                    for term in query_text.replace('"', " ").split()
+                    if term.strip()
+                ]
+            for message in self.messages.values():
+                searchable = self._searchable_message_row(message)
+                if searchable is None:
+                    continue
+                if not self._row_matches_retrieval_visibility(searchable, args):
+                    continue
+                if is_semantic:
+                    embedding = self.message_embeddings.get(searchable["message_id"])
+                    if embedding is None:
+                        continue
+                    model_args = [arg for arg in args if isinstance(arg, str)]
+                    int_args = [arg for arg in args if isinstance(arg, int)]
+                    model = model_args[0] if model_args else embedding.get("model")
+                    dimension = int_args[0] if int_args else embedding.get("dimension")
+                    if embedding.get("model") != model or embedding.get("dimension") != dimension:
+                        continue
+                    rows.append(
+                        {
+                            "message_id": searchable["message_id"],
+                            "sent_at": searchable["sent_at"],
+                            "cosine_distance": embedding.get("cosine_distance", 0.0),
+                            "semantic_rank": 0,
+                        }
+                    )
+                else:
+                    canonical_text = searchable["canonical_text"].casefold()
+                    if query_terms and not any(term in canonical_text for term in query_terms):
+                        continue
+                    rows.append(
+                        {
+                            "message_id": searchable["message_id"],
+                            "sent_at": searchable["sent_at"],
+                            "keyword_score": message.get("keyword_score", 1.0),
+                            "keyword_rank": 0,
+                        }
+                    )
+            if is_semantic:
+                rows.sort(
+                    key=lambda row: (
+                        row["cosine_distance"],
+                        row["sent_at"] or datetime.min.replace(tzinfo=UTC),
+                        row["message_id"],
+                    ),
+                    reverse=False,
+                )
+            else:
+                rows.sort(
+                    key=lambda row: (
+                        -float(row["keyword_score"]),
+                        row["sent_at"] or datetime.min.replace(tzinfo=UTC),
+                        row["message_id"],
+                    ),
+                    reverse=True,
+                )
+            for index, row in enumerate(rows, start=1):
+                if is_semantic:
+                    row["semantic_rank"] = index
+                else:
+                    row["keyword_rank"] = index
+            limit = next((arg for arg in reversed(args) if isinstance(arg, int)), len(rows))
+            return rows[:limit]
+        if "FROM mediator.message_embeddings e" in compact:
+            # Keep vector-specific ANN behavior explicit: shared FakePool only
+            # supports the production ANN shape joined through the searchable view.
+            raise AssertionError(
+                "FakePool semantic retrieval must join mediator.v_searchable_messages"
+            )
+        if "FROM mediator.embed_jobs" in compact and "FOR UPDATE SKIP LOCKED" in compact:
+            now, limit, worker_id = args
+            due = [
+                job
+                for job in self.embed_jobs.values()
+                if job["status"] == "pending" and job["next_attempt_at"] <= now
+            ]
+            due.sort(key=lambda row: (row["next_attempt_at"], row["created_at"], str(row["id"])))
+            rows = []
+            for job in due[:limit]:
+                job.update(
+                    status="processing",
+                    attempts=job.get("attempts", 0) + 1,
+                    locked_at=now,
+                    locked_by=worker_id,
+                    updated_at=now,
+                )
+                rows.append(
+                    {
+                        "id": job["id"],
+                        "message_id": job["message_id"],
+                        "job_kind": job["job_kind"],
+                        "model": job["model"],
+                        "dimension": job["dimension"],
+                        "content_hash": job["content_hash"],
+                        "attempts": job["attempts"],
+                        "locked_by": job["locked_by"],
+                    }
+                )
+            return rows
         # ── 0041/0049: claim_messages_for_turn CTE ───────────────────────
         # 0049 adds new_bot_turn_id parameter (args[3]).
         # Mirror the real CTE WHERE clause:
@@ -2930,6 +3240,8 @@ class FakePool:
             rows = []
             for row in self.messages.values():
                 if row.get("deleted_at") is not None:
+                    continue
+                if row.get("search_suppressed_at") is not None:
                     continue
                 if has_bot_scope and not self._message_matches_bot_topic(
                     row, bot_filter, topic_filter
@@ -3612,6 +3924,98 @@ class FakePool:
 
     async def execute(self, sql: str, *args) -> str:
         compact = " ".join(sql.split())
+        if compact.startswith("SET LOCAL hnsw.ef_search"):
+            return "SET"
+        if compact.startswith("INSERT INTO mediator.message_embeddings"):
+            message_id, vector, model, dimension, content_hash_value, now = args
+            self.message_embeddings[message_id] = {
+                "message_id": message_id,
+                "embedding": vector,
+                "model": model,
+                "dimension": dimension,
+                "content_hash": content_hash_value,
+                "embedded_at": now,
+            }
+            return "INSERT 0 1"
+        if compact.startswith("DELETE FROM mediator.message_embeddings"):
+            existed = args[0] in self.message_embeddings
+            self.message_embeddings.pop(args[0], None)
+            return f"DELETE {1 if existed else 0}"
+        if compact.startswith("UPDATE mediator.embed_jobs SET status = $1"):
+            status, last_error, now, job_id, worker_id = args
+            job = self.embed_jobs.get(job_id)
+            if (
+                job is not None
+                and job.get("status") == "processing"
+                and job.get("locked_by") == worker_id
+            ):
+                job.update(
+                    status=status,
+                    last_error=last_error,
+                    locked_at=None,
+                    locked_by=None,
+                    updated_at=now,
+                    completed_at=now,
+                )
+                return "UPDATE 1"
+            return "UPDATE 0"
+        if compact.startswith("UPDATE mediator.embed_jobs SET status = 'pending'"):
+            last_error, next_attempt_at, now, job_id, worker_id = args
+            job = self.embed_jobs.get(job_id)
+            if (
+                job is not None
+                and job.get("status") == "processing"
+                and job.get("locked_by") == worker_id
+            ):
+                job.update(
+                    status="pending",
+                    last_error=last_error,
+                    next_attempt_at=next_attempt_at,
+                    locked_at=None,
+                    locked_by=None,
+                    updated_at=now,
+                )
+                return "UPDATE 1"
+            return "UPDATE 0"
+        if "UPDATE mediator.embed_jobs" in compact and "superseded by drop job" in compact:
+            message_id, now = args
+            affected = 0
+            for job in self.embed_jobs.values():
+                if (
+                    job["message_id"] == message_id
+                    and job["job_kind"] in {"embed", "reembed"}
+                    and job["status"] == "pending"
+                ):
+                    job.update(
+                        status="cancelled",
+                        last_error="superseded by drop job",
+                        locked_at=None,
+                        locked_by=None,
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                    affected += 1
+            return f"UPDATE {affected}"
+        if "UPDATE mediator.embed_jobs" in compact and "superseded by newer content hash" in compact:
+            message_id, content_hash_value, now = args
+            affected = 0
+            for job in self.embed_jobs.values():
+                if (
+                    job["message_id"] == message_id
+                    and job["job_kind"] in {"embed", "reembed"}
+                    and job["status"] == "pending"
+                    and job.get("content_hash") != content_hash_value
+                ):
+                    job.update(
+                        status="superseded",
+                        last_error="superseded by newer content hash",
+                        locked_at=None,
+                        locked_by=None,
+                        updated_at=now,
+                        completed_at=now,
+                    )
+                    affected += 1
+            return f"UPDATE {affected}"
         if compact.startswith("SET search_path TO"):
             return "SET"
         if compact == "SELECT 1":
@@ -4016,11 +4420,14 @@ class FakePool:
                     count += 1
             return f"UPDATE {count}"
         if compact.startswith("UPDATE messages SET edit_history"):
-            new_content = args[0]
-            content_encrypted = args[1] if len(args) == 3 else None
-            wa_id = args[-1]
-            for message in self.messages.values():
-                if message["whatsapp_message_id"] == wa_id:
+            if len(args) == 4:
+                _reason, new_content, content_encrypted, target = args
+            else:
+                new_content = args[0]
+                content_encrypted = args[1] if len(args) == 3 else None
+                target = args[-1]
+            for message_id, message in self.messages.items():
+                if message_id == target or message["whatsapp_message_id"] == target:
                     message["edit_history"] = [
                         {
                             "content": message["content"],
@@ -4033,10 +4440,12 @@ class FakePool:
                     message["edited_at"] = datetime.now(UTC)
             return "UPDATE 1"
         if compact.startswith("UPDATE messages SET deleted_at"):
-            wa_id = args[0]
-            for message in self.messages.values():
-                if message["whatsapp_message_id"] == wa_id:
+            target = args[0]
+            for message_id, message in self.messages.items():
+                if message_id == target or message["whatsapp_message_id"] == target:
                     message["deleted_at"] = datetime.now(UTC)
+                    if "processing_state='expired'" in compact:
+                        message["processing_state"] = "expired"
             return "UPDATE 1"
         if compact.startswith("UPDATE scheduled_jobs SET status = 'superseded'"):
             if "job_type = ANY" in compact:
@@ -4392,6 +4801,31 @@ class FakePool:
         if compact.startswith("DELETE FROM llm_spend_log"):
             self.llm_spend_log.clear()
             return "DELETE 0"
+        if compact.startswith(
+            "UPDATE mediator.conversations SET status = 'prep_failed'"
+        ) and "prep_error" in compact:
+            # Startup recovery sweeps orphaned live-prep rows. Most FakePool
+            # tests do not model conversations, so this is a harmless no-op
+            # unless a test has explicitly added a conversations store.
+            cutoff = args[0]
+            count = 0
+            conversations = getattr(self, "conversations", {})
+            for row in conversations.values():
+                if row.get("status") not in {"prepping", "preparing"}:
+                    continue
+                started_at = (row.get("session_fields") or {}).get("prep_started_at")
+                if isinstance(started_at, str):
+                    started_at = datetime.fromisoformat(
+                        started_at.replace("Z", "+00:00")
+                    )
+                started_at = started_at or row.get("created_at")
+                if started_at is not None and started_at < cutoff:
+                    row["status"] = "prep_failed"
+                    session_fields = dict(row.get("session_fields") or {})
+                    session_fields["prep_error"] = "orphaned"
+                    row["session_fields"] = session_fields
+                    count += 1
+            return f"UPDATE {count}"
         raise AssertionError(f"unhandled execute SQL: {compact}")
 
 

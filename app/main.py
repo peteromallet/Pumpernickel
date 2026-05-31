@@ -33,6 +33,7 @@ from app.services.recovery import recover_on_startup, run_recovery_forever
 from app.services.scheduled_job_handlers import ScheduledJobHandlers, seed_weekly_reflections
 from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
 from app.services.scope import InboundScope
+from app.services.embed_worker import EmbedJobWorker
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +456,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # so a recovery-loop crash does not silence observability.
         metrics_sweep_task = asyncio.create_task(run_metrics_sweep_forever(pool))
         app.state.background_tasks.add(metrics_sweep_task)
+        if settings.embedding_worker_enabled:
+            embedding_worker = EmbedJobWorker(pool, settings=settings)
+            embedding_worker_task = asyncio.create_task(embedding_worker.run_forever())
+            app.state.embedding_worker = embedding_worker
+            app.state.background_tasks.add(embedding_worker_task)
         if settings.scheduler_enabled:
             await seed_heartbeat(pool, settings=settings)
             await seed_weekly_reflections(pool)

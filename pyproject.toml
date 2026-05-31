@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings",
     "cryptography",
     "httpx",
+    "openai>=1.0",
     "python-multipart",
     "websockets",
     "PyYAML",
@@ -27,6 +28,10 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "anyio",
+]
+retrieval-db = [
+    "pgvector",
+    "psycopg[binary]",
 ]
 
 [tool.setuptools.packages.find]

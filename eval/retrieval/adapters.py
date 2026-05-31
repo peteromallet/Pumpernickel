@@ -9,15 +9,22 @@ Defines the Retriever protocol and its implementations:
   with the same scope filtering and deterministic tiebreaker as the baseline.
 - HybridRetriever: Reciprocal Rank Fusion (RRF) of the baseline and semantic
   rankings.
+- DbBackedRetriever: Sync eval adapter over the production async retriever.
 
-MUST NOT import anything from app.* — this module is a pure-python
-re-implementation from documentation only.
+Offline adapters MUST NOT import anything from app.*. DbBackedRetriever is the
+only exception: it lazy-imports app.services.retrieval inside the adapter so no
+M1 tool consumer depends on production retrieval beyond eval.
 """
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import os
+import threading
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Protocol
+from uuid import UUID
 
 from eval.retrieval.schema import Corpus, CorpusMessage, Scope
 
@@ -299,49 +306,45 @@ class HybridRetriever:
 
 
 # ---------------------------------------------------------------------------
-# DbBackedRetriever — production pgvector similarity queries
+# DbBackedRetriever — production retrieval service adapter
 # ---------------------------------------------------------------------------
 
 
 class DbBackedRetriever:
-    """Retriever that runs read-only pgvector similarity queries.
+    """Retriever that delegates to the production async hybrid_search service.
 
-    Reads DIRECT_DATABASE_URL from the environment.  Lazily imports
-    psycopg and pgvector inside __init__ so that the offline harness
-    never needs database dependencies at module-load time.
+    This is intentionally the only eval adapter allowed to import from app.*.
+    It reads DIRECT_DATABASE_URL directly from os.environ, owns a background
+    event loop so the public retrieve(...) method stays synchronous, and closes
+    both the async pool and loop via close().
 
-    ``retrieve()`` applies production-scope filters from ``**extra_scope``
-    (bot_id, participant, partner_share, date) and falls back to
-    thread_id / topic_id / all scope when those fields are absent.
+    Golden-set query types drive production mode selection:
+      - verbatim_quote -> exact
+      - paraphrase -> hybrid
+      - all other types default to hybrid
     """
 
     def __init__(self, corpus: Corpus) -> None:
         self._corpus = corpus  # kept for interface compatibility
 
+        # Intentionally read from os.environ here instead of app Settings: eval
+        # DB usage is opt-in and must point at a direct session-mode URL.
         db_url = os.environ.get("DIRECT_DATABASE_URL")
         if not db_url:
             raise ValueError(
                 "DIRECT_DATABASE_URL must be set to use DbBackedRetriever"
             )
 
-        # Lazy-import database dependencies inside __init__.
-        try:
-            import psycopg  # noqa: F401  — kept for explicitness
-        except ImportError as exc:
-            raise ImportError(
-                "psycopg is required for DbBackedRetriever. "
-                "Install with: pip install psycopg[binary]"
-            ) from exc
-
-        try:
-            import pgvector  # noqa: F401  — registers the vector adapter
-        except ImportError as exc:
-            raise ImportError(
-                "pgvector is required for DbBackedRetriever. "
-                "Install with: pip install pgvector"
-            ) from exc
-
         self._db_url = db_url
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._loop.run_forever,
+            name="eval-db-retriever",
+            daemon=True,
+        )
+        self._thread.start()
+        self._pool: Any | None = None
+        self._closed = False
 
     def retrieve(
         self,
@@ -353,67 +356,118 @@ class DbBackedRetriever:
         limit: int = 50,
         **extra_scope: Any,
     ) -> list[str]:
-        import psycopg
+        return self._run(
+            self._retrieve_async(
+                query=query,
+                scope=scope,
+                thread_id=thread_id,
+                topic_id=topic_id,
+                limit=limit,
+                extra_scope=extra_scope,
+            )
+        )
 
-        bot_id = extra_scope.get("bot_id")
-        participant = extra_scope.get("participant")
-        partner_share = extra_scope.get("partner_share")
-        date = extra_scope.get("date")
+    async def _retrieve_async(
+        self,
+        *,
+        query: str,
+        scope: Scope,
+        thread_id: str | None,
+        topic_id: str | None,
+        limit: int,
+        extra_scope: dict[str, Any],
+    ) -> list[str]:
+        retrieval = importlib.import_module("app.services.retrieval")
+        pool = await self._get_pool()
+        request = retrieval.RetrievalQuery(
+            query=query,
+            viewer_user_id=self._required_uuid(extra_scope, "viewer_user_id"),
+            bot_id=str(extra_scope.get("bot_id") or "mediator"),
+            partner_user_id=self._optional_uuid(extra_scope.get("partner_user_id")),
+            topic_id=self._optional_uuid(extra_scope.get("topic_id") or topic_id),
+            thread_owner_user_id=self._optional_uuid(
+                extra_scope.get("thread_owner_user_id")
+                or (thread_id if scope == "thread" else None)
+            ),
+            dyad_id=self._optional_uuid(extra_scope.get("dyad_id")),
+            mode=self._mode_for_query_type(extra_scope.get("query_type")),
+            limit=limit,
+        )
+        results = await retrieval.hybrid_search(pool, request)
+        return [str(result.message_id) for result in results]
 
-        results: list[str] = []
+    async def _get_pool(self) -> Any:
+        if self._pool is not None:
+            return self._pool
 
-        with psycopg.connect(self._db_url) as conn:
-            with conn.cursor() as cur:
-                # Build a simple pgvector similarity query.
-                # In production this would embed the query first,
-                # but for the eval harness we use a raw text search
-                # that mirrors the ILIKE baseline behavior against the
-                # real database.
-                if bot_id or participant or partner_share or date:
-                    # Production-scope path: use extra_scope filters.
-                    where_parts = []
-                    params: list[Any] = []
-                    if bot_id:
-                        where_parts.append("bot_id = %s")
-                        params.append(bot_id)
-                    if participant:
-                        where_parts.append(
-                            "(sender_id = %s OR recipient_id = %s)"
-                        )
-                        params.extend([participant, participant])
-                    if partner_share is not None:
-                        where_parts.append("partner_share = %s")
-                        params.append(partner_share)
-                    # Add text search
-                    where_parts.append("content ILIKE %s")
-                    params.append(f"%{query}%")
-                    where_clause = " AND ".join(where_parts)
-                    cur.execute(
-                        f"SELECT id FROM messages WHERE {where_clause} "
-                        f"ORDER BY sent_at DESC LIMIT %s",
-                        (*params, limit),
-                    )
-                elif scope == "thread" and thread_id:
-                    cur.execute(
-                        "SELECT id FROM messages WHERE thread_id = %s "
-                        "AND content ILIKE %s ORDER BY sent_at DESC LIMIT %s",
-                        (thread_id, f"%{query}%", limit),
-                    )
-                elif scope == "topic" and topic_id:
-                    cur.execute(
-                        "SELECT id FROM messages WHERE topic_id = %s "
-                        "AND content ILIKE %s ORDER BY sent_at DESC LIMIT %s",
-                        (topic_id, f"%{query}%", limit),
-                    )
-                else:
-                    # scope == 'all' or missing thread/topic id
-                    cur.execute(
-                        "SELECT id FROM messages WHERE content ILIKE %s "
-                        "ORDER BY sent_at DESC LIMIT %s",
-                        (f"%{query}%", limit),
-                    )
+        asyncpg = importlib.import_module("asyncpg")
 
-                results = [row[0] for row in cur.fetchall()]
+        async def init_connection(conn: Any) -> None:
+            try:
+                pgvector_asyncpg = importlib.import_module("pgvector.asyncpg")
+            except ImportError:
+                return
+            await pgvector_asyncpg.register_vector(conn)
 
-        return results
+        self._pool = await asyncpg.create_pool(
+            self._db_url,
+            min_size=1,
+            max_size=4,
+            statement_cache_size=0,
+            init=init_connection,
+        )
+        return self._pool
 
+    def close(self) -> None:
+        """Close the adapter-owned async pool and background event loop."""
+
+        if self._closed:
+            return
+        if self._pool is not None:
+            self._run(self._pool.close())
+            self._pool = None
+        self._closed = True
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+        self._loop.close()
+
+    def __enter__(self) -> "DbBackedRetriever":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        if getattr(self, "_closed", True):
+            return
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _run(self, coro: Any) -> Any:
+        if self._closed:
+            raise RuntimeError("DbBackedRetriever is closed")
+        future: Future[Any] = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
+
+    @staticmethod
+    def _mode_for_query_type(query_type: Any) -> str:
+        if query_type == "verbatim_quote":
+            return "exact"
+        return "hybrid"
+
+    @staticmethod
+    def _optional_uuid(value: Any) -> UUID | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, UUID):
+            return value
+        return UUID(str(value))
+
+    @classmethod
+    def _required_uuid(cls, extra_scope: dict[str, Any], name: str) -> UUID:
+        value = extra_scope.get(name)
+        if value in (None, ""):
+            raise ValueError(f"{name} is required for DbBackedRetriever")
+        return cls._optional_uuid(value)  # type: ignore[return-value]
