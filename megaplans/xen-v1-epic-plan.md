@@ -23,17 +23,19 @@ now with a defensible default; genuinely-human-call items are flagged at the end
    is mitigated by hybrid keyword+semantic, not by window-pooling.)
 
 2. **Embedding model → a single immutable named model with a fixed dim, stored
-   per row.** Default: a hosted embeddings API (OpenAI `text-embedding-3-small`,
-   **1536 dims**) — chosen for zero local-GPU/infra cost, strong terse-text
-   recall, and a stable hosted contract. The model id + dim are recorded in a
+   per row. LOCKED: hosted OpenAI `text-embedding-3-small` (1536 dims)** — chosen
+   for zero local-GPU/infra cost, strong terse-text recall, and a stable hosted
+   contract, and now **validated** (test #1, 2026-05-31: `hybrid-openai` is the
+   best config on every overall metric — recall@10 0.86, recall@1 0.48, MRR 0.88;
+   see `xen-v1-decision-and-validation.md`). The model id + dim are recorded in a
    `message_embeddings.model` column and are **immutable for a given vector**;
    re-embedding under a new model is a new backfill, never an in-place mutation.
    Repo has no embedding dep today (confirmed: no openai/voyage/pgvector in
-   pyproject) — this is net-new and intentional. (If product rejects sending
-   message text to a hosted vendor, the drop-in alternative is a local
-   `bge-small-en-v1.5` / `gte-small`, both 384-dim, via `fastembed`; the schema
-   stores dim so the swap is a backfill, not a redesign. This vendor-vs-local
-   choice is the one genuine human call — see bottom.)
+   pyproject) — this is net-new and intentional. A local `bge-small-en-v1.5` /
+   `gte-small` (both 384-dim, via `fastembed`, no data egress) remains a
+   documented **reversible fallback**: because the schema stores model+dim per
+   row, a swap is a new backfill, not a redesign. The privacy tradeoff that
+   underlies this choice is resolved — see bottom.)
 
 3. **Pooler approach → split read path from build path.**
    - **Query/runtime** runs on the existing transaction pooler (6543,
@@ -120,6 +122,17 @@ The verbatim intent decomposes as follows. Every clause maps to a milestone.
 | tests for SIMPLE nav (deterministic, assert-exact) | M0 |
 | tests for COMPLEX search (recall@k go/no-go) + fairness re-eval | M0 |
 | "evaluate hot-context inclusion: are the right previous-on-topic messages surfaced" | M0 (new metric + fixtures) |
+| push agents toward fuller-context searches (surfaced gist invites a follow-up) | M3 (gist + actionable handles + nudge) + M2 (descriptions that cue proactive use) + M4 (proactive-context-gathering scenario) |
+| paginate through results | M2 (nav `scroll` cursor + `search` `next_cursor` result paging) |
+
+**Added refinement (2026-05-31): "push agents toward fuller-context searches" +
+result pagination.** The system surfaces prior-on-topic context as a *bounded gist
+with actionable handles* (M3), backs it with tool descriptions written to invite
+proactive retrieval (M2), lets the agent **page through** both scrollback (nav
+cursor) and search results (`search` `next_cursor`) (M2), and grades whether the
+agent actually digs deeper when the gist is insufficient (M4
+proactive-context-gathering scenario). This makes "present-before-precise" an
+explicit deliverable, not just an affordance.
 
 ---
 
@@ -137,15 +150,18 @@ Dials per `megaplan-prep`: **profile** (intelligence tier), **robustness**
 
 ---
 
-## The one genuine human call (flagged, not silently decided)
+## The privacy-posture call (RESOLVED)
 
-**Vendor vs local embeddings (privacy posture).** M1's default sends raw message
-text to a hosted embeddings vendor (OpenAI). Veas content is intimate dyadic
-messaging; some users/jurisdictions may forbid that. The schema is designed so
-the choice is a backfill, not a redesign (dim + model stored per row). **Decision
-needed before M1's backfill op runs**, not before M1's code lands. If unanswered,
-M1 builds against a local `bge-small-en-v1.5` (384-dim, `fastembed`, no data
-egress) as the safe default and leaves the hosted adapter as an opt-in config.
+**Vendor vs local embeddings (privacy posture) — DECIDED: hosted OpenAI.** M1
+sends raw message text to a hosted embeddings vendor (OpenAI). Veas content is
+intimate dyadic messaging; this is a real privacy tradeoff, and it is **accepted
+as the chosen default**. The schema is designed so the choice is a backfill, not
+a redesign (dim + model stored per row), and the only actual text egress happens
+at the **gated M1 backfill op** — so the decision is still cleanly revisitable
+right up to that op without a redesign. The local `bge-small-en-v1.5` (384-dim,
+`fastembed`, no data egress) stays the documented reversible fallback if the
+posture ever changes. Validated config = `hybrid-openai` (hosted + RRF); see
+`xen-v1-decision-and-validation.md`.
 
-All other v3 open questions are resolved above (granularity, pooler, hybrid,
-forget tier, surface scope).
+All v3 open questions are resolved above (granularity, embedding model, pooler,
+hybrid, forget tier, surface scope).

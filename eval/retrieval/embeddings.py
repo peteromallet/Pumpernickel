@@ -110,3 +110,95 @@ class MiniLMEmbedder:
         matrix = self._encode(texts)
         np.save(cache_path, matrix)
         return matrix
+
+
+DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
+
+
+class OpenAIEmbedder:
+    """Hosted embedder over OpenAI `text-embedding-3-small` (1536-dim).
+
+    Drop-in for `MiniLMEmbedder`: same `embed_query` / `embed_corpus` contract,
+    same disk cache keyed by (model_name, ordered texts). Vectors are explicitly
+    L2-normalized so a plain dot product equals cosine similarity (the OpenAI API
+    does not guarantee unit-length output). Sends text to the OpenAI API, so this
+    is the only embedder in the harness that touches the network — it is opt-in
+    via the `openai`/`hybrid-openai` adapters and needs `OPENAI_API_KEY` set.
+
+    Cost: the 273-message corpus + 70 queries is ~4k tokens, well under a cent per
+    run at $0.02/1M tokens. This validates the hosted Option-A retriever apples-to-
+    apples against the local MiniLM numbers without any prod backfill.
+    """
+
+    def __init__(
+        self,
+        model_name: str = DEFAULT_OPENAI_MODEL,
+        *,
+        cache_dir: Path | None = None,
+        batch_size: int = 256,
+    ) -> None:
+        self.model_name = model_name
+        self._cache_dir = cache_dir or _DEFAULT_CACHE_DIR
+        self._batch_size = batch_size
+        self._client = None  # lazy
+
+    # -- client ------------------------------------------------------------
+
+    def _ensure_client(self):
+        if self._client is None:
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise RuntimeError(
+                    "OPENAI_API_KEY is not set — the OpenAI embedder needs it to "
+                    "call the embeddings API. Export it before running the "
+                    "`openai`/`hybrid-openai` adapters."
+                )
+            from openai import OpenAI
+
+            self._client = OpenAI()
+        return self._client
+
+    # -- embedding ---------------------------------------------------------
+
+    def _encode(self, texts: list[str]):
+        import numpy as np
+
+        if not texts:
+            return np.zeros((0, 1536), dtype=np.float32)
+        client = self._ensure_client()
+        out: list[list[float]] = []
+        for start in range(0, len(texts), self._batch_size):
+            batch = texts[start : start + self._batch_size]
+            resp = client.embeddings.create(model=self.model_name, input=batch)
+            # API preserves input order in resp.data; sort defensively by index.
+            for item in sorted(resp.data, key=lambda d: d.index):
+                out.append(item.embedding)
+        vecs = np.asarray(out, dtype=np.float32)
+        # Explicit L2 normalize so dot product == cosine (API is not guaranteed unit).
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return (vecs / norms).astype(np.float32)
+
+    def embed_query(self, text: str):
+        """Return an L2-normalized 1-D embedding for a single query string."""
+        return self._encode([text])[0]
+
+    def embed_corpus(self, texts: list[str]):
+        """Return an L2-normalized (N, 1536) matrix for ordered corpus texts.
+
+        Cached to disk keyed by a hash of (model_name, texts), exactly like
+        MiniLMEmbedder; the differing model_name keeps the two caches separate.
+        """
+        import numpy as np
+
+        key = hashlib.sha256(
+            ("␟".join([self.model_name, *texts])).encode("utf-8")
+        ).hexdigest()[:16]
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = self._cache_dir / f"corpus_{key}.npy"
+
+        if cache_path.exists():
+            return np.load(cache_path)
+
+        matrix = self._encode(texts)
+        np.save(cache_path, matrix)
+        return matrix

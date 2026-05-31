@@ -24,8 +24,9 @@ IN:
   - `message_embeddings` table (per-message, **not** a column on `messages`, so
     forget/re-embed is a clean row op and dim is per-vector):
     `message_id uuid PK REFERENCES messages(id) ON DELETE CASCADE`,
-    `embedding vector(1536)` (dim per the model decision in the epic plan —
-    parameterize so a 384-dim local model is a backfill, not a redesign),
+    `embedding vector(1536)` (the locked default per the epic plan: hosted
+    OpenAI `text-embedding-3-small`, 1536-d — parameterize so the 384-dim local
+    `bge-small` fallback is a backfill, not a redesign),
     `model text NOT NULL` (immutable per row), `embedded_at timestamptz`,
     `content_hash text` (detect edits → re-embed). HNSW index built
     `CONCURRENTLY` on a 5432 session.
@@ -49,10 +50,12 @@ IN:
   changes / `content_hash` mismatch) → re-embed. On suppress/delete → delete the
   embedding row (cascade handles delete; suppress handler deletes explicitly).
 - **Pluggable embedder.** One interface `embed(texts) -> list[vector]`; default
-  impl = the chosen model (epic decision 2: hosted `text-embedding-3-small`
-  1536-dim, OR local `bge-small` 384-dim if the vendor call is the human-call
-  rejection). Model id + dim are recorded per row and immutable. New net-new
-  Python dep — add it; the repo has none today.
+  impl = the **locked** model (epic decision 2: hosted `text-embedding-3-small`,
+  1536-dim, validated as the best config). The local `bge-small` (384-dim,
+  `fastembed`, no egress) stays the reversible fallback behind the same
+  interface — a config + backfill swap, not a redesign. Model id + dim are
+  recorded per row and immutable. New net-new Python dep — add it; the repo has
+  none today.
 - **Hybrid retriever (the core).** A service function (call it
   `app/services/retrieval.py::hybrid_search(...)`) that:
   - Runs the semantic half: cosine ANN over `message_embeddings` joined to
@@ -74,6 +77,21 @@ IN:
   - Supports `mode=exact` (keyword-only, for verbatim quotes — semantic hits may
     never be presented as quotes, `xen-retrieval-brief.md:88-91`) and
     `mode=semantic` (full hybrid).
+- **Query-embedding is the only on-path embed — budget + cache + degrade.** The
+  semantic half must embed the *query* synchronously: corpus embeds are async on
+  write, but query embeds cannot be — and query + corpus **must** share the same
+  model, so with the hosted default this is an OpenAI round-trip on every `search`
+  call AND every M3 hot-context build (i.e. on the live-voice path, per turn).
+  Therefore `hybrid_search`:
+  - Runs query embedding under a hard **latency budget** (default 400ms,
+    configurable). On timeout or embedder error it **degrades to keyword-only**
+    (the `mode=exact` path) and returns hits flagged `semantic_degraded=true` — it
+    never fails the caller or blocks a turn on the vendor.
+  - Caches query vectors in a small LRU keyed by `(model, normalized_query)` (short
+    TTL; in-process, Redis if one exists) so repeated / near-identical queries —
+    including the per-turn hot-context query — skip the round-trip.
+  - This budget + degrade path is a **launch gate**, not a nice-to-have: live voice
+    is latency-sensitive and the embedder is an external dependency.
 - **Out-of-band backfill script (scripted, gated, NOT auto-run).** A standalone
   script run against `DIRECT_DATABASE_URL` (5432 session mode) that: builds the
   HNSW index `CONCURRENTLY`, batch-embeds all existing un-embedded messages
@@ -99,8 +117,15 @@ OUT (anti-scope):
 - Async embed-on-write, never inline.
 - Hybrid = tsvector/GIN + pgvector ANN fused by RRF (k=60).
 - v1 forget = suppress tier only, enforced via the searchable view.
-- Embedding model per epic decision 2 (hosted default; local fallback is a
-  config+backfill swap, not a redesign).
+- Query embedding is synchronous and on the hot path (corpus embedding is async);
+  it runs under a latency budget, behind a query-vector cache, and degrades to
+  keyword-only on timeout/error. Query and corpus always use the same model.
+- Embedding model per epic decision 2: **hosted OpenAI `text-embedding-3-small`
+  (1536-d) is the locked, validated default** (best config = hybrid+RRF; see
+  `xen-v1-decision-and-validation.md`). Local `bge-small` (384-d) is the
+  reversible fallback — a config+backfill swap, not a redesign. The privacy
+  tradeoff (text → OpenAI) is resolved/accepted; egress happens only at the
+  gated backfill, so it stays revisitable until that op runs.
 
 ## Open questions
 
@@ -133,6 +158,10 @@ OUT (anti-scope):
   a documented, human-gated step.
 - M0's DB-backed adapter, pointed at this retriever, **passes the M0 go/no-go
   thresholds** (paraphrase recall@10 ≥ 0.7, no verbatim regression).
+- `hybrid_search` degrades to keyword-only within the query-embed latency budget
+  when the embedder times out / errors (test with a slow + a throwing fake
+  embedder), flagging `semantic_degraded`; a repeated query returns a cached vector
+  without a second embed call (test).
 
 ## Touchpoints
 

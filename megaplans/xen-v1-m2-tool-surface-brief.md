@@ -48,7 +48,15 @@ identical to today's `search_messages` (`read_tools.py:469-483`).
     recent." Defaults to `ctx.primary_topic_id`.
 
 **COMPLEX search (M1 retriever).**
-- `search(query, mode, scope, limit) -> { hits[], truncated }`
+- `search(query, mode, scope, limit, cursor?) -> { hits[], truncated, next_cursor? }`
+  - **Paginated result set.** Returns up to `limit` ranked hits plus a
+    `next_cursor` when more exist (`truncated=true`). The agent pages by calling
+    `search` again with `cursor=next_cursor` (same query/mode/scope) to get the
+    next page — a stable rank-offset cursor over the fused ranking (opaque
+    `{query_hash, rank_offset, scope}`), so paging is deterministic for a fixed
+    query. This is paging the *result list*; the per-hit `cursor` (below) is the
+    separate handle for scrolling the *thread around a hit* via `scroll`. `null`
+    `next_cursor` = last page.
   - `mode`: `exact | semantic`. `exact` = keyword-only (verbatim-safe — the only
     mode whose snippets may be presented as quotes,
     `xen-retrieval-brief.md:88-91`). `semantic` = full RRF hybrid.
@@ -88,6 +96,12 @@ re-querying.
   still applies; ensure each bot spec's allowlist includes them (or is `None` =
   all).
 - Nav tools need no `READ_BEFORE_WRITE` entries (they're pure reads).
+- **Descriptions are written to actively invite use (the "push to search" nudge).**
+  Each tool's `TOOL_DESCRIPTIONS` entry tells the agent *when to reach for it* —
+  explicitly: "when the hot-context 'Previous on this topic' gist is insufficient,
+  open the thread / scroll / search to get the full exchange before answering."
+  The goal is proactive context-gathering, not passive tool availability. Pairs
+  with M3's gist-with-handles rendering; M4 grades the behavior.
 
 OUT (anti-scope):
 - No `scope=all` cross-dyad search (deferred opt-in capability).
@@ -105,7 +119,11 @@ OUT (anti-scope):
 - SIMPLE nav = cheap SQL, no embeddings, identical scope+visibility filters to
   `search_messages` today. COMPLEX = M1 hybrid.
 - `mode=exact` is the only quote-safe mode.
-- Cursor = opaque `{anchor_sent_at, anchor_id, scope}`, stable over identity.
+- Two distinct cursor kinds: the **nav cursor** (opaque
+  `{anchor_sent_at, anchor_id, scope}`, stable over identity — for `scroll`) and
+  the **search-page cursor** (opaque `{query_hash, rank_offset, scope}` — for
+  paging a search result list). Both are opaque strings the agent passes back
+  verbatim; never conflate them.
 - `anchor="current"` is resolved against the hot-context window edge that M3
   publishes into `TurnContext` (see M3) — do NOT re-derive "current" inside the
   tool from scratch.
@@ -143,6 +161,12 @@ OUT (anti-scope):
   search verb (test).
 - `scroll` chains via cursor without re-query drift across a mid-window edit
   (test).
+- `search` paginates: a `next_cursor` from page 1 fed back as `cursor` returns the
+  next, non-overlapping page of ranked hits for the same query; `next_cursor` is
+  `null` on the last page (test).
+- Tool descriptions explicitly cue proactive use ("when the hot-context gist is
+  insufficient, search/open for the full exchange") — not just mechanical
+  signatures (review-checked; reflected in M4's proactive-search scenario).
 - M0's nav-eval suite passes at 100% exact-match against these handlers (via the
   DB-backed adapter).
 

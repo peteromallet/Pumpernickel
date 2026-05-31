@@ -52,6 +52,15 @@ IN:
   transcripts — opening the full thread is M2's `open_thread`, a tool call
   (`xen-retrieval-brief.md:56-62`, "present before precise"; the section is a
   *handle to scroll*, not the scrollback itself).
+- **Invites deeper retrieval (the "push to search" nudge).** The block is framed
+  so the agent treats it as a *bounded gist, not the whole story*: a one-line
+  lead-in states these are partial prior-on-topic hits, and each row renders an
+  **actionable handle** (the cursor + a human label) plus an explicit cue that the
+  full exchange is one tool call away (`open_thread`/`scroll`/`search`). Intent:
+  when the surfaced gist is insufficient the agent *proactively* fetches more via
+  M2 rather than answering from the slice. (The matching "use me when the gist
+  isn't enough" framing on the tool **descriptions** is an M2 deliverable; M4
+  grades whether the agent actually does it.)
 - **Visibility.** Every row passes `raw_message_visibility` + `partner_share`
   exactly as `recent_messages` does (`hot_context.py:876-902`), and reads M1's
   searchable view (suppress/deleted excluded by construction).
@@ -77,6 +86,9 @@ OUT (anti-scope):
 - The window-edge anchor is computed in `build_hot_context` and published to
   `TurnContext` for M2's `anchor="current"`.
 - Built for all bots, no per-bot branching.
+- The section is rendered to *invite follow-up retrieval* (gist + actionable
+  handle + an explicit "open/search for the full exchange" cue), not as a
+  self-sufficient answer — the "push to search for full context" behavior.
 
 ## Open questions
 
@@ -85,11 +97,11 @@ OUT (anti-scope):
 2. Whether the semantic-prior query should also fire on *silent* / scheduled-task
    turns (no fresh triggering message). Recommend: only when there is a
    triggering message with content; otherwise topic-recent-only.
-3. Latency: the semantic half adds one ANN query to every hot-context build.
-   Recommend running it concurrently with the existing fetches (the function
-   already `await`s many independent queries; add this to the same gather-style
-   flow) and degrading gracefully to topic-recent-only on timeout/error (mirror
-   the `try/except` around `_fetch_upcoming`, `hot_context.py:1113-1124`).
+3. Latency — **RESOLVED (see Constraints, "Latency (live voice)")**: the
+   semantic half adds one ANN query + (cache-miss) one query-embed round-trip to
+   every hot-context build. Run it concurrently with the existing fetches, reuse
+   M1's query-embed cache + budget, and degrade to topic-recent-only on
+   timeout/error (mirror `_fetch_upcoming`, `hot_context.py:1113-1124`).
 
 ## Constraints
 
@@ -98,6 +110,12 @@ OUT (anti-scope):
 - Must not regress existing hot-context behavior or block the build on retrieval
   failure (graceful degrade, like the existing optional fetches).
 - 6543 pooler: the semantic query uses M1's `SET LOCAL ef_search` in-txn pattern.
+- **Latency (live voice) — hard requirement.** The semantic-prior query reuses
+  M1's query-embed cache and runs under M1's query-embed latency budget; it
+  executes concurrently with the other hot-context fetches and degrades to
+  topic-recent-only on timeout/error (mirror the `_fetch_upcoming` try/except,
+  `hot_context.py:1113-1124`). The hot-context build must NEVER block on the
+  embedding vendor — this fires on every turn for every agent.
 
 ## Done criteria
 
@@ -111,6 +129,9 @@ OUT (anti-scope):
   `messages_before(anchor="current")` consumes it (cross-milestone test).
 - Retrieval failure degrades to topic-recent-only without failing the build
   (test).
+- The rendered block carries a lead-in framing it as a partial gist and renders
+  each row with an actionable handle + a follow-up cue (so the agent is nudged to
+  open/search for full context); asserted in the render test.
 - The section passes M0's hot-context-inclusion thresholds (set-recall ≥ 0.8,
   set-precision ≥ 0.6 @ budget) on the fixture suite (via M0's DB-backed
   candidate path).

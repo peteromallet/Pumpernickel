@@ -29,3 +29,10 @@ supabase/.temp/
 
 # Retrieval eval embedding cache (regenerated on demand)
 eval/retrieval/.embedding_cache/
+
+# Real-data golden set: REAL user data — never commit (see REAL_GOLDEN_SET.md).
+# Ignore all real_*.yaml under eval/retrieval/, but keep the committed template.
+eval/retrieval/real_corpus.yaml
+eval/retrieval/real_golden_set.yaml
+eval/retrieval/real_*.yaml
+!eval/retrieval/real_golden_set.template.yaml

@@ -1,94 +1,94 @@
 {
-  "adapter_name": "SemanticRetriever",
+  "adapter_name": "HybridRetriever",
   "corpus_path": "/Users/peteromalley/Documents/Veas/eval/retrieval/corpus.yaml",
   "golden_set_path": "/Users/peteromalley/Documents/Veas/eval/retrieval/golden_set.yaml",
   "overall": {
-    "recall@1": 0.46380952380952384,
-    "recall@5": 0.7407142857142859,
-    "recall@10": 0.8530952380952381,
-    "mrr": 0.849047619047619,
+    "recall@1": 0.4816666666666667,
+    "recall@5": 0.7566666666666666,
+    "recall@10": 0.8635714285714287,
+    "mrr": 0.8832142857142857,
     "n": 70
   },
   "by_query_type": {
     "verbatim_quote": {
-      "recall@1": 0.5984848484848485,
-      "recall@5": 0.9242424242424243,
+      "recall@1": 0.6439393939393939,
+      "recall@5": 0.9469696969696971,
       "recall@10": 0.9545454545454546,
-      "mrr": 0.8787878787878788,
+      "mrr": 0.9469696969696969,
       "n": 22
     },
     "paraphrase": {
-      "recall@1": 0.6969696969696969,
-      "recall@5": 0.856060606060606,
-      "recall@10": 0.9015151515151515,
-      "mrr": 0.8939393939393938,
+      "recall@1": 0.7196969696969696,
+      "recall@5": 0.9242424242424242,
+      "recall@10": 0.9621212121212122,
+      "mrr": 0.9545454545454546,
       "n": 22
     },
     "cross_thread": {
-      "recall@1": 0.15595238095238093,
-      "recall@5": 0.4345238095238095,
-      "recall@10": 0.680952380952381,
-      "mrr": 0.8047619047619047,
+      "recall@1": 0.13809523809523808,
+      "recall@5": 0.4309523809523809,
+      "recall@10": 0.7095238095238096,
+      "mrr": 0.7946428571428571,
       "n": 14
     },
     "topic_recall": {
       "recall@1": 0.1486111111111111,
-      "recall@5": 0.5499999999999999,
-      "recall@10": 0.7791666666666667,
-      "mrr": 0.7638888888888888,
+      "recall@5": 0.48055555555555557,
+      "recall@10": 0.6958333333333333,
+      "mrr": 0.7388888888888889,
       "n": 12
     }
   },
   "by_fairness": {
     "keyword_favored": {
-      "recall@1": 0.5984848484848485,
-      "recall@5": 0.9242424242424243,
+      "recall@1": 0.6439393939393939,
+      "recall@5": 0.9469696969696971,
       "recall@10": 0.9545454545454546,
-      "mrr": 0.8787878787878788,
+      "mrr": 0.9469696969696969,
       "n": 22
     },
     "either": {
-      "recall@1": 0.38809523809523805,
-      "recall@5": 0.6551587301587302,
-      "recall@10": 0.8206349206349207,
-      "mrr": 0.8730158730158729,
+      "recall@1": 0.37023809523809514,
+      "recall@5": 0.6460317460317461,
+      "recall@10": 0.8142857142857144,
+      "mrr": 0.8658730158730159,
       "n": 42
     },
     "adversarial": {
-      "recall@1": 0.6,
-      "recall@5": 0.8,
-      "recall@10": 0.8,
-      "mrr": 0.6666666666666666,
+      "recall@1": 0.8,
+      "recall@5": 1.0,
+      "recall@10": 1.0,
+      "mrr": 0.9,
       "n": 5
     },
     "semantic_favored": {
       "recall@1": 0.0,
       "recall@5": 0.0,
       "recall@10": 0.25,
-      "mrr": 0.1,
+      "mrr": 0.125,
       "n": 1
     }
   },
   "by_difficulty": {
     "easy": {
-      "recall@1": 0.5984848484848485,
-      "recall@5": 0.9242424242424243,
+      "recall@1": 0.6439393939393939,
+      "recall@5": 0.9469696969696971,
       "recall@10": 0.9545454545454546,
-      "mrr": 0.8787878787878788,
+      "mrr": 0.9469696969696969,
       "n": 22
     },
     "medium": {
-      "recall@1": 0.38809523809523805,
-      "recall@5": 0.6551587301587302,
-      "recall@10": 0.8206349206349207,
-      "mrr": 0.8730158730158729,
+      "recall@1": 0.37023809523809514,
+      "recall@5": 0.6460317460317461,
+      "recall@10": 0.8142857142857144,
+      "mrr": 0.8658730158730159,
       "n": 42
     },
     "hard": {
-      "recall@1": 0.5,
-      "recall@5": 0.6666666666666666,
-      "recall@10": 0.7083333333333334,
-      "mrr": 0.5722222222222222,
+      "recall@1": 0.6666666666666666,
+      "recall@5": 0.8333333333333334,
+      "recall@10": 0.875,
+      "mrr": 0.7708333333333334,
       "n": 6
     }
   },
@@ -104,15 +104,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m013",
-        "m129",
-        "m043",
-        "m141",
+        "m209",
+        "m132",
+        "m099",
+        "m071",
+        "m074",
+        "m102",
+        "m111",
         "m027",
-        "m116",
-        "m007",
-        "m220",
-        "m175",
-        "m094"
+        "m140"
       ],
       "expected_ids": [
         "m013"
@@ -134,15 +134,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m007",
-        "m116",
+        "m066",
+        "m099",
+        "m193",
         "m141",
         "m129",
         "m043",
-        "m102",
-        "m027",
-        "m099",
+        "m116",
         "m187",
-        "m066"
+        "m027"
       ],
       "expected_ids": [
         "m007"
@@ -163,16 +163,16 @@
       "expected_count": 4,
       "retrieved_count": 10,
       "ranked_ids": [
+        "m081",
+        "m090",
         "m087",
         "m091",
-        "m090",
-        "m081",
-        "m161",
-        "m166",
-        "m154",
-        "m162",
-        "m160",
-        "m159"
+        "m129",
+        "m043",
+        "m007",
+        "m187",
+        "m220",
+        "m175"
       ],
       "expected_ids": [
         "m081",
@@ -196,16 +196,16 @@
       "expected_count": 6,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m061",
         "m086",
+        "m087",
+        "m061",
         "m069",
         "m077",
-        "m087",
         "m073",
-        "m131",
         "m079",
+        "m067",
         "m076",
-        "m160"
+        "nav_thread_weekend_hike_mid"
       ],
       "expected_ids": [
         "m061",
@@ -232,15 +232,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m177",
-        "m021",
         "m025",
-        "m023",
-        "m178",
-        "m170",
-        "m132",
-        "m019",
+        "m021",
         "m129",
-        "m043"
+        "m043",
+        "m187",
+        "m042",
+        "m184",
+        "m220",
+        "m175"
       ],
       "expected_ids": [
         "m021",
@@ -262,26 +262,26 @@
       "expected_count": 2,
       "retrieved_count": 10,
       "ranked_ids": [
+        "m010",
         "m012",
         "m011",
-        "m010",
-        "m017",
-        "m002",
         "m007",
-        "m008",
-        "m001",
+        "nav_thread_nexus_kickoff_mid",
         "nav_thread_nexus_kickoff_end",
-        "m009"
+        "m008",
+        "nav_thread_nexus_kickoff_start",
+        "m014",
+        "m017"
       ],
       "expected_ids": [
         "m010",
         "m029"
       ],
       "notes": "Thread-scoped: only m010 is in kickoff; m029 in bugs is scoped out.",
-      "recall_at_1": 0.0,
+      "recall_at_1": 0.5,
       "recall_at_5": 0.5,
       "recall_at_10": 0.5,
-      "reciprocal_rank": 0.3333333333333333
+      "reciprocal_rank": 1.0
     },
     {
       "case_id": "GC07",
@@ -294,15 +294,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m213",
-        "m214",
         "m218",
+        "m214",
+        "m221",
         "m217",
-        "m184",
-        "m004",
-        "m215",
-        "m003",
-        "m168",
-        "m212"
+        "m216",
+        "m028",
+        "m014",
+        "m212",
+        "m021"
       ],
       "expected_ids": [
         "m213",
@@ -324,16 +324,16 @@
       "expected_count": 4,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m050",
         "m054",
-        "m052",
         "m058",
-        "m142",
-        "m063",
-        "m098",
-        "m089",
+        "m052",
+        "m050",
+        "m041",
         "nav_thread_friction_chores_start",
-        "nav_thread_friction_chores_end"
+        "m037",
+        "nav_thread_friction_chores_mid",
+        "m172",
+        "m210"
       ],
       "expected_ids": [
         "m050",
@@ -357,16 +357,16 @@
       "expected_count": 1,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m087",
         "m091",
-        "m090",
         "m081",
-        "m080",
+        "m090",
+        "m087",
         "m092",
         "nav_thread_weekend_dinner_mid",
-        "m086",
         "nav_thread_weekend_dinner_start",
-        "nav_thread_weekend_dinner_end"
+        "m080",
+        "nav_thread_weekend_dinner_end",
+        "m084"
       ],
       "expected_ids": [
         "m090"
@@ -390,13 +390,13 @@
         "m133",
         "m144",
         "m142",
-        "m138",
-        "m094",
-        "m081",
         "m124",
-        "m098",
-        "m134",
-        "m090"
+        "m138",
+        "m125",
+        "m089",
+        "m094",
+        "m130",
+        "m135"
       ],
       "expected_ids": [
         "m133",
@@ -420,14 +420,14 @@
       "ranked_ids": [
         "m191",
         "m190",
-        "m197",
         "m194",
-        "m192",
-        "m196",
-        "m193",
         "m200",
-        "m061",
-        "m207"
+        "nav_thread_fitness_running_mid",
+        "m197",
+        "nav_thread_fitness_running_start",
+        "nav_thread_weekend_hike_mid",
+        "m192",
+        "nav_thread_fitness_running_end"
       ],
       "expected_ids": [
         "m190",
@@ -451,14 +451,14 @@
       "ranked_ids": [
         "m145",
         "m153",
-        "m156",
         "m149",
-        "m155",
+        "m156",
         "m154",
-        "nav_thread_travel_flights_start",
-        "m146",
-        "nav_thread_travel_flights_end",
-        "nav_thread_travel_flights_mid"
+        "m160",
+        "m162",
+        "m155",
+        "m158",
+        "m159"
       ],
       "expected_ids": [
         "m145"
@@ -479,16 +479,16 @@
       "expected_count": 2,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m196",
         "m197",
-        "m191",
-        "m194",
-        "m207",
-        "m192",
+        "m196",
         "nav_thread_fitness_running_start",
-        "m071",
-        "m190",
-        "m199"
+        "nav_thread_fitness_running_mid",
+        "nav_thread_fitness_running_end",
+        "m194",
+        "m192",
+        "m191",
+        "nav_thread_fitness_gym_start",
+        "m193"
       ],
       "expected_ids": [
         "m196",
@@ -511,15 +511,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m027",
-        "m024",
         "m026",
-        "m020",
-        "m023",
-        "m021",
+        "m024",
         "m028",
-        "m029",
-        "m030",
-        "nav_thread_nexus_bugs_end"
+        "nav_thread_nexus_bugs_start",
+        "nav_thread_nexus_bugs_end",
+        "m021",
+        "m020",
+        "nav_thread_nexus_bugs_mid",
+        "m022"
       ],
       "expected_ids": [
         "m027"
@@ -543,13 +543,13 @@
         "m004",
         "m168",
         "m003",
-        "m184",
-        "m183",
-        "m170",
         "m078",
-        "m216",
         "m217",
-        "m221"
+        "m167",
+        "m170",
+        "m216",
+        "m169",
+        "m014"
       ],
       "expected_ids": [
         "m004"
@@ -572,14 +572,14 @@
       "ranked_ids": [
         "m006",
         "m005",
-        "m016",
-        "m199",
         "m010",
-        "nav_thread_house_move_start",
-        "m213",
+        "m016",
+        "m212",
         "m217",
-        "nav_thread_travel_flights_start",
-        "m139"
+        "nav_thread_nexus_security_start",
+        "m028",
+        "m014",
+        "m216"
       ],
       "expected_ids": [
         "m006"
@@ -602,14 +602,14 @@
       "ranked_ids": [
         "m067",
         "m088",
-        "m089",
         "m068",
-        "m124",
-        "m157",
-        "m070",
-        "m112",
-        "m140",
-        "m164"
+        "m071",
+        "m089",
+        "m063",
+        "m220",
+        "m175",
+        "m082",
+        "m207"
       ],
       "expected_ids": [
         "m067"
@@ -632,14 +632,14 @@
       "ranked_ids": [
         "m008",
         "m009",
+        "m042",
+        "m173",
+        "m023",
         "m214",
-        "m215",
-        "nav_thread_atlas_planning_end",
-        "nav_thread_friction_chores_end",
-        "nav_thread_friction_money_end",
-        "m096",
-        "m037",
-        "m050"
+        "m033",
+        "m036",
+        "m213",
+        "m021"
       ],
       "expected_ids": [
         "m008"
@@ -660,26 +660,26 @@
       "expected_count": 2,
       "retrieved_count": 10,
       "ranked_ids": [
+        "m025",
+        "m019",
         "m031",
         "m026",
-        "m019",
         "m177",
         "m178",
-        "m025",
         "m030",
-        "m185",
         "m176",
-        "m106"
+        "m021",
+        "m185"
       ],
       "expected_ids": [
         "m019",
         "m025"
       ],
       "notes": "'duplicating transaction' substring of m019; m025 is the near-duplicate. Orion m176/m177 same-shape billing bug is a different-topic distractor. (overlap: duplicating transaction)",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.5,
+      "recall_at_1": 0.5,
+      "recall_at_5": 1.0,
       "recall_at_10": 1.0,
-      "reciprocal_rank": 0.3333333333333333
+      "reciprocal_rank": 1.0
     },
     {
       "case_id": "GC20",
@@ -692,15 +692,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m127",
-        "m122",
         "m130",
-        "m139",
+        "m122",
         "m121",
         "m131",
-        "m134",
+        "m125",
         "m106",
         "m138",
-        "m126"
+        "nav_thread_house_move_start",
+        "nav_thread_house_move_mid"
       ],
       "expected_ids": [
         "m127",
@@ -725,13 +725,13 @@
         "m094",
         "m098",
         "m133",
-        "m144",
         "m124",
-        "m063",
+        "m144",
         "m142",
-        "m125",
-        "m138",
-        "m130"
+        "m097",
+        "m096",
+        "m063",
+        "nav_thread_weekend_dinner_end"
       ],
       "expected_ids": [
         "m094",
@@ -741,7 +741,7 @@
       "notes": "'dishes' phrasing overlaps m094 ('dishes ... in the sink'); the fairness/resolution targets m096/m105 need meaning. Baseline gets m094. (overlap: dishes in the sink)",
       "recall_at_1": 0.3333333333333333,
       "recall_at_5": 0.3333333333333333,
-      "recall_at_10": 0.3333333333333333,
+      "recall_at_10": 0.6666666666666666,
       "reciprocal_rank": 1.0
     },
     {
@@ -755,15 +755,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m109",
-        "m118",
         "nav_thread_house_repairs_start",
-        "nav_thread_house_repairs_end",
         "nav_thread_house_repairs_mid",
-        "m117",
-        "m055",
-        "nav_thread_friction_chores_end",
+        "m118",
+        "nav_thread_house_repairs_end",
         "nav_thread_friction_chores_start",
-        "m124"
+        "nav_thread_friction_chores_mid",
+        "m117",
+        "nav_thread_friction_chores_end",
+        "m007"
       ],
       "expected_ids": [
         "m109"
@@ -785,14 +785,14 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m036",
-        "m042",
         "m037",
         "m046",
-        "m038",
-        "m035",
-        "m039",
-        "m012",
+        "m042",
         "m009",
+        "m008",
+        "m173",
+        "m039",
+        "m021",
         "m047"
       ],
       "expected_ids": [
@@ -816,15 +816,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m150",
+        "m082",
         "m137",
-        "nav_thread_travel_flights_end",
-        "nav_thread_travel_flights_mid",
-        "nav_thread_travel_flights_start",
+        "nav_thread_weekend_dinner_end",
+        "nav_thread_orion_design_end",
+        "nav_thread_house_repairs_end",
+        "m141",
         "m149",
-        "nav_thread_weekend_dinner_mid",
-        "nav_thread_friction_chores_end",
-        "nav_thread_weekend_dinner_start",
-        "nav_thread_weekend_dinner_end"
+        "m138",
+        "nav_thread_orion_design_mid"
       ],
       "expected_ids": [
         "m150"
@@ -845,16 +845,16 @@
       "expected_count": 2,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m185",
         "m183",
+        "m185",
         "m053",
-        "m109",
-        "m188",
-        "m179",
-        "m177",
-        "m056",
-        "m184",
-        "m219"
+        "nav_thread_atlas_planning_end",
+        "m178",
+        "nav_thread_atlas_planning_start",
+        "m026",
+        "m005",
+        "nav_thread_orion_rollout_end",
+        "m019"
       ],
       "expected_ids": [
         "m183",
@@ -876,25 +876,25 @@
       "expected_count": 1,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m137",
-        "m186",
         "m138",
-        "m150",
-        "m187",
-        "m088",
-        "m120",
-        "m129",
-        "m043",
-        "nav_thread_travel_flights_end"
+        "m137",
+        "m134",
+        "m222",
+        "m144",
+        "nav_thread_house_repairs_end",
+        "nav_thread_house_repairs_start",
+        "m136",
+        "nav_thread_house_repairs_mid",
+        "m133"
       ],
       "expected_ids": [
         "m137"
       ],
       "notes": "'drafty' substring of m137; also m138 summary list. Answer is the report m137. (overlap: drafty window)",
-      "recall_at_1": 1.0,
+      "recall_at_1": 0.0,
       "recall_at_5": 1.0,
       "recall_at_10": 1.0,
-      "reciprocal_rank": 1.0
+      "reciprocal_rank": 0.5
     },
     {
       "case_id": "GC27",
@@ -908,14 +908,14 @@
       "ranked_ids": [
         "m085",
         "m082",
+        "m087",
         "m088",
         "m092",
-        "m087",
-        "nav_thread_weekend_hike_start",
-        "nav_thread_weekend_hike_mid",
-        "m158",
+        "m131",
         "nav_thread_weekend_hike_end",
-        "m146"
+        "m210",
+        "nav_thread_weekend_hike_start",
+        "m061"
       ],
       "expected_ids": [
         "m085"
@@ -938,14 +938,14 @@
       "ranked_ids": [
         "m213",
         "m221",
+        "m025",
         "m215",
+        "m019",
         "m022",
-        "m212",
         "m172",
-        "m033",
-        "m032",
-        "m078",
-        "m168"
+        "m176",
+        "m178",
+        "m212"
       ],
       "expected_ids": [
         "m212",
@@ -953,7 +953,7 @@
       ],
       "notes": "'token theft risk' substring of m213; m212 (the local-storage finding) needs meaning. Many other 'token' mentions are distractors (m018 gift token). (overlap: token theft risk)",
       "recall_at_1": 0.5,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.5,
       "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
@@ -968,15 +968,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m067",
-        "m088",
         "m068",
+        "m065",
         "m165",
-        "m082",
-        "m022",
-        "m050",
-        "m117",
-        "m164",
-        "m204"
+        "nav_thread_weekend_hike_start",
+        "nav_thread_weekend_hike_mid",
+        "nav_thread_weekend_hike_end",
+        "m220",
+        "m175",
+        "m071"
       ],
       "expected_ids": [
         "m068"
@@ -985,7 +985,7 @@
       "recall_at_1": 0.0,
       "recall_at_5": 1.0,
       "recall_at_10": 1.0,
-      "reciprocal_rank": 0.3333333333333333
+      "reciprocal_rank": 0.5
     },
     {
       "case_id": "GC30",
@@ -997,25 +997,25 @@
       "expected_count": 1,
       "retrieved_count": 10,
       "ranked_ids": [
-        "nav_thread_house_repairs_start",
-        "nav_thread_house_repairs_end",
-        "nav_thread_house_repairs_mid",
-        "nav_thread_orion_design_start",
-        "nav_thread_orion_design_end",
-        "nav_thread_friction_money_end",
-        "nav_thread_orion_rollout_start",
-        "nav_thread_orion_rollout_end",
-        "nav_thread_friction_money_start",
-        "nav_thread_orion_design_mid"
+        "m015",
+        "m024",
+        "m014",
+        "nav_thread_nexus_bugs_end",
+        "nav_thread_nexus_bugs_start",
+        "m219",
+        "nav_thread_nexus_bugs_mid",
+        "m028",
+        "m026",
+        "m033"
       ],
       "expected_ids": [
         "m015"
       ],
       "notes": "[HARD zero-overlap] HARD: m015 says 'null pointer ... fixed it' — acronym, no substring. Baseline [].",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "recall_at_10": 0.0,
-      "reciprocal_rank": 0.0
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "reciprocal_rank": 1.0
     },
     {
       "case_id": "GC31",
@@ -1028,15 +1028,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m059",
-        "m199",
-        "m185",
-        "m017",
         "m180",
-        "m188",
-        "m179",
+        "m056",
+        "nav_thread_orion_rollout_mid",
+        "nav_thread_orion_rollout_start",
+        "nav_thread_nexus_kickoff_mid",
+        "nav_thread_orion_rollout_end",
         "m052",
-        "m104",
-        "m204"
+        "m120",
+        "m017"
       ],
       "expected_ids": [
         "m059"
@@ -1058,15 +1058,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m067",
-        "m088",
-        "m089",
         "m218",
-        "m173",
-        "m112",
-        "m166",
-        "m216",
+        "m129",
+        "m043",
         "m222",
-        "m142"
+        "m027",
+        "m181",
+        "m062",
+        "m187",
+        "m089"
       ],
       "expected_ids": [
         "m067"
@@ -1088,15 +1088,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m063",
-        "m069",
-        "m080",
-        "m089",
+        "m074",
         "m073",
-        "m157",
+        "m069",
         "m163",
-        "m124",
-        "m065",
-        "m156"
+        "m089",
+        "m156",
+        "m160",
+        "m070",
+        "m159"
       ],
       "expected_ids": [
         "m063"
@@ -1119,14 +1119,14 @@
       "ranked_ids": [
         "m112",
         "m111",
-        "m113",
+        "nav_thread_friction_money_start",
+        "nav_thread_friction_money_mid",
+        "nav_thread_friction_money_end",
         "m110",
-        "m114",
         "m057",
-        "m024",
-        "m120",
-        "m157",
-        "m124"
+        "m114",
+        "m106",
+        "m203"
       ],
       "expected_ids": [
         "m111",
@@ -1148,16 +1148,16 @@
       "expected_count": 2,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m216",
-        "m184",
-        "m198",
-        "m187",
-        "m221",
-        "m027",
         "m218",
-        "m151",
+        "m216",
+        "m221",
         "m204",
-        "m068"
+        "m152",
+        "m102",
+        "nav_thread_fitness_gym_start",
+        "nav_thread_friction_chores_start",
+        "nav_thread_friction_chores_end",
+        "nav_thread_friction_chores_mid"
       ],
       "expected_ids": [
         "m216",
@@ -1165,7 +1165,7 @@
       ],
       "notes": "'brute force' substring of m216/m218. Realistic term; semantic should also surface m212 (the vuln) via meaning though it's not expected here. (overlap: brute force)",
       "recall_at_1": 0.5,
-      "recall_at_5": 0.5,
+      "recall_at_5": 1.0,
       "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
@@ -1183,12 +1183,12 @@
         "m038",
         "m041",
         "m037",
-        "m105",
-        "m093",
-        "nav_thread_weekend_dinner_start",
-        "nav_thread_weekend_dinner_end",
-        "m201",
-        "m084"
+        "m178",
+        "m058",
+        "m021",
+        "m023",
+        "nav_thread_atlas_planning_end",
+        "nav_thread_atlas_planning_start"
       ],
       "expected_ids": [
         "m040"
@@ -1209,16 +1209,16 @@
       "expected_count": 6,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m063",
         "m069",
-        "m080",
-        "m084",
-        "m070",
+        "m063",
+        "m074",
         "m073",
         "nav_thread_weekend_dinner_start",
-        "nav_thread_weekend_dinner_mid",
+        "m080",
         "nav_thread_weekend_dinner_end",
-        "m065"
+        "nav_thread_weekend_dinner_mid",
+        "m070",
+        "m084"
       ],
       "expected_ids": [
         "m063",
@@ -1229,10 +1229,10 @@
         "m091"
       ],
       "notes": "'food' substring of m069/m073 (hike) — baseline catches the hike-food mentions but misses the dinner thread (Luigi's m080-m091), which needs meaning to span. (overlap: food)",
-      "recall_at_1": 0.16666666666666666,
-      "recall_at_5": 0.3333333333333333,
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.16666666666666666,
       "recall_at_10": 0.3333333333333333,
-      "reciprocal_rank": 1.0
+      "reciprocal_rank": 0.5
     },
     {
       "case_id": "GC38",
@@ -1244,16 +1244,16 @@
       "expected_count": 6,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m005",
+        "m028",
         "m025",
-        "m220",
+        "m019",
         "m009",
-        "m020",
-        "m003",
-        "m006",
-        "m027",
-        "m010",
-        "m018"
+        "nav_thread_nexus_kickoff_start",
+        "nav_thread_nexus_kickoff_mid",
+        "nav_thread_nexus_security_start",
+        "m219",
+        "m021",
+        "nav_thread_nexus_security_mid"
       ],
       "expected_ids": [
         "m006",
@@ -1264,10 +1264,10 @@
         "m219"
       ],
       "notes": "'deploy' substring of m019/m025 (bugs). Baseline catches the bugs-thread deploy mentions; the kickoff schema-block m006 and security-fix m219 need meaning to span the topic. (overlap: deploy)",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.16666666666666666,
-      "recall_at_10": 0.5,
-      "reciprocal_rank": 0.5
+      "recall_at_1": 0.16666666666666666,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.6666666666666666,
+      "reciprocal_rank": 1.0
     },
     {
       "case_id": "GC39",
@@ -1280,15 +1280,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m008",
-        "m029",
-        "m010",
-        "m220",
-        "m217",
-        "m011",
+        "m012",
         "m007",
-        "m216",
-        "m020",
-        "m009"
+        "m029",
+        "m011",
+        "m009",
+        "m222",
+        "m027",
+        "m010",
+        "nav_thread_nexus_kickoff_mid"
       ],
       "expected_ids": [
         "m008",
@@ -1299,7 +1299,7 @@
       "notes": "'scale' substring of m008. Baseline gets m008; benchmarking m009 and rate-limit m010/m012 (the scaling responses) need meaning. (overlap: scale)",
       "recall_at_1": 0.25,
       "recall_at_5": 0.5,
-      "recall_at_10": 0.75,
+      "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
     {
@@ -1314,14 +1314,14 @@
       "ranked_ids": [
         "m168",
         "m078",
+        "m017",
         "m184",
-        "m216",
-        "m004",
-        "m183",
-        "m003",
         "m217",
-        "m221",
-        "m170"
+        "m183",
+        "m004",
+        "m216",
+        "m014",
+        "m129"
       ],
       "expected_ids": [
         "m003",
@@ -1333,8 +1333,8 @@
       ],
       "notes": "'login flow' substring of m168 (Orion). Baseline gets m168; the Nexus auth (m003/m004/m212/m213) needs meaning to span both projects. (overlap: login flow)",
       "recall_at_1": 0.16666666666666666,
-      "recall_at_5": 0.3333333333333333,
-      "recall_at_10": 0.5,
+      "recall_at_5": 0.16666666666666666,
+      "recall_at_10": 0.3333333333333333,
       "reciprocal_rank": 1.0
     },
     {
@@ -1348,15 +1348,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m156",
-        "m155",
         "m154",
-        "m149",
+        "m155",
         "m145",
+        "m149",
         "m153",
-        "m161",
-        "m166",
+        "m162",
+        "m160",
         "m159",
-        "m162"
+        "m161"
       ],
       "expected_ids": [
         "m145",
@@ -1368,7 +1368,7 @@
       "notes": "'Lisbon' substring of m145/m149 (flights) and m156 (itinerary). Baseline gets the literal Lisbon mentions; tram/Belem itinerary items (m158/m160) need meaning. Barcelona m154 distractor. (overlap: Lisbon)",
       "recall_at_1": 0.2,
       "recall_at_5": 0.6,
-      "recall_at_10": 0.6,
+      "recall_at_10": 0.8,
       "reciprocal_rank": 1.0
     },
     {
@@ -1381,16 +1381,16 @@
       "expected_count": 5,
       "retrieved_count": 10,
       "ranked_ids": [
+        "m029",
+        "m171",
         "m173",
         "m217",
-        "m012",
-        "m171",
-        "m011",
-        "m172",
         "m216",
         "m010",
-        "m029",
-        "m174"
+        "m012",
+        "m174",
+        "m011",
+        "m172"
       ],
       "expected_ids": [
         "m010",
@@ -1403,7 +1403,7 @@
       "recall_at_1": 0.0,
       "recall_at_5": 0.4,
       "recall_at_10": 1.0,
-      "reciprocal_rank": 0.3333333333333333
+      "reciprocal_rank": 0.5
     },
     {
       "case_id": "GC43",
@@ -1416,15 +1416,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m136",
-        "nav_thread_house_repairs_end",
-        "nav_thread_house_repairs_start",
-        "nav_thread_house_repairs_mid",
         "m141",
+        "nav_thread_house_repairs_end",
         "m129",
+        "nav_thread_house_repairs_mid",
+        "nav_thread_house_repairs_start",
         "nav_thread_house_move_end",
+        "m133",
         "nav_thread_house_move_start",
-        "nav_thread_house_move_mid",
-        "m133"
+        "nav_thread_house_move_mid"
       ],
       "expected_ids": [
         "m133",
@@ -1436,7 +1436,7 @@
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "recall_at_10": 0.25,
-      "reciprocal_rank": 0.1
+      "reciprocal_rank": 0.125
     },
     {
       "case_id": "GC44",
@@ -1449,15 +1449,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m192",
-        "m210",
-        "m194",
-        "m190",
         "nav_thread_fitness_gym_start",
-        "m191",
-        "m201",
+        "m194",
+        "nav_thread_fitness_running_start",
+        "nav_thread_fitness_gym_mid",
+        "nav_thread_fitness_running_mid",
         "m197",
-        "m203",
-        "m207"
+        "m210",
+        "m206",
+        "nav_thread_fitness_gym_end"
       ],
       "expected_ids": [
         "m192",
@@ -1469,7 +1469,7 @@
       "notes": "'training' substring of m192/m194 (running). Baseline catches running-side; the gym schedule (m205/m206) is the cross-thread part needing meaning. (overlap: training)",
       "recall_at_1": 0.2,
       "recall_at_5": 0.4,
-      "recall_at_10": 0.6,
+      "recall_at_10": 0.8,
       "reciprocal_rank": 1.0
     },
     {
@@ -1484,14 +1484,14 @@
       "ranked_ids": [
         "m115",
         "m120",
-        "m113",
-        "m110",
-        "m111",
-        "m114",
-        "m108",
+        "nav_thread_friction_money_mid",
+        "nav_thread_friction_money_start",
         "m106",
-        "m109",
-        "m097"
+        "nav_thread_friction_money_end",
+        "m111",
+        "m108",
+        "m113",
+        "m110"
       ],
       "expected_ids": [
         "m108",
@@ -1501,7 +1501,7 @@
       ],
       "notes": "'budget' substring of m115 (money thread). Baseline gets m115; the bill/spending/stress lead-up (m108/m110/m111) needs meaning. Chores thread excluded by topic+meaning. (overlap: budget)",
       "recall_at_1": 0.25,
-      "recall_at_5": 0.75,
+      "recall_at_5": 0.25,
       "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
@@ -1516,15 +1516,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m178",
-        "m031",
         "m176",
-        "m026",
-        "m177",
-        "m019",
         "m030",
-        "m106",
         "m025",
-        "m113"
+        "m019",
+        "m177",
+        "m031",
+        "m026",
+        "m108",
+        "m119"
       ],
       "expected_ids": [
         "m019",
@@ -1534,9 +1534,9 @@
       ],
       "notes": "'charge' substring of m176 (Orion billing). Baseline gets the Orion side; Nexus transaction-dup m019/m025 spans the other project by meaning. Email-dup m030/m031 same-word distractor. (overlap: charge)",
       "recall_at_1": 0.0,
-      "recall_at_5": 0.5,
+      "recall_at_5": 0.75,
       "recall_at_10": 1.0,
-      "reciprocal_rank": 0.3333333333333333
+      "reciprocal_rank": 0.5
     },
     {
       "case_id": "GC47",
@@ -1548,16 +1548,16 @@
       "expected_count": 5,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m065",
         "m069",
-        "m064",
-        "m085",
-        "m075",
-        "m087",
-        "m066",
+        "m065",
         "m061",
+        "m077",
         "m073",
-        "m086"
+        "m064",
+        "nav_thread_weekend_hike_start",
+        "m075",
+        "nav_thread_weekend_hike_mid",
+        "nav_thread_weekend_hike_end"
       ],
       "expected_ids": [
         "m061",
@@ -1568,7 +1568,7 @@
       ],
       "notes": "'6 AM' substring of m065/m069/m073. Baseline catches the timing lines; trail/forecast logistics (m061/m075) need meaning. Dinner thread excluded by meaning. (overlap: 6 AM)",
       "recall_at_1": 0.2,
-      "recall_at_5": 0.6,
+      "recall_at_5": 0.8,
       "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
@@ -1582,16 +1582,16 @@
       "expected_count": 4,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m218",
         "m221",
-        "m219",
-        "m002",
-        "m019",
-        "m020",
-        "m001",
+        "m218",
         "m028",
-        "m021",
-        "m222"
+        "nav_thread_nexus_security_end",
+        "m220",
+        "nav_thread_nexus_security_mid",
+        "nav_thread_nexus_bugs_end",
+        "nav_thread_nexus_bugs_start",
+        "nav_thread_nexus_security_start",
+        "nav_thread_nexus_bugs_mid"
       ],
       "expected_ids": [
         "m212",
@@ -1600,10 +1600,10 @@
         "m219"
       ],
       "notes": "'audit findings' substring of m218 (+m221 media, a neighbor). Baseline gets m218; the local-storage finding m212, rate-limit fix m216, push m219 need meaning. Office-door m222 same-word distractor. (overlap: audit findings)",
-      "recall_at_1": 0.25,
-      "recall_at_5": 0.5,
-      "recall_at_10": 0.5,
-      "reciprocal_rank": 1.0
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.25,
+      "recall_at_10": 0.25,
+      "reciprocal_rank": 0.5
     },
     {
       "case_id": "GC49",
@@ -1616,15 +1616,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m049",
-        "m044",
         "nav_thread_atlas_incident_start",
-        "nav_thread_atlas_incident_end",
+        "m044",
+        "m058",
         "nav_thread_atlas_planning_start",
-        "nav_thread_atlas_planning_end",
-        "m034",
         "nav_thread_atlas_incident_mid",
+        "m046",
+        "nav_thread_atlas_incident_end",
         "nav_thread_atlas_planning_mid",
-        "m058"
+        "nav_thread_atlas_planning_end"
       ],
       "expected_ids": [
         "m049",
@@ -1634,7 +1634,7 @@
       ],
       "notes": "'Atlas is down' substring of m049. Baseline gets m049; worker-pool cause m052, recovery m056, postmortem m058 need meaning. m059 'feeling down' same-word distractor. (overlap: Atlas is down)",
       "recall_at_1": 0.25,
-      "recall_at_5": 0.25,
+      "recall_at_5": 0.5,
       "recall_at_10": 0.5,
       "reciprocal_rank": 1.0
     },
@@ -1648,16 +1648,16 @@
       "expected_count": 4,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m127",
         "m122",
         "m130",
         "m131",
+        "m127",
+        "m125",
         "m121",
         "m138",
+        "nav_thread_house_move_end",
         "m134",
-        "m139",
-        "m126",
-        "m125"
+        "nav_thread_house_move_mid"
       ],
       "expected_ids": [
         "m121",
@@ -1681,16 +1681,16 @@
       "expected_count": 3,
       "retrieved_count": 10,
       "ranked_ids": [
-        "m003",
-        "m004",
-        "m217",
-        "m216",
         "m014",
+        "m003",
+        "m217",
         "m221",
-        "m214",
         "m218",
-        "m215",
-        "m032"
+        "m216",
+        "m214",
+        "m213",
+        "m212",
+        "m004"
       ],
       "expected_ids": [
         "m003",
@@ -1699,7 +1699,7 @@
       ],
       "notes": "'authentication module' substring of m003 (+m014 media). Baseline gets those; OAuth2 status m004 needs meaning.",
       "recall_at_1": 0.3333333333333333,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.6666666666666666,
       "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
@@ -1714,15 +1714,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m028",
-        "m024",
         "m025",
         "m019",
+        "m024",
         "m030",
-        "m017",
-        "m003",
-        "m008",
-        "m217",
-        "m026"
+        "m213",
+        "m027",
+        "m014",
+        "m214",
+        "m217"
       ],
       "expected_ids": [
         "m010",
@@ -1734,7 +1734,7 @@
       "recall_at_1": 0.0,
       "recall_at_5": 0.5,
       "recall_at_10": 0.5,
-      "reciprocal_rank": 0.3333333333333333
+      "reciprocal_rank": 0.5
     },
     {
       "case_id": "GC53",
@@ -1746,16 +1746,16 @@
       "expected_count": 5,
       "retrieved_count": 10,
       "ranked_ids": [
+        "m073",
         "m061",
         "m069",
-        "m073",
         "m077",
-        "nav_thread_weekend_hike_start",
-        "m076",
         "nav_thread_weekend_hike_mid",
-        "nav_thread_weekend_hike_end",
+        "nav_thread_weekend_hike_start",
         "m079",
-        "m074"
+        "nav_thread_weekend_hike_end",
+        "m076",
+        "m067"
       ],
       "expected_ids": [
         "m061",
@@ -1780,16 +1780,16 @@
       "expected_count": 4,
       "retrieved_count": 10,
       "ranked_ids": [
+        "nav_thread_weekend_dinner_end",
+        "nav_thread_weekend_dinner_start",
+        "nav_thread_weekend_dinner_mid",
         "m084",
         "m080",
-        "nav_thread_weekend_dinner_start",
-        "nav_thread_weekend_dinner_end",
-        "nav_thread_weekend_dinner_mid",
-        "m091",
         "m090",
-        "m083",
-        "m088",
-        "m085"
+        "m091",
+        "m087",
+        "m085",
+        "m088"
       ],
       "expected_ids": [
         "m080",
@@ -1800,8 +1800,8 @@
       "notes": "'dinner' substring of m080/m087. Baseline gets those; Luigi's name m081, reservation m085 need meaning. Marco's m092 distractor.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.25,
-      "recall_at_10": 0.5,
-      "reciprocal_rank": 0.5
+      "recall_at_10": 0.75,
+      "reciprocal_rank": 0.2
     },
     {
       "case_id": "GC55",
@@ -1814,15 +1814,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m042",
+        "m047",
         "m037",
         "m036",
-        "m047",
         "m046",
-        "m060",
-        "m028",
-        "m066",
-        "m171",
-        "m035"
+        "m023",
+        "m021",
+        "m055",
+        "m056",
+        "m173"
       ],
       "expected_ids": [
         "m008",
@@ -1834,7 +1834,7 @@
       "recall_at_1": 0.0,
       "recall_at_5": 0.5,
       "recall_at_10": 0.5,
-      "reciprocal_rank": 0.5
+      "reciprocal_rank": 0.3333333333333333
     },
     {
       "case_id": "GC56",
@@ -1847,15 +1847,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m100",
-        "m105",
-        "m112",
+        "nav_thread_friction_money_mid",
+        "nav_thread_friction_chores_mid",
         "m102",
+        "m114",
+        "nav_thread_friction_money_start",
+        "nav_thread_friction_money_end",
+        "m120",
         "m101",
-        "m097",
-        "m098",
-        "m099",
-        "m116",
-        "m096"
+        "m116"
       ],
       "expected_ids": [
         "m096",
@@ -1865,8 +1865,8 @@
       ],
       "notes": "'equal' substring of m100. Baseline gets m100; the fairness conflict m096/m098/m105 needs meaning. Mostly meaning-driven.",
       "recall_at_1": 0.25,
-      "recall_at_5": 0.5,
-      "recall_at_10": 1.0,
+      "recall_at_5": 0.25,
+      "recall_at_10": 0.25,
       "reciprocal_rank": 1.0
     },
     {
@@ -1880,15 +1880,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m158",
-        "m159",
         "m160",
+        "m159",
         "m162",
-        "m165",
-        "m161",
         "m156",
-        "m163",
-        "nav_thread_travel_itinerary_start",
-        "nav_thread_travel_itinerary_mid"
+        "m161",
+        "m166",
+        "nav_thread_travel_itinerary_mid",
+        "m157",
+        "nav_thread_travel_itinerary_end"
       ],
       "expected_ids": [
         "m156",
@@ -1898,7 +1898,7 @@
       ],
       "notes": "'Belem' substring of m158/m159/m160. Baseline gets Belem mentions; the relaxed-itinerary framing m156 needs meaning. Roller-coaster m165 distractor.",
       "recall_at_1": 0.25,
-      "recall_at_5": 0.75,
+      "recall_at_5": 1.0,
       "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
@@ -1915,13 +1915,13 @@
         "m210",
         "m201",
         "nav_thread_fitness_gym_start",
-        "nav_thread_fitness_gym_end",
         "nav_thread_fitness_gym_mid",
+        "nav_thread_fitness_gym_end",
         "m202",
-        "m207",
         "m206",
         "m203",
-        "m205"
+        "m207",
+        "m208"
       ],
       "expected_ids": [
         "m201",
@@ -1932,7 +1932,7 @@
       "notes": "'gym membership' substring of m201 (+m210 media). Baseline gets those; schedule m205/m206 needs meaning. Split m211 distractor.",
       "recall_at_1": 0.25,
       "recall_at_5": 0.5,
-      "recall_at_10": 1.0,
+      "recall_at_10": 0.75,
       "reciprocal_rank": 1.0
     },
     {
@@ -1946,14 +1946,14 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m034",
+        "m059",
         "nav_thread_atlas_planning_start",
-        "m049",
         "nav_thread_atlas_incident_start",
-        "nav_thread_atlas_planning_end",
         "nav_thread_atlas_planning_mid",
-        "nav_thread_atlas_incident_end",
+        "nav_thread_atlas_planning_end",
         "nav_thread_atlas_incident_mid",
-        "m044",
+        "nav_thread_atlas_incident_end",
+        "m049",
         "m046"
       ],
       "expected_ids": [
@@ -1965,7 +1965,7 @@
       "notes": "'Atlas launch' substring of m034. Baseline gets m034; deadline/burnout/slip m042/m044/m045 need meaning.",
       "recall_at_1": 0.25,
       "recall_at_5": 0.25,
-      "recall_at_10": 0.5,
+      "recall_at_10": 0.25,
       "reciprocal_rank": 1.0
     },
     {
@@ -1979,15 +1979,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m179",
-        "m185",
         "m183",
-        "m188",
-        "nav_thread_orion_rollout_end",
         "nav_thread_orion_rollout_start",
         "nav_thread_orion_rollout_mid",
-        "m187",
+        "nav_thread_orion_rollout_end",
+        "m185",
+        "m188",
         "m181",
-        "m182"
+        "m182",
+        "m180"
       ],
       "expected_ids": [
         "m179",
@@ -1997,8 +1997,8 @@
       ],
       "notes": "'beta rollout' substring of m179. Baseline gets m179; ramp plan m180/m182 and runbook m185 need meaning. Ad-campaign m188 distractor.",
       "recall_at_1": 0.25,
-      "recall_at_5": 0.5,
-      "recall_at_10": 0.75,
+      "recall_at_5": 0.25,
+      "recall_at_10": 1.0,
       "reciprocal_rank": 1.0
     },
     {
@@ -2016,11 +2016,11 @@
         "m138",
         "nav_thread_house_repairs_start",
         "nav_thread_house_repairs_end",
-        "m133",
         "nav_thread_house_repairs_mid",
         "m137",
+        "m141",
         "m135",
-        "m144"
+        "m143"
       ],
       "expected_ids": [
         "m133",
@@ -2031,7 +2031,7 @@
       "notes": "'landlord' substring of m134 (a neighbor) and m138. The broken items m133/m135/m137 are described without 'landlord' — need meaning. Data-leak m143 distractor.",
       "recall_at_1": 0.0,
       "recall_at_5": 0.25,
-      "recall_at_10": 1.0,
+      "recall_at_10": 0.75,
       "reciprocal_rank": 0.3333333333333333
     },
     {
@@ -2045,15 +2045,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m191",
-        "m190",
-        "m192",
         "m194",
-        "m197",
-        "m196",
-        "m193",
+        "m192",
         "m200",
+        "m190",
+        "m197",
+        "nav_thread_fitness_running_mid",
         "nav_thread_fitness_running_start",
-        "nav_thread_fitness_running_mid"
+        "nav_thread_fitness_running_end",
+        "m196"
       ],
       "expected_ids": [
         "m190",
@@ -2063,7 +2063,7 @@
       ],
       "notes": "'half marathon' substring of m190/m191; 'training' in m192/m194. Baseline catches those; shoes m197 needs meaning. 10K m200 distractor.",
       "recall_at_1": 0.0,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.75,
       "recall_at_10": 1.0,
       "reciprocal_rank": 0.5
     },
@@ -2079,14 +2079,14 @@
       "ranked_ids": [
         "m002",
         "m011",
-        "m017",
         "m024",
-        "m181",
-        "m078",
-        "m085",
-        "m186",
-        "m120",
-        "m197"
+        "nav_thread_fitness_running_end",
+        "m006",
+        "m027",
+        "m197",
+        "m176",
+        "m047",
+        "nav_thread_fitness_running_mid"
       ],
       "expected_ids": [
         "m002"
@@ -2109,14 +2109,14 @@
       "ranked_ids": [
         "m070",
         "m073",
-        "m119",
-        "m109",
-        "m124",
-        "nav_thread_house_repairs_start",
-        "m163",
+        "m063",
         "m089",
-        "m134",
-        "m072"
+        "m129",
+        "m043",
+        "m220",
+        "m175",
+        "m140",
+        "nav_thread_atlas_incident_start"
       ],
       "expected_ids": [
         "m070"
@@ -2139,14 +2139,14 @@
       "ranked_ids": [
         "m048",
         "nav_thread_orion_design_start",
-        "m120",
-        "m115",
-        "nav_thread_orion_design_end",
-        "m001",
-        "m140",
         "nav_thread_orion_design_mid",
-        "m003",
-        "m185"
+        "m186",
+        "nav_thread_orion_design_end",
+        "m141",
+        "m129",
+        "m043",
+        "m187",
+        "m168"
       ],
       "expected_ids": [
         "m048"
@@ -2168,15 +2168,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m128",
-        "m005",
-        "nav_thread_house_move_mid",
-        "nav_thread_house_move_start",
-        "nav_thread_house_move_end",
         "m127",
-        "m063",
-        "nav_thread_travel_flights_mid",
+        "m147",
+        "m141",
         "m122",
-        "nav_thread_travel_flights_start"
+        "m152",
+        "nav_thread_house_move_mid",
+        "nav_thread_house_move_end",
+        "nav_thread_house_move_start",
+        "m027"
       ],
       "expected_ids": [
         "m128"
@@ -2198,15 +2198,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m115",
-        "m120",
-        "m210",
-        "m113",
         "m125",
         "m106",
-        "m110",
-        "m122",
+        "m120",
+        "m130",
+        "m114",
+        "nav_thread_friction_money_mid",
+        "m210",
         "m108",
-        "m192"
+        "nav_thread_friction_money_start"
       ],
       "expected_ids": [
         "m115"
@@ -2228,15 +2228,15 @@
       "retrieved_count": 10,
       "ranked_ids": [
         "m078",
-        "m218",
-        "m221",
-        "m185",
-        "m219",
-        "m074",
-        "m203",
         "m178",
-        "m061",
-        "m076"
+        "m221",
+        "m218",
+        "nav_thread_nexus_security_end",
+        "nav_thread_atlas_incident_end",
+        "nav_thread_atlas_incident_start",
+        "nav_thread_orion_rollout_end",
+        "nav_thread_nexus_security_start",
+        "nav_thread_atlas_planning_end"
       ],
       "expected_ids": [
         "m078"
@@ -2257,26 +2257,26 @@
       "expected_count": 2,
       "retrieved_count": 10,
       "ranked_ids": [
+        "m130",
         "m124",
+        "m125",
         "m098",
         "m094",
-        "m125",
-        "m096",
-        "m130",
+        "nav_thread_friction_chores_start",
         "m097",
-        "m063",
-        "nav_thread_weekend_dinner_start",
-        "m133"
+        "nav_thread_friction_chores_end",
+        "nav_thread_friction_chores_mid",
+        "m142"
       ],
       "expected_ids": [
         "m123",
         "m130"
       ],
       "notes": "'dishwasher' substring of m123 and m130 (media). Both are in the house_move thread.",
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
+      "recall_at_1": 0.5,
+      "recall_at_5": 0.5,
       "recall_at_10": 0.5,
-      "reciprocal_rank": 0.16666666666666666
+      "reciprocal_rank": 1.0
     },
     {
       "case_id": "GC70",
@@ -2291,13 +2291,13 @@
         "m179",
         "m180",
         "m184",
-        "m089",
-        "m138",
-        "m189",
-        "m136",
-        "m079",
-        "m112",
-        "m140"
+        "m212",
+        "m041",
+        "m023",
+        "nav_thread_nexus_bugs_mid",
+        "nav_thread_nexus_bugs_start",
+        "m055",
+        "nav_thread_nexus_bugs_end"
       ],
       "expected_ids": [
         "m179",
@@ -2310,5 +2310,5 @@
       "reciprocal_rank": 1.0
     }
   ],
-  "generated_at": "2026-05-31T17:12:35.272677+00:00"
+  "generated_at": "2026-05-31T17:13:12.138054+00:00"
 }

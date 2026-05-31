@@ -1,0 +1,101 @@
+# =============================================================================
+# REAL GOLDEN SET — TEMPLATE (safe to commit; contains NO real ids or content)
+# =============================================================================
+#
+# This is a TEMPLATE. Do NOT fill it in here. Instead:
+#
+#   1. Copy it:   cp eval/retrieval/real_golden_set.template.yaml \
+#                    eval/retrieval/real_golden_set.yaml
+#   2. The copy `real_golden_set.yaml` is GITIGNORED — fill THAT one with real
+#      message ids you find via browse_corpus.py against your extracted
+#      real_corpus.yaml.
+#   3. See eval/retrieval/REAL_GOLDEN_SET.md for the full workflow, the
+#      query_type taxonomy, and the launch gate.
+#
+# Every `expected_message_ids` value below is the literal placeholder
+# REPLACE_WITH_REAL_MESSAGE_ID — these will FAIL the loader (dangling refs)
+# until you swap in real ids from your corpus. That is intentional: the
+# template is not a runnable golden set, it is a shape to copy.
+#
+# Schema (eval/retrieval/schema.py :: GoldenCase):
+#   id                   str, e.g. "RC01"
+#   query                str — the search query a user might issue
+#   expected_message_ids non-empty list[str] — ids that SHOULD be retrieved
+#   scope                "thread" | "topic" | "all"
+#   query_type           "topic_recall" | "verbatim_quote" | "paraphrase" | "cross_thread"
+#   difficulty           (opt) "easy" | "medium" | "hard"
+#   fairness             (opt) "keyword_favored" | "semantic_favored" | "either" | "adversarial"
+#   thread_id            REQUIRED iff scope == "thread"
+#   topic_id             REQUIRED iff scope == "topic"
+#   notes                (opt) str — why this case exists / what it probes
+#   extra_scope          (opt) dict — production scope filters (bot_id, etc.)
+# =============================================================================
+
+cases:
+  # --- topic_recall (scope=topic) -------------------------------------------
+  # The WATCH-ITEM type: "what did we say about X". In synthetic eval #1 the
+  # hosted retriever trailed local here (0.70 vs 0.78), so include SEVERAL of
+  # these. topic-scoped → topic_id is REQUIRED.
+  - id: RC01
+    query: "what did we decide about the daycare schedule"
+    expected_message_ids:
+      - REPLACE_WITH_REAL_MESSAGE_ID
+      - REPLACE_WITH_REAL_MESSAGE_ID
+    scope: topic
+    query_type: topic_recall
+    difficulty: medium
+    fairness: semantic_favored
+    topic_id: REPLACE_WITH_REAL_TOPIC_ID
+    notes: >-
+      Topic recall: paraphrased ask over a whole topic. Pick a topic_id from
+      browse_corpus, then list every message in that topic that genuinely
+      answers the query. This is the type to over-represent.
+
+  # --- verbatim_quote (scope=all) -------------------------------------------
+  # A near-exact phrase the user typed. Favors the lexical/keyword ranker.
+  - id: RC02
+    query: "running fifteen minutes late, traffic on the bridge"
+    expected_message_ids:
+      - REPLACE_WITH_REAL_MESSAGE_ID
+    scope: all
+    query_type: verbatim_quote
+    difficulty: easy
+    fairness: keyword_favored
+    notes: >-
+      Verbatim quote: copy a distinctive phrase straight out of one real
+      message's content. The expected id is the message that phrase came from.
+
+  # --- paraphrase (scope=thread) --------------------------------------------
+  # The user asks in different words than the message actually used. Favors
+  # semantic. thread-scoped → thread_id is REQUIRED (use the synthesized
+  # thread_id from the corpus = the reply-chain root id).
+  - id: RC03
+    query: "did they ever apologize for missing the appointment"
+    expected_message_ids:
+      - REPLACE_WITH_REAL_MESSAGE_ID
+    scope: thread
+    query_type: paraphrase
+    difficulty: hard
+    fairness: semantic_favored
+    thread_id: REPLACE_WITH_REAL_THREAD_ID
+    notes: >-
+      Paraphrase within one thread. The matching message likely uses none of
+      the query's keywords (e.g. "sorry I wasn't there"), so this probes
+      semantic recall. thread_id must be the corpus thread_id (chain root id).
+
+  # --- cross_thread (scope=all) ---------------------------------------------
+  # The same topic surfaces across separate threads; a good retriever pulls
+  # the relevant messages from MULTIPLE threads.
+  - id: RC04
+    query: "every time money came up as a source of tension"
+    expected_message_ids:
+      - REPLACE_WITH_REAL_MESSAGE_ID
+      - REPLACE_WITH_REAL_MESSAGE_ID
+    scope: all
+    query_type: cross_thread
+    difficulty: hard
+    fairness: either
+    notes: >-
+      Cross-thread recall: the expected ids should span at least two distinct
+      thread_ids. Verify in browse_corpus that the chosen ids really do come
+      from different threads before committing them.

@@ -287,7 +287,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--adapter",
-        choices=["baseline", "stub", "semantic", "hybrid", "db"],
+        choices=["baseline", "stub", "semantic", "hybrid", "openai", "hybrid-openai", "db"],
         required=True,
         help="Retriever adapter to evaluate.",
     )
@@ -354,6 +354,16 @@ def main(argv: list[str] | None = None) -> EvalReport:
         from eval.retrieval.adapters import HybridRetriever
 
         retriever = HybridRetriever(corpus)
+    elif adapter_name == "openai":
+        from eval.retrieval.adapters import SemanticRetriever
+        from eval.retrieval.embeddings import OpenAIEmbedder
+
+        retriever = SemanticRetriever(corpus, OpenAIEmbedder())
+    elif adapter_name == "hybrid-openai":
+        from eval.retrieval.adapters import HybridRetriever
+        from eval.retrieval.embeddings import OpenAIEmbedder
+
+        retriever = HybridRetriever(corpus, embedder=OpenAIEmbedder())
     elif adapter_name == "db":
         from eval.retrieval.adapters import DbBackedRetriever
 

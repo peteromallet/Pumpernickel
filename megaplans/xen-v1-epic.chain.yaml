@@ -18,14 +18,16 @@ milestones:
   - label: m1-retriever
     idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m1-retriever-index-brief.md
     branch: epic/xen-m1-retriever
+    vendor: codex              # GPT-5.5 for premium reasoning phases (set 2026-05-31)
     profile: premium           # highest-risk: pgvector on the pooler, async embed worker, gated prod backfill, visibility correctness, reverses README invariant
     robustness: thorough
     depth: high
-    notes: "pgvector per-message + tsvector/GIN + RRF hybrid, async embed-on-write, out-of-band 5432 backfill (scripted, gated, NOT auto-run), visibility+suppress view. Default LOCAL embeddings (no data egress) unless vendor approved."
+    notes: "pgvector per-message + tsvector/GIN + RRF hybrid, async embed-on-write, out-of-band 5432 backfill (scripted, gated, NOT auto-run), visibility+suppress view. Default embeddings = hosted OpenAI text-embedding-3-small (1536-d), validated as the best config (hybrid+RRF); local bge-small (384-d, no egress) is the reversible fallback (schema stores model+dim)."
 
   - label: m2-tools
     idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m2-tool-surface-brief.md
     branch: epic/xen-m2-tools
+    vendor: codex              # GPT-5.5 (set 2026-05-31)
     profile: partnered         # tool registry + verbatim-integrity semantics; correctness-sensitive but bounded
     robustness: full
     depth: medium
@@ -34,17 +36,27 @@ milestones:
   - label: m3-hotcontext
     idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m3-hot-context-brief.md
     branch: epic/xen-m3-hotcontext
+    vendor: codex              # GPT-5.5 (set 2026-05-31)
     profile: partnered         # edits the heart (hot_context.py), token-budget sensitive; queries bounded over M1's retriever
     robustness: full
     depth: medium
     notes: "New bounded 'previous on this topic' section for every agent + window-edge cursor that makes anchor='current' deterministic."
+
+  - label: m4-sisypy
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v1-m4-sisypy-brief.md
+    branch: epic/xen-m4-sisypy
+    vendor: codex              # GPT-5.5 (set 2026-05-31)
+    profile: partnered         # agent-behavior validation: embed Sisypy + author search/nav scenarios (evidence over narrative)
+    robustness: full
+    depth: medium
+    notes: "Validates the AGENT actually uses the M2/M3 tools right (tool-choice discrimination, hot-context inclusion, forget negatives) — the dimension the recall@k harness can't cover. Embeds Sisypy (not currently in repo)."
 
 on_failure:
   abort: stop_chain
 on_escalate:
   abort: stop_chain
 
-merge_policy: review          # babysit-merge after verifying each milestone — M1 touches a live DB invariant; do not auto-merge unreviewed
+merge_policy: auto            # AUTO end-to-end (2026-05-31). The only irreversible action — the prod embedding backfill (embeds all real intimate messages → sends text to OpenAI → writes vectors) — is carved OUT of every milestone PR and stays human-triggered (see M1 brief). No milestone PR touches prod data; the app is offline so nothing auto-deploys; migrations have .down.sql and main is revertible. M1 runs premium/thorough/high (most adversarial gate) as the automated backstop. Net: merging code to an undeployed main is reversible and gated by tests — auto is correct. The human gate lives where the real risk is: the backfill op + redeploy, NOT the PR merge.
 
 driver:
   robustness: full
