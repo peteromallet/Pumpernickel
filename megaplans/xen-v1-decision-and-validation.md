@@ -84,7 +84,21 @@ metric.** The one watch-item is topic_recall, where local edged hosted (small n=
 re-check on the real-data golden set (#2). Hosted's MRR/recall@1 dip vs local is erased
 once RRF fusion is added. *Synthetic corpus — #2 (real data) remains the launch gate.*
 
-## Status / blockers (as of this seam)
+## ✅ EPIC COMPLETE (2026-06-01)
+
+All 5 milestones built (vendor: codex), merged to `origin/main`, auto-merge:
+- m0-eval (#13) · **m1-retriever #15** (`ffe6cf9`) · **m2-tools #16** (`4103cf6`) ·
+  **m3-hotcontext #17** (`ecba4d6`) · **m4-sisypy #18** (`01dd308`).
+- Landed: `app/services/retrieval.py` (hybrid_search), `migrations/0056_retrieval_index`,
+  `app/services/hot_context.py` (+solo) "previous on this topic" section, the M2 tool
+  surface, and the M4 sisypy structural-run evidence.
+- Docker stayed wedged the whole run but never mattered — execute completed via fixtures.
+- **Remaining (NOT part of the epic):** the gated prod embedding **backfill** (human-run,
+  sends real message text to OpenAI) and validation **#2 real-data golden set** (the launch
+  gate — scaffolding shipped, needs human labeling). Code is on main; nothing is deployed
+  (web app still offline; auth PR #12 + secret rotation still a separate track).
+
+## Status / blockers (historical — pre-completion)
 
 - Chain: **M0 ✅ merged**. **M1 = FAILED PARTIAL** (corrected 2026-05-31). PR #14
   (`epic/xen-m1-retriever`, open, `awaiting_human`) is **only 4 of 11 tasks** —

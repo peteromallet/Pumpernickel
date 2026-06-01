@@ -1,0 +1,60 @@
+base_branch: main
+
+# Xen v2 — multi-source retrieval + hot-context UX.
+# Extends the shipped Xen v1 message-search spine to all high-value knowledge
+# types (distillations, memories, observations, conversation_artifacts) and
+# redesigns the hot-context render. Plan: megaplans/xen-v2-epic-plan.md.
+# Each milestone has a self-contained brief. Dials per the plan's recommended-
+# dials table. Sequential; later milestones depend on earlier ones.
+# The reframe: knowledge types are ALREADY in hot context — SEARCH is the net-new.
+
+milestones:
+  - label: m1-content-embeddings
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v2-m1-content-embeddings-brief.md
+    branch: epic/xen-v2-m1-content-embeddings
+    vendor: codex              # GPT-5.5 for premium reasoning phases
+    profile: premium           # highest-risk: live schema change over the 1826 prod vectors, per-type visibility arms, the dyad_shareable leak, live backfill
+    robustness: thorough
+    depth: high
+    notes: "Generalize message_embeddings -> content_embeddings(source_type DEFAULT 'message', source_id); PRESERVE the 1826 live message vectors by in-place backfill (never re-embed). v_searchable_content UNION-ALL, one arm per source type, each carrying its OWN visibility predicate replicating its dedicated hot-context section (memories :836-862, observations :913-942, distillations :986-1054). dyad_shareable memory leak: embed content but a partner sees only shareable_summary -> exclude from index OR post-filter+substitute. Generalize embed_jobs/worker; per-type canonical-text builders (distillation/memory/observation content, type-aware artifact payload extract). NEVER embed commitments/watch_items/OOB/join-tables. Defer themes/notes to m4."
+
+  - label: m2-multisource-retriever
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v2-m2-multisource-retriever-brief.md
+    branch: epic/xen-v2-m2-multisource-retriever
+    vendor: codex              # GPT-5.5
+    profile: premium           # visibility composition across arms + weighting correctness; dyad_shareable post-filter lives on this return path
+    robustness: thorough
+    depth: high
+    notes: "Query content_embeddings JOIN v_searchable_content; add source_type to RetrievalResult; source-weighted RRF in _fuse_rrf_results (retrieval.py:435) multiplying each term by source_weight_map[source_type] (default 1.0) -- weights are CONFIG, not hardcoded (default lean: distillations slightly-above / messages baseline / memories ~= messages / observations slightly-below; tuning deferred to m4). search tool carries source_type + handle. Provenance nav: distillations/observations supporting_message_ids -> 'show me the source messages this insight is based on'; memories have NO source link (gap). OOB stays a hard exclusion filter (retrieval.py:407)."
+
+  - label: m3-hotcontext-ux
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v2-m3-hotcontext-ux-brief.md
+    branch: epic/xen-v2-m3-hotcontext-ux
+    vendor: codex              # GPT-5.5
+    profile: partnered         # edits the heart (hot_context.py): dedup reconciliation + presentation redesign over m2 results; token-budget sensitive but bounded
+    robustness: full
+    depth: medium
+    notes: "Dedup: relevant_prior merge (hot_context.py:1238-1263) EXCLUDES source_type IN (memory,observation,distillation) -- already in dedicated sections (:1740/:1752/:1759), double-surfacing otherwise. Redesign the relevant_prior render (:1802-1837): type-labeled (memory/insight/message/artifact), name-resolved (sender_id->users.name, NEVER raw UUID), recency-ordered (most-recent-first), snippet + nav handle [id/cursor], insights-first, '+N more -- search()' cue. Legibility pass on the dedicated sections (presentation only; selection unchanged)."
+
+  - label: m4-extend-and-eval
+    idea: /Users/peteromalley/Documents/Veas/megaplans/xen-v2-m4-extend-and-eval-brief.md
+    branch: epic/xen-v2-m4-extend-and-eval
+    vendor: codex              # GPT-5.5
+    profile: partnered         # adds deferred-type arms over m1's proven pattern + offline eval/tuning; bounded
+    robustness: full
+    depth: medium
+    notes: "Add deferred source arms (conversation_notes -> text; themes -> title+desc, low weight; remaining artifact types) over m1's per-type pattern. Extend eval/retrieval golden set with knowledge-type queries across both intents ('what do I know about X' favors insights vs 'what exactly did she say' favors messages). Real-data #2 gate. TUNE source_weight_map values from the golden set -- resolving the NUMBERS of the one genuine human call (mechanism locked in m2; philosophy = tunable-default over hard-boosting was the user's call). Still NEVER embed commitments/watch_items/OOB/join-tables."
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+
+merge_policy: auto            # AUTO end-to-end. The only irreversible action -- the prod embedding backfill (embeds real intimate knowledge -> sends text to the vendor -> writes vectors) -- is carved OUT of every milestone PR and stays human-triggered (see m1 brief). No milestone PR touches prod data; migrations have .down.sql and main is revertible; the 1826 live message vectors are preserved in-place (not re-embedded). m1 runs premium/thorough/high (the most adversarial gate) as the automated backstop. The human gate lives where the real risk is: the backfill op, NOT the PR merge.
+
+driver:
+  robustness: full
+  auto_approve: true
+  max_iterations: 80
+  poll_sleep: 8.0
+  phase_timeout: 14400        # 4h execute ceiling
