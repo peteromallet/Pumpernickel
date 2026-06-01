@@ -1,4 +1,5 @@
-from pydantic import SecretStr
+import pytest
+from pydantic import SecretStr, ValidationError
 
 from app.config import Settings, get_settings
 
@@ -7,6 +8,7 @@ def test_config_loads(monkeypatch) -> None:
     env = {
         "ENV_NAME": "test",
         "DATABASE_URL": "postgresql://user:pass@localhost:5432/db",
+        "DIRECT_DATABASE_URL": "postgresql://user:pass@localhost:5432/direct-db",
         "SUPABASE_URL": "https://example.supabase.co",
         "SUPABASE_SERVICE_ROLE_KEY": "dummy-service-role",
         "ANTHROPIC_API_KEY": "dummy-anthropic",
@@ -64,6 +66,19 @@ def test_config_loads(monkeypatch) -> None:
         "DISCORD_PACING_LLM_JUDGEMENT_ENABLED": "true",
         "DISCORD_PACING_LLM_MIN_AMBIGUITY": "0.5",
         "DISCORD_PACING_EVENT_RETENTION_DAYS": "45",
+        "EMBEDDING_PROVIDER": "openai",
+        "EMBEDDING_MODEL": "text-embedding-3-small",
+        "EMBEDDING_DIMENSION": "1536",
+        "QUERY_EMBED_TIMEOUT_S": "0.75",
+        "QUERY_EMBED_CACHE_TTL_S": "600",
+        "QUERY_EMBED_CACHE_MAX_ENTRIES": "2048",
+        "RETRIEVAL_HNSW_EF_SEARCH": "96",
+        "EMBEDDING_WORKER_ENABLED": "true",
+        "EMBEDDING_WORKER_POLL_INTERVAL_S": "3.5",
+        "EMBEDDING_WORKER_BATCH_SIZE": "24",
+        "EMBEDDING_BACKFILL_BATCH_SIZE": "48",
+        "EMBEDDING_BACKFILL_RATE_LIMIT_PER_MIN": "120",
+        "EMBEDDING_BACKFILL_COVERAGE_THRESHOLD": "0.9",
         "HEARTBEAT_INTERVAL_HOURS": "12",
         "ANTHROPIC_INPUT_USD_PER_MTOK": "3.5",
         "ANTHROPIC_OUTPUT_USD_PER_MTOK": "16.5",
@@ -82,6 +97,7 @@ def test_config_loads(monkeypatch) -> None:
 
     assert settings.env_name == "test"
     assert settings.database_url == env["DATABASE_URL"]
+    assert settings.direct_database_url == env["DIRECT_DATABASE_URL"]
     assert settings.supabase_url == env["SUPABASE_URL"]
     assert isinstance(settings.supabase_service_role_key, SecretStr)
     assert settings.supabase_service_role_key.get_secret_value() == env["SUPABASE_SERVICE_ROLE_KEY"]
@@ -141,6 +157,19 @@ def test_config_loads(monkeypatch) -> None:
     assert settings.discord_pacing_llm_judgement_enabled is True
     assert settings.discord_pacing_llm_min_ambiguity == 0.5
     assert settings.discord_pacing_event_retention_days == 45
+    assert settings.embedding_provider == "openai"
+    assert settings.embedding_model == "text-embedding-3-small"
+    assert settings.embedding_dimension == 1536
+    assert settings.query_embed_timeout_s == 0.75
+    assert settings.query_embed_cache_ttl_s == 600
+    assert settings.query_embed_cache_max_entries == 2048
+    assert settings.retrieval_hnsw_ef_search == 96
+    assert settings.embedding_worker_enabled is True
+    assert settings.embedding_worker_poll_interval_s == 3.5
+    assert settings.embedding_worker_batch_size == 24
+    assert settings.embedding_backfill_batch_size == 48
+    assert settings.embedding_backfill_rate_limit_per_min == 120
+    assert settings.embedding_backfill_coverage_threshold == 0.9
     assert settings.heartbeat_interval_hours == 12
     assert settings.anthropic_input_usd_per_mtok == 3.5
     assert settings.anthropic_output_usd_per_mtok == 16.5
@@ -162,3 +191,119 @@ def test_consult_model_defaults_to_conversational_model(app_env, monkeypatch) ->
     settings = Settings()
 
     assert settings.consult_model == "claude-main-test"
+
+
+def test_retrieval_embedding_defaults(app_env, monkeypatch) -> None:
+    for key in (
+        "DIRECT_DATABASE_URL",
+        "EMBEDDING_PROVIDER",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSION",
+        "QUERY_EMBED_TIMEOUT_S",
+        "QUERY_EMBED_CACHE_TTL_S",
+        "QUERY_EMBED_CACHE_MAX_ENTRIES",
+        "RETRIEVAL_HNSW_EF_SEARCH",
+        "EMBEDDING_WORKER_ENABLED",
+        "EMBEDDING_WORKER_POLL_INTERVAL_S",
+        "EMBEDDING_WORKER_BATCH_SIZE",
+        "EMBEDDING_BACKFILL_BATCH_SIZE",
+        "EMBEDDING_BACKFILL_RATE_LIMIT_PER_MIN",
+        "EMBEDDING_BACKFILL_COVERAGE_THRESHOLD",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    get_settings.cache_clear()
+
+    settings = Settings()
+
+    assert settings.direct_database_url is None
+    assert settings.embedding_provider == "openai"
+    assert settings.embedding_model == "text-embedding-3-small"
+    assert settings.embedding_dimension == 1536
+    assert settings.query_embed_timeout_s == 0.4
+    assert settings.query_embed_cache_ttl_s == 300
+    assert settings.query_embed_cache_max_entries == 1024
+    assert settings.retrieval_hnsw_ef_search == 80
+    assert settings.embedding_worker_enabled is False
+    assert settings.embedding_worker_poll_interval_s == 5.0
+    assert settings.embedding_worker_batch_size == 32
+    assert settings.embedding_backfill_batch_size == 64
+    assert settings.embedding_backfill_rate_limit_per_min == 60
+    assert settings.embedding_backfill_coverage_threshold == 0.95
+
+
+def test_local_bge_small_requires_384_dimensions(app_env, monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("EMBEDDING_MODEL", "bge-small")
+    monkeypatch.setenv("EMBEDDING_DIMENSION", "1536")
+    get_settings.cache_clear()
+
+    with pytest.raises(ValidationError, match="384"):
+        Settings()
+
+
+def test_openai_text_embedding_3_small_requires_1536_dimensions(app_env, monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("EMBEDDING_DIMENSION", "384")
+    get_settings.cache_clear()
+
+    with pytest.raises(ValidationError, match="1536"):
+        Settings()
+
+
+def test_unknown_registered_embedding_provider_allows_positive_dimension(app_env, monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "registered-test")
+    monkeypatch.setenv("EMBEDDING_MODEL", "my-embedder-v1")
+    monkeypatch.setenv("EMBEDDING_DIMENSION", "768")
+    get_settings.cache_clear()
+
+    settings = Settings()
+
+    assert settings.embedding_provider == "registered-test"
+    assert settings.embedding_model == "my-embedder-v1"
+    assert settings.embedding_dimension == 768
+
+
+def test_direct_database_url_presence_is_optional_and_preserved(app_env, monkeypatch) -> None:
+    monkeypatch.delenv("DIRECT_DATABASE_URL", raising=False)
+    get_settings.cache_clear()
+    assert Settings().direct_database_url is None
+
+    monkeypatch.setenv("DIRECT_DATABASE_URL", "postgresql://user:pass@localhost:5432/direct-db")
+    get_settings.cache_clear()
+    assert Settings().direct_database_url == "postgresql://user:pass@localhost:5432/direct-db"
+
+
+def test_retrieval_embedding_env_var_names_are_exact(app_env, monkeypatch) -> None:
+    monkeypatch.setenv("DIRECT_DB_URL", "postgresql://user:pass@localhost:5432/wrong")
+    monkeypatch.setenv("EMBED_PROVIDER", "wrong-provider")
+    monkeypatch.setenv("EMBED_MODEL", "wrong-model")
+    monkeypatch.setenv("EMBED_DIMENSION", "999")
+    monkeypatch.setenv("QUERY_EMBED_TIMEOUT", "9.9")
+    monkeypatch.setenv("QUERY_EMBED_CACHE_TTL", "999")
+    monkeypatch.setenv("QUERY_EMBED_CACHE_MAX", "999")
+    monkeypatch.setenv("HNSW_EF_SEARCH", "999")
+    monkeypatch.setenv("EMBED_WORKER_ENABLED", "true")
+    monkeypatch.setenv("EMBED_WORKER_POLL_INTERVAL_S", "9.9")
+    monkeypatch.setenv("EMBED_WORKER_BATCH_SIZE", "999")
+    monkeypatch.setenv("EMBED_BACKFILL_BATCH_SIZE", "999")
+    monkeypatch.setenv("EMBED_BACKFILL_RATE_LIMIT_PER_MIN", "999")
+    monkeypatch.setenv("EMBED_BACKFILL_COVERAGE_THRESHOLD", "0.1")
+    get_settings.cache_clear()
+
+    settings = Settings()
+
+    assert settings.direct_database_url is None
+    assert settings.embedding_provider == "openai"
+    assert settings.embedding_model == "text-embedding-3-small"
+    assert settings.embedding_dimension == 1536
+    assert settings.query_embed_timeout_s == 0.4
+    assert settings.query_embed_cache_ttl_s == 300
+    assert settings.query_embed_cache_max_entries == 1024
+    assert settings.retrieval_hnsw_ef_search == 80
+    assert settings.embedding_worker_enabled is False
+    assert settings.embedding_worker_poll_interval_s == 5.0
+    assert settings.embedding_worker_batch_size == 32
+    assert settings.embedding_backfill_batch_size == 64
+    assert settings.embedding_backfill_rate_limit_per_min == 60
+    assert settings.embedding_backfill_coverage_threshold == 0.95

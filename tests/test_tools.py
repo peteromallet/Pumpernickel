@@ -1246,6 +1246,31 @@ async def test_search_messages_finds_saved_media_explanations(tool_ctx):
     assert "calendar" in result.hits[0].content
 
 
+async def test_search_messages_excludes_search_suppressed_rows(tool_ctx):
+    tool_ctx.current_step = "read"
+    visible_message_id = _seed_message(
+        tool_ctx.pool,
+        tool_ctx.user.id,
+        tool_ctx.partner.id,
+        content="needle visible phrase",
+    )
+    suppressed_message_id = _seed_message(
+        tool_ctx.pool,
+        tool_ctx.user.id,
+        tool_ctx.partner.id,
+        content="needle suppressed phrase",
+    )
+    tool_ctx.pool.messages[suppressed_message_id]["search_suppressed_at"] = datetime.now(UTC)
+
+    result = await read_tools.search_messages(
+        tool_ctx,
+        SearchMessagesInput(text_contains="needle", limit=10),
+    )
+
+    assert [hit.id for hit in result.hits] == [visible_message_id]
+    assert suppressed_message_id not in [hit.id for hit in result.hits]
+
+
 async def test_raw_message_tools_scope_to_current_bot_and_topic(tool_ctx):
     tool_ctx.current_step = "read"
     _set_partner_share(tool_ctx.pool, tool_ctx.partner.id, "mediator", "opt_in")

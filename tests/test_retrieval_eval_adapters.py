@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
+import types
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -299,6 +304,62 @@ def test_adapters_module_has_no_app_imports():
                 ), f"adapters.py imports from app.*: {node.module}"
 
 
+def test_only_db_backed_retriever_lazy_imports_production_app_module():
+    """Offline adapters stay app-pure; DbBackedRetriever owns the lazy app import."""
+    adapters_path = Path(__file__).parent.parent / "eval" / "retrieval" / "adapters.py"
+    tree = ast.parse(adapters_path.read_text())
+
+    app_import_call_classes: list[str] = []
+    for class_node in [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]:
+        for node in ast.walk(class_node):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "import_module"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "importlib"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value.startswith("app.")
+            ):
+                app_import_call_classes.append(class_node.name)
+
+    assert app_import_call_classes == ["DbBackedRetriever"]
+
+
+def test_db_retriever_direct_database_env_name_matches_settings_contract():
+    """The eval DB adapter and app Settings must use the exact same env name."""
+    from app.config import Settings
+    from eval.retrieval.adapters import DbBackedRetriever
+
+    adapters_path = Path(__file__).parent.parent / "eval" / "retrieval" / "adapters.py"
+    config_path = Path(__file__).parent.parent / "app" / "config.py"
+
+    adapter_source = adapters_path.read_text()
+    config_source = config_path.read_text()
+
+    assert 'os.environ.get("DIRECT_DATABASE_URL")' in adapter_source
+    assert 'os.environ.get("DATABASE_URL")' not in adapter_source
+    assert "direct_database_url: str | None = None" in config_source
+    assert Settings.model_fields["direct_database_url"].validation_alias is None
+    assert DbBackedRetriever.__name__ in adapter_source
+
+
+def test_eval_docs_pin_db_adapter_boundary_and_m1_gate_diagnostics():
+    """Docs keep the DB eval adapter and M1 gate contracts visible."""
+    readme = (Path(__file__).parent.parent / "eval" / "retrieval" / "README.md").read_text()
+    adapters = (Path(__file__).parent.parent / "eval" / "retrieval" / "adapters.py").read_text()
+
+    assert "DbBackedRetriever" in readme
+    assert "DIRECT_DATABASE_URL" in readme
+    assert "--assert-m1-gate" in readme
+    assert "M1 gate FAILED" in readme
+    assert "no\nM1 tool consumer depends on production retrieval beyond eval" in adapters
+
+
 # ---------------------------------------------------------------------------
 # message_text helper
 # ---------------------------------------------------------------------------
@@ -467,3 +528,194 @@ def test_db_retriever_retrieve_returns_results():
     if results:
         assert all(isinstance(r, str) for r in results)
         assert len(results) <= 5
+
+
+def test_db_retriever_lazy_imports_production_retrieval_and_preserves_sync_api(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """DbBackedRetriever bridges sync eval calls to async production retrieval."""
+    from eval.retrieval.adapters import DbBackedRetriever
+
+    calls: list[object] = []
+    pool_closed = False
+    viewer_id = uuid4()
+    topic_id = uuid4()
+    message_id = uuid4()
+
+    class FakePool:
+        async def close(self) -> None:
+            nonlocal pool_closed
+            pool_closed = True
+
+    fake_asyncpg = types.ModuleType("asyncpg")
+
+    async def create_pool(database_url: str, **kwargs: object) -> FakePool:
+        calls.append(("create_pool", database_url, kwargs))
+        init = kwargs.get("init")
+        if init is not None:
+            await init(object())
+        return FakePool()
+
+    fake_asyncpg.create_pool = create_pool  # type: ignore[attr-defined]
+
+    fake_pgvector_asyncpg = types.ModuleType("pgvector.asyncpg")
+
+    async def register_vector(conn: object) -> None:
+        calls.append(("register_vector", conn))
+
+    fake_pgvector_asyncpg.register_vector = register_vector  # type: ignore[attr-defined]
+
+    fake_retrieval = types.ModuleType("app.services.retrieval")
+
+    class RetrievalQuery:
+        def __init__(self, **kwargs: object) -> None:
+            self.__dict__.update(kwargs)
+            calls.append(("query", kwargs))
+
+    async def hybrid_search(pool: object, request: object) -> list[object]:
+        calls.append(("hybrid_search", pool, request))
+        return [types.SimpleNamespace(message_id=message_id)]
+
+    fake_retrieval.RetrievalQuery = RetrievalQuery  # type: ignore[attr-defined]
+    fake_retrieval.hybrid_search = hybrid_search  # type: ignore[attr-defined]
+
+    monkeypatch.setenv("DIRECT_DATABASE_URL", "postgresql://direct.example/db")
+    monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+    monkeypatch.setitem(sys.modules, "pgvector.asyncpg", fake_pgvector_asyncpg)
+    monkeypatch.setitem(sys.modules, "app.services.retrieval", fake_retrieval)
+
+    retriever = DbBackedRetriever(_make_test_corpus())
+    try:
+        results = retriever.retrieve(
+            "quoted words",
+            scope="topic",
+            topic_id=str(topic_id),
+            limit=3,
+            viewer_user_id=str(viewer_id),
+            bot_id="mediator",
+            query_type="verbatim_quote",
+        )
+    finally:
+        retriever.close()
+
+    assert results == [str(message_id)]
+    assert pool_closed is True
+    assert retriever._closed is True
+    assert retriever._loop.is_closed() is True
+    assert retriever._thread.is_alive() is False
+    retriever.close()
+    create_call = calls[0]
+    assert create_call[0] == "create_pool"
+    assert create_call[1] == "postgresql://direct.example/db"
+    query_call = next(call for call in calls if isinstance(call, tuple) and call[0] == "query")
+    query_kwargs = query_call[1]
+    assert query_kwargs["mode"] == "exact"
+    assert query_kwargs["viewer_user_id"] == viewer_id
+    assert query_kwargs["topic_id"] == topic_id
+    assert query_kwargs["limit"] == 3
+
+
+def test_db_retriever_maps_paraphrase_cases_to_hybrid_mode(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from eval.retrieval.adapters import DbBackedRetriever
+
+    modes: list[str] = []
+
+    fake_asyncpg = types.ModuleType("asyncpg")
+
+    class FakePool:
+        async def close(self) -> None:
+            pass
+
+    async def create_pool(database_url: str, **kwargs: object) -> object:
+        return FakePool()
+
+    fake_asyncpg.create_pool = create_pool  # type: ignore[attr-defined]
+
+    fake_retrieval = types.ModuleType("app.services.retrieval")
+
+    class RetrievalQuery:
+        def __init__(self, **kwargs: object) -> None:
+            modes.append(str(kwargs["mode"]))
+            self.message_id = UUID(int=0)
+
+    async def hybrid_search(pool: object, request: object) -> list[object]:
+        return []
+
+    fake_retrieval.RetrievalQuery = RetrievalQuery  # type: ignore[attr-defined]
+    fake_retrieval.hybrid_search = hybrid_search  # type: ignore[attr-defined]
+
+    monkeypatch.setenv("DIRECT_DATABASE_URL", "postgresql://direct.example/db")
+    monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+    monkeypatch.setitem(sys.modules, "app.services.retrieval", fake_retrieval)
+
+    retriever = DbBackedRetriever(_make_test_corpus())
+    try:
+        assert retriever.retrieve(
+            "same idea different words",
+            scope="all",
+            limit=5,
+            viewer_user_id=str(uuid4()),
+            query_type="paraphrase",
+        ) == []
+    finally:
+        retriever.close()
+
+    assert modes == ["hybrid"]
+
+
+def test_db_retriever_maps_exact_and_hybrid_query_types(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from eval.retrieval.adapters import DbBackedRetriever
+
+    modes: list[str] = []
+
+    fake_asyncpg = types.ModuleType("asyncpg")
+
+    class FakePool:
+        async def close(self) -> None:
+            pass
+
+    async def create_pool(database_url: str, **kwargs: object) -> object:
+        return FakePool()
+
+    fake_asyncpg.create_pool = create_pool  # type: ignore[attr-defined]
+
+    fake_retrieval = types.ModuleType("app.services.retrieval")
+
+    class RetrievalQuery:
+        def __init__(self, **kwargs: object) -> None:
+            modes.append(str(kwargs["mode"]))
+
+    async def hybrid_search(pool: object, request: object) -> list[object]:
+        return []
+
+    fake_retrieval.RetrievalQuery = RetrievalQuery  # type: ignore[attr-defined]
+    fake_retrieval.hybrid_search = hybrid_search  # type: ignore[attr-defined]
+
+    monkeypatch.setenv("DIRECT_DATABASE_URL", "postgresql://direct.example/db")
+    monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+    monkeypatch.setitem(sys.modules, "app.services.retrieval", fake_retrieval)
+
+    retriever = DbBackedRetriever(_make_test_corpus())
+    try:
+        for query_type in (
+            "verbatim_quote",
+            "paraphrase",
+            "cross_thread",
+            "topic_recall",
+            None,
+        ):
+            assert retriever.retrieve(
+                "query",
+                scope="all",
+                limit=5,
+                viewer_user_id=str(uuid4()),
+                query_type=query_type,
+            ) == []
+    finally:
+        retriever.close()
+
+    assert modes == ["exact", "hybrid", "hybrid", "hybrid", "hybrid"]

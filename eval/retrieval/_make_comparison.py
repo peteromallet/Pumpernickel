@@ -119,8 +119,14 @@ def _assert_m1_gate(baseline_report: dict, semantic_or_hybrid: dict) -> None:
 
     # Condition 1: paraphrase recall@10 >= 0.7
     para = semantic_or_hybrid.get("by_query_type", {}).get("paraphrase", {})
+    para_n = int(para.get("n", 0) or 0)
     para_r10 = para.get("recall@10", 0.0)
-    if para_r10 < 0.7:
+    if para_n <= 0:
+        failures.append(
+            "paraphrase coverage is insufficient for M1 gate: "
+            "by_query_type['paraphrase'].n is 0"
+        )
+    elif para_r10 < 0.7:
         failures.append(
             f"paraphrase recall@10 ({para_r10:.4f}) < 0.7"
         )

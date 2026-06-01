@@ -12,6 +12,7 @@ from app.models.user import User, claim_onboarding_welcome
 from app.config import get_settings
 from app.services import discord, hooks, system_state, whatsapp
 from app.services.crypto import encrypt_value
+from app.services.message_embedding_lifecycle import enqueue_message_embed
 from app.services.scope import InboundScope
 from app.services.templates import TemplateCall, render_template
 from app.services.withheld_reviews import record_withheld_outbound_review
@@ -133,7 +134,9 @@ async def _insert_outbound(
             topic_id,
         )
         if row is not None:
-            return row["id"]
+            row_id = row["id"]
+            await enqueue_message_embed(pool, message_id=row_id, content=content)
+            return row_id
         if outbound_part_key is None:
             raise RuntimeError("outbound insert unexpectedly conflicted without a part key")
         existing = await pool.fetchrow(
@@ -156,7 +159,9 @@ async def _insert_outbound(
         bot_id,
         topic_id,
     )
-    return row["id"]
+    row_id = row["id"]
+    await enqueue_message_embed(pool, message_id=row_id, content=content)
+    return row_id
 
 
 async def _fetch_outbound_part(pool: Any, part_key: str) -> dict[str, Any] | None:

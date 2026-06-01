@@ -421,7 +421,7 @@ async def search_messages(
     dyad_ids = set(participant_ids)
     if args.partner_user_id is not None and args.partner_user_id not in dyad_ids:
         return SearchMessagesOutput(hits=[], truncated=False)
-    clauses = ["deleted_at IS NULL"]
+    clauses = ["deleted_at IS NULL", "search_suppressed_at IS NULL"]
     params: list[Any] = []
     if args.partner_user_id is not None:
         params.append(args.partner_user_id)
