@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.bots.registry import get_relationship_topic_id
 from app.models.user import User
 from app.services.hot_context import HotContext, build_hot_context, render_hot_context
+from app.services.retrieval import RetrievalResult
 
 pytestmark = pytest.mark.anyio
 
@@ -330,10 +331,15 @@ class HotContextPool:
             # default to no silent turns. Tests that exercise the block
             # should construct rows directly.
             return []
-        if "FROM messages" in compact and "WHERE id = ANY" in compact:
+        if "FROM messages" in compact and " id = ANY(" in compact:
             ids = set(args[0])
+            participant_ids = None
             bot_filter = args[1] if len(args) > 1 else None
             topic_filter = args[2] if len(args) > 2 else None
+            if len(args) > 3 and isinstance(args[1], list):
+                participant_ids = set(args[1])
+                bot_filter = args[2]
+                topic_filter = args[3]
             return [
                 {
                     "id": row["id"],
@@ -343,11 +349,22 @@ class HotContextPool:
                     "charge": row["charge"],
                     "sent_at": row["sent_at"],
                     "content": row["content"],
+                    "media_type": row.get("media_type"),
+                    "media_duration_seconds": row.get("media_duration_seconds"),
+                    "media_analysis": row.get("media_analysis"),
+                    "handling_result": row.get("handling_result"),
+                    "handled_at": row.get("handled_at"),
+                    "processing_error": row.get("processing_error"),
                     "bot_id": row.get("bot_id"),
                     "topic_id": row.get("topic_id"),
                 }
                 for row in self.messages
                 if row["id"] in ids
+                and (
+                    participant_ids is None
+                    or row.get("sender_id") in participant_ids
+                    or row.get("recipient_id") in participant_ids
+                )
                 and (bot_filter is None or row.get("bot_id") == bot_filter)
                 and (topic_filter is None or row.get("topic_id") == topic_filter)
             ]
@@ -378,6 +395,23 @@ class HotContextPool:
                 if (bot_filter is None or row.get("bot_id") == bot_filter)
                 and (topic_filter is None or row.get("topic_id") == topic_filter)
             ]
+            # --- Topic-recent prior (T4): sent_at < $4 + configurable limit ---
+            if "AND sent_at < $" in compact and "LIMIT $" in compact:
+                sent_at_cutoff_str = args[3]
+                limit = args[4] if len(args) > 4 else 20
+                from datetime import datetime as dt
+
+                cutoff = dt.fromisoformat(str(sent_at_cutoff_str))
+                if cutoff.tzinfo is None:
+                    cutoff = cutoff.replace(tzinfo=UTC)
+                prior_rows = [
+                    row
+                    for row in scoped_rows
+                    if row.get("deleted_at") is None
+                    and row["sent_at"] < cutoff
+                ]
+                prior_rows.sort(key=lambda r: r["sent_at"], reverse=True)
+                return list(reversed(prior_rows[:limit]))
             return list(reversed(scoped_rows[-20:]))
         raise AssertionError(compact)
 
@@ -416,13 +450,595 @@ async def test_build_hot_context_returns_expected_fields(hot_context_seed):
     assert hc.conversation_load["inbound_count"] == 24
     assert hc.conversation_load["outbound_count"] == 1
     assert hc.recent_reactions == []
+    # relevant_prior populated by topic-recent selection (T4): messages
+    # older than the hot-context window edge, capped at 5.
+    assert len(hc.relevant_prior) == 5
+    assert all(item.get("source") == "topic_recent" for item in hc.relevant_prior)
+    assert all("id" in item for item in hc.relevant_prior)
+    assert all("sent_at" in item for item in hc.relevant_prior)
+    # All prior entries must be strictly older than the window edge.
+    window_edge_sent_at = hc.trigger_metadata["hot_context_window_edge"]["sent_at"]
+    for item in hc.relevant_prior:
+        assert item["sent_at"] < window_edge_sent_at
     assert hc.trigger_metadata["messages"][0]["charge"] == "charged"
+    assert hc.trigger_metadata["hot_context_window_edge"] == {
+        "message_id": str(hc.recent_messages[0]["id"]),
+        "sent_at": hc.recent_messages[0]["sent_at"],
+    }
+    assert (
+        hc.trigger_metadata["hot_context_edge"]
+        == hc.trigger_metadata["hot_context_window_edge"]
+    )
     partner_rows = [
         item
         for item in hc.recent_messages
         if item["sender_id"] == partner.id or item["recipient_id"] == partner.id
     ]
     assert any(item.get("raw_content_hidden") for item in partner_rows)
+
+
+async def test_topic_recent_prior_no_duplicate_with_recent_messages(
+    hot_context_seed,
+):
+    """Prove topic-recent prior rows are disjoint from the last-20 window."""
+    pool, user, partner = hot_context_seed
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    recent_ids = {item["id"] for item in hc.recent_messages}
+    prior_ids = {item["id"] for item in hc.relevant_prior}
+
+    assert len(recent_ids) == 20
+    assert len(prior_ids) == 5
+    assert recent_ids.isdisjoint(prior_ids), (
+        "topic-recent prior must not duplicate any message already present "
+        "in the last-20 recent-messages window"
+    )
+
+    # Confirm every prior entry is strictly older than the window edge.
+    window_edge_sent_at = hc.trigger_metadata["hot_context_window_edge"]["sent_at"]
+    for item in hc.relevant_prior:
+        assert item["sent_at"] < window_edge_sent_at, (
+            f"prior entry {item['id']} sent_at={item['sent_at']} is not older "
+            f"than window edge {window_edge_sent_at}"
+        )
+
+
+async def test_topic_recent_prior_excludes_deleted_rows(hot_context_seed):
+    """Prove messages with deleted_at set are excluded from topic-recent prior."""
+    pool, user, partner = hot_context_seed
+
+    # Add one deleted older-than-window message and one live older-than-window
+    # message so we can prove the query is working yet the deleted row is absent.
+    # The live message is placed just barely older than the window edge so it
+    # displaces the oldest existing prior row within the 5-row cap.
+    deleted_id = uuid4()
+    live_id = uuid4()
+    window_edge = pool.now - timedelta(seconds=20)
+    pool.messages.append(
+        {
+            "id": deleted_id,
+            "direction": "inbound",
+            "sender_id": user.id,
+            "recipient_id": partner.id,
+            "content": "deleted older message",
+            "sent_at": window_edge - timedelta(seconds=2),
+            "charge": "routine",
+            "bot_id": pool.bot_id,
+            "topic_id": pool.topic_id,
+            "deleted_at": pool.now - timedelta(seconds=1),
+        }
+    )
+    pool.messages.append(
+        {
+            "id": live_id,
+            "direction": "inbound",
+            "sender_id": user.id,
+            "recipient_id": partner.id,
+            "content": "live older message",
+            "sent_at": window_edge - timedelta(milliseconds=500),
+            "charge": "routine",
+            "bot_id": pool.bot_id,
+            "topic_id": pool.topic_id,
+        }
+    )
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    prior_ids = {item["id"] for item in hc.relevant_prior}
+    assert deleted_id not in prior_ids, (
+        "deleted row must not appear in topic-recent prior"
+    )
+    assert live_id in prior_ids, (
+        "non-deleted older-than-window row must appear in topic-recent prior"
+    )
+
+
+async def test_topic_recent_prior_redacts_partner_private_content(
+    hot_context_seed,
+):
+    """Prove partner-private rows in topic-recent prior are redacted (content=None,
+    raw_content_hidden=True) while user-owned rows are visible."""
+    pool, user, partner = hot_context_seed
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    assert len(hc.relevant_prior) >= 2, (
+        "need at least 2 prior entries to test partner vs user redaction"
+    )
+
+    # Thread ownership follows _message_thread_owner_id: for inbound messages
+    # the sender owns the thread; for outbound the recipient owns the thread.
+    # All older-than-window messages in the default fixture are inbound.
+    partner_items = [
+        item
+        for item in hc.relevant_prior
+        if item["direction"] == "inbound" and item["sender_id"] == partner.id
+    ]
+    user_items = [
+        item
+        for item in hc.relevant_prior
+        if item["direction"] == "inbound" and item["sender_id"] == user.id
+    ]
+
+    # Partner has not opted in → all partner-thread rows must be redacted.
+    assert len(partner_items) > 0, "expected at least one partner-row in prior"
+    for item in partner_items:
+        assert item.get("raw_content_hidden"), (
+            f"partner message {item['id']} must have raw_content_hidden=True"
+        )
+        assert item.get("content") is None, (
+            f"partner message {item['id']} must have content=None when not opted in"
+        )
+
+    # User-owned rows must be visible regardless of partner share.
+    assert len(user_items) > 0, "expected at least one user-row in prior"
+    for item in user_items:
+        assert not item.get("raw_content_hidden"), (
+            f"user message {item['id']} must have raw_content_hidden=False"
+        )
+        assert item.get("content") is not None, (
+            f"user message {item['id']} must have visible content"
+        )
+
+
+async def test_topic_recent_prior_shows_partner_content_when_opted_in(
+    hot_context_seed,
+):
+    """Prove partner messages in topic-recent prior are visible when the partner
+    has opted into sharing."""
+    pool, user, partner = hot_context_seed
+    pool.user_bot_state[(partner.id, pool.bot_id)] = {"partner_share": "opt_in"}
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    # Thread ownership follows _message_thread_owner_id: for inbound messages
+    # the sender owns the thread.
+    partner_items = [
+        item
+        for item in hc.relevant_prior
+        if item["direction"] == "inbound" and item["sender_id"] == partner.id
+    ]
+    assert len(partner_items) > 0, (
+        "expected at least one partner-row in prior when partner opted in"
+    )
+    for item in partner_items:
+        assert not item.get("raw_content_hidden"), (
+            f"partner message {item['id']} must have raw_content_hidden=False "
+            f"when partner_share=opt_in"
+        )
+        assert item.get("content") is not None, (
+            f"partner message {item['id']} must have visible content "
+            f"when partner_share=opt_in"
+        )
+
+
+async def test_semantic_prior_uses_visible_trigger_text_and_preserves_metadata(
+    hot_context_seed, monkeypatch
+):
+    pool, user, partner = hot_context_seed
+    topic_recent_dup_id = pool.messages[4]["id"]
+    semantic_new_id = uuid4()
+    recent_window_id = pool.messages[-2]["id"]
+    seen_request = {}
+    pool.messages.insert(
+        0,
+        {
+            "id": semantic_new_id,
+            "direction": "inbound",
+            "sender_id": user.id,
+            "recipient_id": partner.id,
+            "content": "older semantic hit",
+            "sent_at": pool.now - timedelta(seconds=60),
+            "charge": "routine",
+            "bot_id": pool.bot_id,
+            "topic_id": pool.topic_id,
+        },
+    )
+
+    async def fake_hybrid_search(_pool, request):
+        seen_request["query"] = request.query
+        seen_request["mode"] = request.mode
+        seen_request["viewer_user_id"] = request.viewer_user_id
+        seen_request["partner_user_id"] = request.partner_user_id
+        seen_request["bot_id"] = request.bot_id
+        seen_request["topic_id"] = request.topic_id
+        seen_request["dyad_id"] = request.dyad_id
+        return [
+            RetrievalResult(
+                message_id=topic_recent_dup_id,
+                match_type="both",
+                rrf_score=0.72,
+                keyword_rank=1,
+                semantic_rank=2,
+                semantic_degraded=False,
+                keyword_score=0.88,
+            ),
+            RetrievalResult(
+                message_id=semantic_new_id,
+                match_type="semantic",
+                rrf_score=0.61,
+                keyword_rank=None,
+                semantic_rank=1,
+                semantic_degraded=False,
+                keyword_score=None,
+            ),
+            RetrievalResult(
+                message_id=recent_window_id,
+                match_type="exact",
+                rrf_score=0.55,
+                keyword_rank=2,
+                semantic_rank=None,
+                semantic_degraded=False,
+                keyword_score=0.77,
+            ),
+        ]
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc = await build_hot_context(
+        pool,
+        user,
+        partner,
+        [pool.trigger_id],
+        dyad_id=uuid4(),
+    )
+
+    assert seen_request["query"] == "message 24"
+    assert seen_request["mode"] == "hybrid"
+    assert seen_request["viewer_user_id"] == user.id
+    assert seen_request["partner_user_id"] == partner.id
+    assert seen_request["bot_id"] == pool.bot_id
+    assert seen_request["topic_id"] == pool.topic_id
+    assert seen_request["dyad_id"] is not None
+
+    by_id = {item["id"]: item for item in hc.relevant_prior}
+    assert recent_window_id not in by_id
+    assert topic_recent_dup_id in by_id
+    assert by_id[topic_recent_dup_id]["source"] == "topic_recent"
+    assert by_id[topic_recent_dup_id]["retrieval"]["match_type"] == "both"
+    assert by_id[topic_recent_dup_id]["retrieval"]["rrf_score"] == 0.72
+    assert semantic_new_id not in {item["id"] for item in hc.recent_messages}
+
+
+async def test_semantic_prior_skips_retrieval_without_visible_trigger_text(
+    hot_context_seed, monkeypatch
+):
+    pool, user, partner = hot_context_seed
+    pool.user_bot_state[(partner.id, pool.bot_id)] = {"partner_share": "opt_out"}
+    pool.messages[-1]["sender_id"] = partner.id
+    pool.messages[-1]["recipient_id"] = user.id
+    called = False
+
+    async def fake_hybrid_search(_pool, request):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    assert called is False
+    assert all(item.get("source") == "topic_recent" for item in hc.relevant_prior)
+
+
+async def test_semantic_prior_retrieval_errors_degrade_to_topic_recent_only(
+    hot_context_seed, monkeypatch
+):
+    pool, user, partner = hot_context_seed
+
+    async def fake_hybrid_search(_pool, request):
+        raise TimeoutError("embed timeout")
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    assert len(hc.relevant_prior) == 5
+    assert all(item.get("source") == "topic_recent" for item in hc.relevant_prior)
+    assert all("retrieval" not in item for item in hc.relevant_prior)
+
+
+# ── T8: Focused semantic-prior unit tests ──────────────────────────────
+
+
+async def test_semantic_prior_deterministic_merge(
+    hot_context_seed, monkeypatch
+):
+    """Two calls with the same monkeypatched hybrid_search must produce
+    identical relevant_prior lists (deterministic merge)."""
+    pool, user, partner = hot_context_seed
+    topic_recent_dup_id = pool.messages[3]["id"]
+    semantic_new_id = uuid4()
+    pool.messages.insert(
+        0,
+        {
+            "id": semantic_new_id,
+            "direction": "inbound",
+            "sender_id": user.id,
+            "recipient_id": partner.id,
+            "content": "semantic-only message",
+            "sent_at": pool.now - timedelta(seconds=65),
+            "charge": "routine",
+            "bot_id": pool.bot_id,
+            "topic_id": pool.topic_id,
+        },
+    )
+
+    async def fake_hybrid_search(_pool, request):
+        return [
+            RetrievalResult(
+                message_id=topic_recent_dup_id,
+                match_type="both",
+                rrf_score=0.72,
+                keyword_rank=1,
+                semantic_rank=2,
+                semantic_degraded=False,
+                keyword_score=0.88,
+            ),
+            RetrievalResult(
+                message_id=semantic_new_id,
+                match_type="semantic",
+                rrf_score=0.61,
+                keyword_rank=None,
+                semantic_rank=1,
+                semantic_degraded=False,
+                keyword_score=None,
+            ),
+        ]
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc1 = await build_hot_context(pool, user, partner, [pool.trigger_id])
+    hc2 = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    # Same ids in same order.
+    ids1 = [item["id"] for item in hc1.relevant_prior]
+    ids2 = [item["id"] for item in hc2.relevant_prior]
+    assert ids1 == ids2, f"deterministic merge failed: {ids1} != {ids2}"
+
+    # Same sources for each item.
+    sources1 = [item["source"] for item in hc1.relevant_prior]
+    sources2 = [item["source"] for item in hc2.relevant_prior]
+    assert sources1 == sources2
+
+    # Same retrieval metadata on enriched items.
+    for a, b in zip(hc1.relevant_prior, hc2.relevant_prior):
+        assert a.get("retrieval") == b.get("retrieval")
+
+
+async def test_semantic_prior_duplicates_merged_not_duplicated(
+    hot_context_seed, monkeypatch
+):
+    """Duplicate message IDs between topic-recent prior and semantic results
+    must be merged into a single entry (the topic-recent row enriched with
+    retrieval metadata), never duplicated."""
+    pool, user, partner = hot_context_seed
+    # Pick a message that will appear in topic-recent prior (messages[0]
+    # is the oldest, so it's definitely older than the window edge).
+    dup_id = pool.messages[0]["id"]
+
+    async def fake_hybrid_search(_pool, request):
+        return [
+            RetrievalResult(
+                message_id=dup_id,
+                match_type="exact",
+                rrf_score=0.95,
+                keyword_rank=1,
+                semantic_rank=None,
+                semantic_degraded=False,
+                keyword_score=0.99,
+            ),
+        ]
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    # dup_id must appear exactly once in relevant_prior.
+    occurrences = [item for item in hc.relevant_prior if item["id"] == dup_id]
+    assert len(occurrences) == 1, (
+        f"duplicate ID {dup_id} appears {len(occurrences)} times, expected 1"
+    )
+    dup = occurrences[0]
+    # The row kept must be the topic_recent source.
+    assert dup["source"] == "topic_recent"
+    # It must carry the retrieval metadata enrichment.
+    assert dup.get("retrieval") is not None
+    assert dup["retrieval"]["match_type"] == "exact"
+    assert dup["retrieval"]["rrf_score"] == 0.95
+
+
+async def test_semantic_prior_score_metadata_preserved_for_ordering(
+    hot_context_seed, monkeypatch
+):
+    """Every item in relevant_prior that originated from semantic retrieval
+    (or was enriched by it) must preserve its retrieval metadata with
+    match_type, rrf_score, and keyword_rank / semantic_rank fields so
+    downstream consumers can reason about ordering."""
+    pool, user, partner = hot_context_seed
+    semantic_new_1 = uuid4()
+    semantic_new_2 = uuid4()
+    pool.messages.insert(
+        0,
+        {
+            "id": semantic_new_1,
+            "direction": "inbound",
+            "sender_id": user.id,
+            "recipient_id": partner.id,
+            "content": "first semantic hit",
+            "sent_at": pool.now - timedelta(seconds=70),
+            "charge": "routine",
+            "bot_id": pool.bot_id,
+            "topic_id": pool.topic_id,
+        },
+    )
+    pool.messages.insert(
+        0,
+        {
+            "id": semantic_new_2,
+            "direction": "inbound",
+            "sender_id": user.id,
+            "recipient_id": partner.id,
+            "content": "second semantic hit",
+            "sent_at": pool.now - timedelta(seconds=80),
+            "charge": "routine",
+            "bot_id": pool.bot_id,
+            "topic_id": pool.topic_id,
+        },
+    )
+
+    async def fake_hybrid_search(_pool, request):
+        return [
+            RetrievalResult(
+                message_id=semantic_new_1,
+                match_type="semantic",
+                rrf_score=0.82,
+                keyword_rank=None,
+                semantic_rank=1,
+                semantic_degraded=False,
+                keyword_score=None,
+            ),
+            RetrievalResult(
+                message_id=semantic_new_2,
+                match_type="both",
+                rrf_score=0.67,
+                keyword_rank=2,
+                semantic_rank=3,
+                semantic_degraded=False,
+                keyword_score=0.76,
+            ),
+        ]
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    by_id = {item["id"]: item for item in hc.relevant_prior}
+
+    # semantic_new_1: net-new semantic row.
+    assert semantic_new_1 in by_id, "semantic_new_1 must appear in relevant_prior"
+    s1 = by_id[semantic_new_1]
+    assert s1["source"] == "semantic"
+    assert s1["retrieval"]["match_type"] == "semantic"
+    assert s1["retrieval"]["rrf_score"] == 0.82
+    assert s1["retrieval"]["semantic_rank"] == 1
+    assert s1["retrieval"]["keyword_rank"] is None
+
+    # semantic_new_2: net-new semantic row.
+    assert semantic_new_2 in by_id, "semantic_new_2 must appear in relevant_prior"
+    s2 = by_id[semantic_new_2]
+    assert s2["source"] == "semantic"
+    assert s2["retrieval"]["match_type"] == "both"
+    assert s2["retrieval"]["rrf_score"] == 0.67
+    assert s2["retrieval"]["keyword_score"] == 0.76
+
+    # Topic-recent-only items must NOT carry retrieval metadata.
+    topic_recent_only = [
+        item
+        for item in hc.relevant_prior
+        if item["id"] not in {semantic_new_1, semantic_new_2}
+        and item["source"] == "topic_recent"
+    ]
+    assert len(topic_recent_only) > 0, "expected at least one topic-recent-only item"
+    for item in topic_recent_only:
+        assert "retrieval" not in item, (
+            f"topic-recent-only item {item['id']} must not carry retrieval metadata"
+        )
+
+
+async def test_semantic_prior_silent_turns_skip_retrieval(
+    hot_context_seed, monkeypatch
+):
+    """When the triggering messages all have hidden content (e.g. partner
+    messages with partner_share=opt_out), _semantic_query_text returns
+    the empty string and hybrid_search is never called.  This simulates
+    the silent-turn path where no user-visible trigger text exists."""
+    pool, user, partner = hot_context_seed
+    # Make the trigger message partner-owned with partner_share=opt_out.
+    pool.user_bot_state[(partner.id, pool.bot_id)] = {"partner_share": "opt_out"}
+    pool.messages[-1]["sender_id"] = partner.id
+    pool.messages[-1]["recipient_id"] = user.id
+    pool.messages[-1]["content"] = "partner message that should be hidden"
+
+    call_count = 0
+
+    async def fake_hybrid_search(_pool, request):
+        nonlocal call_count
+        call_count += 1
+        raise AssertionError("hybrid_search must not be called for silent turns")
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    assert call_count == 0, (
+        f"hybrid_search was called {call_count} times for a silent turn; "
+        f"expected 0 when no visible trigger text is available"
+    )
+    # relevant_prior must still be populated from topic-recent.
+    assert len(hc.relevant_prior) <= 8
+    assert all(item.get("source") == "topic_recent" for item in hc.relevant_prior)
+    assert all("retrieval" not in item for item in hc.relevant_prior)
+
+
+async def test_semantic_prior_hydration_error_degrades(
+    hot_context_seed, monkeypatch
+):
+    """When hybrid_search succeeds but hydration of the returned message
+    IDs fails (e.g. pool.fetch raises), the prior must still contain
+    topic-recent rows — the error is non-fatal."""
+    pool, user, partner = hot_context_seed
+    semantic_new_id = uuid4()
+    # Don't add the message to pool.messages — the hydration will fail
+    # because the message ID won't be in the fake pool's messages list.
+
+    async def fake_hybrid_search(_pool, request):
+        return [
+            RetrievalResult(
+                message_id=semantic_new_id,
+                match_type="semantic",
+                rrf_score=0.55,
+                keyword_rank=None,
+                semantic_rank=1,
+                semantic_degraded=False,
+                keyword_score=None,
+            ),
+        ]
+
+    monkeypatch.setattr("app.services.hot_context.hybrid_search", fake_hybrid_search)
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    # The semantic result couldn't be hydrated, so it must not appear.
+    prior_ids = {item["id"] for item in hc.relevant_prior}
+    assert semantic_new_id not in prior_ids, (
+        "unhydrated semantic result must not appear in relevant_prior"
+    )
+    # relevant_prior is still populated from topic-recent.
+    assert len(hc.relevant_prior) <= 8
+    assert all(item.get("source") == "topic_recent" for item in hc.relevant_prior)
 
 
 async def test_build_hot_context_surfaces_reactions_since_previous_turn(

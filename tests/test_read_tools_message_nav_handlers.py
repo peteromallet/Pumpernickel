@@ -207,6 +207,31 @@ async def test_messages_before_after_and_missing_current_anchor(nav_ctx) -> None
 
 
 @pytest.mark.asyncio
+async def test_current_anchor_prefers_first_class_hot_context_edge(nav_ctx) -> None:
+    ctx, rows = nav_ctx
+
+    preferred_ctx = replace_ctx(
+        ctx,
+        hot_context_window_edge={
+            "message_id": str(rows["m2"]["message_id"]),
+            "sent_at": rows["m2"]["sent_at"].isoformat(),
+        },
+        extras={
+            "hot_context_edge": {
+                "message_id": str(rows["m3"]["message_id"]),
+                "sent_at": rows["m3"]["sent_at"].isoformat(),
+            }
+        },
+    )
+
+    before = await read_tools.messages_before(
+        preferred_ctx,
+        MessagesBeforeInput(anchor="current", n=5),
+    )
+    assert [hit.content for hit in before.messages] == ["m1"]
+
+
+@pytest.mark.asyncio
 async def test_open_thread_and_scroll_chain_from_topic_recent(nav_ctx) -> None:
     ctx, rows = nav_ctx
 
@@ -311,3 +336,173 @@ async def test_scroll_cursor_is_stable_across_mid_window_message_mutation(nav_ct
         rows["m3"]["message_id"],
         rows["m5"]["message_id"],
     ]
+
+
+# ── T13: oldest hot-context-edge navigation tests ────────────────────
+
+
+@pytest.fixture
+def oldest_edge_nav_ctx():
+    """Fixture with messages spanning two windows: a simulated hot-context
+    recent window (oldest = minute 10) and older messages (minutes 0-9).
+    """
+    user = User(uuid4(), "Maya", "15555550100", "UTC")
+    partner = User(uuid4(), "Ben", "15555550101", "UTC")
+    current_topic = uuid4()
+    current_bot = "mediator"
+    partner_thread = partner.id
+
+    def row(
+        minute: int,
+        *,
+        sender_id: UUID,
+        recipient_id: UUID | None,
+        message_id: UUID | None = None,
+        bot_id: str = current_bot,
+        partner_share: str = "opt_in",
+        content: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "message_id": message_id or uuid4(),
+            "sender_id": sender_id,
+            "recipient_id": recipient_id,
+            "thread_owner_user_id": partner_thread,
+            "thread_owner_partner_share": partner_share,
+            "bot_id": bot_id,
+            "topic_id": current_topic,
+            "dyad_id": uuid4(),
+            "direction": "inbound" if sender_id is not None else "outbound",
+            "sent_at": datetime(2026, 6, 1, 10, minute, tzinfo=UTC),
+            "content": content or f"msg-{minute:02d}",
+            "media_analysis": None,
+            "charge": "routine",
+            "edited_at": None,
+            "edit_history": None,
+        }
+
+    # Older-than-window messages: minutes 0-9
+    older_msgs = [row(m, sender_id=partner.id, recipient_id=None) for m in range(10)]
+    # Hot-context recent window: minutes 10-29 (20 messages)
+    window_msgs = [row(m, sender_id=partner.id, recipient_id=None) for m in range(10, 30)]
+    # Privacy violations in the older region
+    hidden_old = row(5, sender_id=partner.id, recipient_id=None, partner_share="opt_out", content="hidden-old")
+    other_bot_old = row(7, sender_id=partner.id, recipient_id=None, bot_id="coach", content="other-bot-old")
+
+    # Oldest message in the recent window
+    oldest_in_window = window_msgs[0]  # minute 10
+
+    all_rows = older_msgs + [hidden_old, other_bot_old] + window_msgs
+    pool = NavPool(all_rows)
+
+    ctx = TurnContext(
+        uuid4(),
+        pool,
+        user,
+        partner,
+        [uuid4()],
+        current_step="read",
+        bot_id=current_bot,
+        user_id=user.id,
+        primary_topic_id=current_topic,
+        dyad_id=uuid4(),
+        bot_spec=SimpleNamespace(display_name="Veas"),
+        hot_context_window_edge={
+            "message_id": str(oldest_in_window["message_id"]),
+            "sent_at": oldest_in_window["sent_at"].isoformat(),
+        },
+        extras={
+            "hot_context_edge": {
+                "message_id": str(oldest_in_window["message_id"]),
+                "sent_at": oldest_in_window["sent_at"].isoformat(),
+            }
+        },
+    )
+    return ctx, {
+        "older_msgs": older_msgs,
+        "window_msgs": window_msgs,
+        "oldest_in_window": oldest_in_window,
+        "hidden_old": hidden_old,
+        "other_bot_old": other_bot_old,
+    }
+
+
+@pytest.mark.asyncio
+async def test_messages_before_current_uses_oldest_edge_returns_older(
+    oldest_edge_nav_ctx,
+) -> None:
+    """Prove messages_before(anchor='current') uses the oldest recent
+    hot-context edge and returns only messages strictly older than that edge."""
+    ctx, fixtures = oldest_edge_nav_ctx
+    oldest = fixtures["oldest_in_window"]
+
+    # With n=10, should return at most 10 older messages (minutes 0-9).
+    before = await read_tools.messages_before(
+        ctx, MessagesBeforeInput(anchor="current", n=10)
+    )
+    contents = [hit.content for hit in before.messages]
+    assert len(contents) == 10
+    # All returned messages must be older than the edge (minute 10).
+    for hit in before.messages:
+        assert hit.sent_at < oldest["sent_at"]
+    # Verify chronological ordering (oldest first).
+    assert contents == [f"msg-{m:02d}" for m in range(10)]
+
+    # With n larger than available older messages, returns all available.
+    before_all = await read_tools.messages_before(
+        ctx, MessagesBeforeInput(anchor="current", n=100)
+    )
+    assert len(before_all.messages) == 10
+    assert [hit.content for hit in before_all.messages] == [f"msg-{m:02d}" for m in range(10)]
+    # Cursor points to the oldest returned message.
+    decoded = read_tools._decode_nav_cursor(before_all.cursor)
+    assert decoded["scope"] == "topic"
+
+
+@pytest.mark.asyncio
+async def test_messages_before_current_excludes_privacy_violations(
+    oldest_edge_nav_ctx,
+) -> None:
+    """Prove that privacy filters (opt_out, other bot) still apply when
+    navigating from the oldest hot-context edge."""
+    ctx, fixtures = oldest_edge_nav_ctx
+
+    before = await read_tools.messages_before(
+        ctx, MessagesBeforeInput(anchor="current", n=100)
+    )
+    contents = [hit.content for hit in before.messages]
+    # hidden-old (opt_out) and other-bot-old (coach) must be excluded.
+    assert "hidden-old" not in contents
+    assert "other-bot-old" not in contents
+    # All older visible messages (minutes 0-9) should be present.
+    assert len(contents) == 10
+    assert contents == [f"msg-{m:02d}" for m in range(10)]
+
+
+@pytest.mark.asyncio
+async def test_messages_before_current_falls_back_to_legacy_current_anchor(
+    oldest_edge_nav_ctx,
+) -> None:
+    """Prove that when hot_context_window_edge is absent, the legacy
+    extras['current_anchor'] fallback still works."""
+    ctx, fixtures = oldest_edge_nav_ctx
+    oldest = fixtures["oldest_in_window"]
+
+    no_first_class = replace_ctx(
+        ctx,
+        hot_context_window_edge=None,
+        extras={
+            "current_anchor": {
+                "message_id": str(oldest["message_id"]),
+                "sent_at": oldest["sent_at"].isoformat(),
+            }
+        },
+    )
+    before = await read_tools.messages_before(
+        no_first_class, MessagesBeforeInput(anchor="current", n=5)
+    )
+    assert len(before.messages) == 5
+    # The 5 messages immediately before the oldest-in-window edge
+    # are minutes 5-9 (closest to the edge, oldest-first).
+    assert [hit.content for hit in before.messages] == [f"msg-{m:02d}" for m in range(5, 10)]
+    for hit in before.messages:
+        assert hit.sent_at < oldest["sent_at"]

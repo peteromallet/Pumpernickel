@@ -197,6 +197,83 @@ async def test_load_turn_context_includes_selected_bot_hot_context(
     assert calls == 1
 
 
+@pytest.mark.anyio
+async def test_load_turn_context_passes_dyad_bot_id_to_hot_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def prompt_renderer(
+        assistant_name: str,
+        user_name: str,
+        partner_name: str | None = None,
+        **_: Any,
+    ) -> str:
+        del assistant_name, user_name, partner_name
+        return "dyad prompt"
+
+    monkeypatch.setitem(
+        BOT_SPECS,
+        "dyad_live_test",
+        BotSpec(
+            bot_id="dyad_live_test",
+            prompt_renderer=prompt_renderer,
+            step_instructions={
+                "read": "read",
+                "consult": "consult",
+                "respond": "respond",
+                "record": "record",
+                "schedule": "schedule",
+                "done": "done",
+            },
+            display_name="Dyad Test",
+            primary_topic_slug="relationship",
+            participants_shape="dyad",
+        ),
+    )
+
+    async def fake_build_hot_context(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["bot_id"] == "dyad_live_test"
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "app.services.hot_context.build_hot_context",
+        fake_build_hot_context,
+    )
+    monkeypatch.setattr(
+        "app.services.hot_context.render_hot_context",
+        lambda hot_context: "## Recent messages\n- hello",
+    )
+
+    session_id = uuid4()
+    user_id = uuid4()
+    partner_user_id = uuid4()
+    topic_id = uuid4()
+    pool = _TurnFakePool(
+        conversation={
+            "id": session_id,
+            "user_id": user_id,
+            "partner_user_id": partner_user_id,
+            "bot_id": "dyad_live_test",
+            "prep_summary": "prep",
+            "current_item_id": None,
+            "session_fields": {},
+            "status": "active",
+            "topic_id": topic_id,
+        },
+        user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "+15555550100",
+            "timezone": "Europe/Berlin",
+            "onboarding_state": "ready",
+            "pacing_preferences": {},
+        },
+    )
+
+    context = await load_turn_context(pool, session_id)
+
+    assert context["hot_context_rendered"] == "## Recent messages\n- hello"
+
+
 def test_trim_rendered_hot_context_keeps_live_grounding_sections() -> None:
     rendered = "\n\n".join(
         [
