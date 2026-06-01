@@ -1,0 +1,94 @@
+name: semantic-paraphrase
+tier: 2
+description: >
+  Semantic paraphrase search — agent must use search or search_messages with
+  mode="semantic" (hybrid) to find messages about dining and food arrangements
+  by meaning-match. The literal query terms "dining", "cuisine", and "meal" never
+  appear in any message, so cheap keyword/exact matching will miss the relevant
+  hits. The agent must not use positional navigation or topic_recent — wrong
+  tool choice must cause explicit failure.
+mode: structural
+agents:
+  - id: semantic-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOL — SEMANTIC SEARCH: At least one of search or search_messages
+      MUST appear in project_specific/tool_transcript.json (check tool_name fields
+      in all step_results and tool_calls entries). The call must use
+      mode="semantic" (or mode="hybrid") as the search mode — keyword-only exact
+      mode is the wrong cheap choice and must fail. If neither tool is used, OR if
+      only exact-mode search was used, fail.
+    - >
+      FORBIDDEN TOOLS — NO POSITIONAL NAVIGATION, NO TOPIC_RECENT: messages_before,
+      messages_after, scroll, and topic_recent MUST NOT appear in
+      project_specific/tool_transcript.json. This is a semantic search task — using
+      cheap positional or recency tools instead of meaning-match search must fail.
+      Fail if any forbidden tool is observed.
+    - >
+      EXPECTED DINING MESSAGE IDs: project_specific/tool_transcript.json MUST
+      contain retrieved_message_ids (across all step_results entries) for all seven
+      dining/food messages: m07 (seafood restaurant on the pier), m13 (pasta recipe
+      offer), m14 (lemon and capers confirmation), m15 (grabbing ingredients), m21
+      (booking a table at the seafood place), m22 (table for two at 7pm), m23
+      (fresh seafood and local wines). Fail if any expected dining message ID is
+      missing.
+    - >
+      WRONG-CHOICE FAILURE — DISTRACTORS MUST BE ABSENT: The following message IDs
+      are keyword distractors that must NOT appear in the retrieved_message_ids:
+      m24 (about sister confirmation — keyword overlap with "book" and "plans" but
+      about trip logistics, not dining), m06 (about destination choice — keyword
+      overlap with "coast" but not about food), m03 (about scheduling a trip
+      discussion — keyword overlap with "planning" but not about food). If ANY of
+      these wrong-choice IDs appears in the transcript, fail. The agent must
+      demonstrate meaning-match, not keyword-match.
+    - >
+      GROUNDED FINAL ANSWER: project_specific/final_answer.md MUST contain the
+      following quote fragments (case-insensitive substring match): "seafood
+      restaurant on the pier", "pasta you like", "lemon and capers", "grab the
+      ingredients tomorrow", "book a table for Friday", "table for two around 7pm",
+      "fresh seafood and local wines". Fail if any expected quote is missing.
+    - >
+      EXPLICIT WRONG-TOOL-CHOICE FAILURE: Verify that the agent chose semantic
+      search over cheap positional or keyword alternatives. If the transcript shows
+      only cheap tools (messages_before, messages_after, scroll, topic_recent) with
+      no semantic search call, fail explicitly as wrong tool choice. If only
+      exact-mode keyword search was used without semantic/hybrid mode, fail.
+  graded:
+    - >
+      SEARCH MODE CORRECTNESS: At least one search call used mode="semantic" or
+      mode="hybrid" (not the cheap exact/keyword-only mode). Score 0-100 based on
+      the mode argument observed in project_specific/tool_transcript.json.
+    - >
+      SEMANTIC ANSWER GROUNDING: The final answer in project_specific/final_answer.md
+      synthesizes dining information from the semantic hits (restaurant details,
+      home cooking plans, reservation confirmations) rather than making vague claims
+      or repeating only surface-level keywords. Score 0-100.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases). Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata. Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'search', 'search_messages',
+      'tool_transcript', or 'step_results'. Note presence/absence but do not score.
+tags:
+  - semantic
+  - paraphrase
+  - search
+  - meaning-match
+  - dining
+extras:
+  scripted_tool_case_ids:
+    - semantic_paraphrase
+  fixture_files:
+    - tests/agentic/fixtures/search_nav_cases.py

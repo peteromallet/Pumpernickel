@@ -1,0 +1,75 @@
+{
+  "declared_fixture_files": [
+    "tests/agentic/fixtures/search_nav_cases.py"
+  ],
+  "dispatcher": "recorded-real",
+  "fixture_files": {
+    "tests/agentic/fixtures/search_nav_cases.py": {
+      "present": true,
+      "source": "/Users/peteromalley/Documents/Veas/tests/agentic/fixtures/search_nav_cases.py",
+      "target": "out/agentic/reports/t19-recorded-real/t19-semantic-paraphrase-semantic-paraphrase/evidence/t19-semantic-paraphrase-semantic-paraphrase-semantic-agent-20260601-062659/project_specific/fixtures/tests/agentic/fixtures/search_nav_cases.py"
+    }
+  },
+  "frozen_repo_files": {
+    "app/services/hot_context.py": {
+      "present": true,
+      "source": "/Users/peteromalley/Documents/Veas/app/services/hot_context.py",
+      "target": "out/agentic/reports/t19-recorded-real/t19-semantic-paraphrase-semantic-paraphrase/evidence/t19-semantic-paraphrase-semantic-paraphrase-semantic-agent-20260601-062659/project_specific/frozen_repo/app/services/hot_context.py"
+    },
+    "app/services/tools/read_tools.py": {
+      "present": true,
+      "source": "/Users/peteromalley/Documents/Veas/app/services/tools/read_tools.py",
+      "target": "out/agentic/reports/t19-recorded-real/t19-semantic-paraphrase-semantic-paraphrase/evidence/t19-semantic-paraphrase-semantic-paraphrase-semantic-agent-20260601-062659/project_specific/frozen_repo/app/services/tools/read_tools.py"
+    },
+    "app/services/tools/registry.py": {
+      "present": true,
+      "source": "/Users/peteromalley/Documents/Veas/app/services/tools/registry.py",
+      "target": "out/agentic/reports/t19-recorded-real/t19-semantic-paraphrase-semantic-paraphrase/evidence/t19-semantic-paraphrase-semantic-paraphrase-semantic-agent-20260601-062659/project_specific/frozen_repo/app/services/tools/registry.py"
+    },
+    "tool_schemas.py": {
+      "present": true,
+      "source": "/Users/peteromalley/Documents/Veas/tool_schemas.py",
+      "target": "out/agentic/reports/t19-recorded-real/t19-semantic-paraphrase-semantic-paraphrase/evidence/t19-semantic-paraphrase-semantic-paraphrase-semantic-agent-20260601-062659/project_specific/frozen_repo/tool_schemas.py"
+    }
+  },
+  "project_specific_files": {
+    "assertions.json": {
+      "present": false
+    },
+    "expected_behavior.json": {
+      "present": false
+    },
+    "final_answer.md": {
+      "present": false
+    },
+    "hot_context.md": {
+      "present": false
+    },
+    "infrastructure.json": {
+      "present": false
+    },
+    "messages_seed.json": {
+      "present": false
+    },
+    "tool_transcript.json": {
+      "present": false
+    }
+  },
+  "required_project_specific_files": [
+    "tool_transcript.json",
+    "hot_context.md",
+    "messages_seed.json",
+    "expected_behavior.json",
+    "final_answer.md",
+    "assertions.json",
+    "infrastructure.json"
+  ],
+  "scenario_extras": {
+    "fixture_files": [
+      "tests/agentic/fixtures/search_nav_cases.py"
+    ],
+    "scripted_tool_case_ids": [
+      "semantic_paraphrase"
+    ]
+  }
+}

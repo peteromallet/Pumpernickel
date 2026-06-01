@@ -1,0 +1,8 @@
+ M eval/retrieval/reports/baseline_report.json
+ M eval/retrieval/reports/baseline_report.md
+ M pyproject.toml
+ M uv.lock
+?? out/
+?? sisypy/
+?? tests/agentic/
+?? tests/test_agentic_evidence.py
