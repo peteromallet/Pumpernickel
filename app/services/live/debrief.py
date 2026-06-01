@@ -529,6 +529,7 @@ async def run_live_debrief_agentic_job(
     )
 
     # ── 9. Build normal hot context string ──────────────────────────────
+    hot_context_window_edge: dict[str, Any] | None = None
     try:
         allow_cross_topic_peek = getattr(
             getattr(bot_spec, "read_scopes", None),
@@ -564,6 +565,9 @@ async def run_live_debrief_agentic_job(
                 ),
                 bot_id=bot_id,
             )
+            hot_context_window_edge = hot_context.trigger_metadata.get(
+                "hot_context_window_edge"
+            ) or hot_context.trigger_metadata.get("hot_context_edge")
             hot_context_rendered = render_hot_context(hot_context)
     except Exception:
         logger.warning(
@@ -605,6 +609,7 @@ async def run_live_debrief_agentic_job(
         allowed_tools=flat_allowed_tools,
         failure_reason_prefix=LIVE_DEBRIEF_CONFIG.failure_reason_prefix,
         max_tool_calls=tool_cap,
+        hot_context_window_edge=hot_context_window_edge,
         initial_extras={
             "live_debrief_transcript_policy": transcript_policy,
         },

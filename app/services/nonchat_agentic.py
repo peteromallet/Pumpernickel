@@ -72,6 +72,9 @@ class NonchatJobConfig:
     # Extra server-side metadata to seed onto TurnContext before any tool call.
     initial_extras: dict[str, Any] = field(default_factory=dict)
 
+    # Current-anchor payload for read tools during non-chat turns.
+    hot_context_window_edge: dict[str, Any] | None = None
+
 
 # ── Pre-built configs ────────────────────────────────────────────────────
 LIVE_PREP_CONFIG = NonchatJobConfig(
@@ -224,11 +227,14 @@ async def run_agentic_nonchat_job(
         cross_topic_policy=getattr(bot_spec, "cross_topic_policy", None),
         dyad_id=None,
         flat_allowed_tools=cfg.allowed_tools,
+        hot_context_window_edge=cfg.hot_context_window_edge,
         current_step=cfg.current_step,  # type: ignore[arg-type]
         turn_started_at=started_at,
         trigger_metadata=trigger_metadata,
     )
     ctx.extras.update(cfg.initial_extras)
+    if cfg.hot_context_window_edge is not None:
+        ctx.extras.setdefault("hot_context_edge", cfg.hot_context_window_edge)
 
     # ── 4. Build allowed_tools ──────────────────────────────────────────
     # When flat_allowed_tools is set, _step_allowed uses it as the

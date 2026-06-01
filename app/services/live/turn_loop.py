@@ -372,6 +372,7 @@ async def _load_rendered_hot_context(
             [],
             trigger_metadata,
             primary_topic_id=topic_id,
+            bot_id=bot_id,
             allow_cross_topic_peek=getattr(
                 bot_spec.read_scopes, "allow_cross_topic_peek", False
             ),

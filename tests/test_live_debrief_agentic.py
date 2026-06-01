@@ -434,6 +434,83 @@ class TestDebriefHappyPath:
             for a in pool.inserted_artifact_payloads
         ), f"No live_debrief artifact found in {pool.inserted_artifact_payloads}"
 
+    async def test_debrief_passes_hot_context_edge_to_nonchat_runner(
+        self, monkeypatch: Any
+    ) -> None:
+        user_id = uuid4()
+        partner_user_id = uuid4()
+        conversation_id = uuid4()
+        topic_id = uuid4()
+        captured_run_kwargs: dict[str, Any] = {}
+        edge = {
+            "message_id": str(uuid4()),
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        async def fake_run_job(**kwargs: Any) -> NonchatJobResult:
+            captured_run_kwargs.update(kwargs)
+            return NonchatJobResult(
+                success=False,
+                brief=None,
+                failure_reason="live_debrief_submit_missing",
+                turn_id=uuid4(),
+                tool_call_count=0,
+            )
+
+        monkeypatch.setattr(
+            "app.services.nonchat_agentic.run_agentic_nonchat_job",
+            fake_run_job,
+        )
+
+        async def fake_build_hot_context(*args: Any, **kwargs: Any) -> Any:
+            return type(
+                "HotContextStub",
+                (),
+                {
+                    "trigger_metadata": {
+                        "hot_context_window_edge": edge,
+                        "hot_context_edge": edge,
+                    }
+                },
+            )()
+
+        monkeypatch.setattr(
+            "app.services.hot_context.build_hot_context",
+            fake_build_hot_context,
+        )
+        monkeypatch.setattr(
+            "app.services.hot_context.render_hot_context",
+            lambda hot_context: "DYAD HOT CONTEXT",
+        )
+
+        pool = DebriefFakePool()
+        pool.set_conversations_row(
+            conversation_id,
+            user_id=user_id,
+            partner_user_id=partner_user_id,
+            bot_id="mediator",
+            status="debriefing",
+            topic_id=topic_id,
+        )
+        pool.set_user_row(user_id, name="TestUser")
+        pool.set_transcript_turns([])
+        pool.set_speakers([])
+        pool.set_agenda_items()
+        pool.set_notes()
+        pool.set_artifacts()
+
+        from app.services.live.debrief import run_live_debrief_agentic_job
+
+        result = await run_live_debrief_agentic_job(
+            conversation_id=conversation_id,
+            user=_make_user("TestUser"),
+            pool=pool,
+        )
+
+        assert result.success is False
+        assert captured_run_kwargs["hot_context"] == "DYAD HOT CONTEXT"
+        assert captured_run_kwargs["config"].hot_context_window_edge == edge
+
     async def test_debrief_success_with_review_summary_creates_second_artifact(
         self, monkeypatch: Any
     ) -> None:

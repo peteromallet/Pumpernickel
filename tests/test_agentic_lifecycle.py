@@ -209,6 +209,123 @@ async def test_run_agentic_turn_lifecycle_ordering(fake_pool, app_env, monkeypat
     assert not any("I hear you" in str(metadata) for _, _, _, metadata in audit_events)
 
 
+async def test_run_agentic_turn_propagates_hot_context_edge_into_turn_context(
+    fake_pool, app_env, monkeypatch
+):
+    user = User(uuid4(), "Maya", "15555550100", "UTC")
+    partner = User(uuid4(), "Ben", "15555550101", "UTC")
+    fake_pool.users[user.id] = {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "timezone": user.timezone,
+    }
+    fake_pool.users[partner.id] = {
+        "id": partner.id,
+        "name": partner.name,
+        "phone": partner.phone,
+        "timezone": partner.timezone,
+    }
+    scope = _scope_for(user)
+    message_id = uuid4()
+    fake_pool.messages[message_id] = {
+        "id": message_id,
+        "direction": "inbound",
+        "sender_id": user.id,
+        "recipient_id": None,
+        "content": "I need help",
+        "processing_state": "raw",
+        "sent_at": datetime.now(UTC),
+        "charge": "routine",
+        "deleted_at": None,
+        "whatsapp_message_id": "wa-edge",
+        "media_type": None,
+        "media_url": None,
+        "media_duration_seconds": None,
+        "media_analysis": None,
+        "edit_history": None,
+        "edited_at": None,
+        "bot_id": scope.bot_id,
+        "topic_id": scope.topic_id,
+    }
+    edge = {
+        "message_id": str(uuid4()),
+        "sent_at": datetime.now(UTC).isoformat(),
+    }
+    build_kwargs = {}
+    seen_contexts = []
+
+    async def fake_partner_of(*args, **kwargs):
+        return partner
+
+    async def fake_build_hot_context(
+        pool, ctx_user, ctx_partner, message_ids, trigger_metadata, **kwargs
+    ):
+        build_kwargs.update(kwargs)
+        assert ctx_user.id == user.id
+        assert ctx_partner.id == partner.id
+        assert message_ids == [message_id]
+        return SimpleNamespace(
+            trigger_metadata={
+                **(trigger_metadata or {"kind": "inbound"}),
+                "hot_context_window_edge": edge,
+                "hot_context_edge": edge,
+            },
+            recent_messages=[],
+            open_watch_items=[],
+            active_oob=[],
+            current_user={},
+            partner_user={},
+        )
+
+    async def fake_run_step(
+        client, ctx, system_prompt, hot_context_rendered, allowed_tools, seed_messages, **kwargs
+    ):
+        seen_contexts.append(ctx)
+        assert ctx.bot_id == scope.bot_id
+        assert ctx.hot_context_window_edge == edge
+        assert ctx.extras["hot_context_edge"] == edge
+        if ctx.current_step == "respond":
+            return "I hear you.", [], 0
+        return "", [], 0
+
+    async def fake_send(pool, recipient, content, bot_turn_id=None, **kwargs):
+        out_id = uuid4()
+        pool.messages[out_id] = {
+            "id": out_id,
+            "direction": "outbound",
+            "sender_id": None,
+            "recipient_id": recipient.id,
+            "content": content,
+            "processing_state": "processed",
+            "sent_at": datetime.now(UTC),
+            "charge": None,
+            "deleted_at": None,
+            "bot_id": kwargs["scope"].bot_id,
+            "topic_id": kwargs["scope"].topic_id,
+        }
+        return {
+            "status": "sent",
+            "message_id": out_id,
+            "visible_to_user": True,
+            "provider_message_id": None,
+        }
+
+    monkeypatch.setattr(agentic, "partner_of", fake_partner_of)
+    monkeypatch.setattr(agentic, "build_hot_context", fake_build_hot_context)
+    monkeypatch.setattr(
+        agentic, "render_hot_context", lambda hot_context: "Mediator hot context"
+    )
+    monkeypatch.setattr(agentic, "run_step", fake_run_step)
+    monkeypatch.setattr(agentic, "send_outbound", fake_send)
+    agentic.set_pool(fake_pool)
+
+    await agentic.run_agentic_turn([message_id], user, scope=scope)
+
+    assert build_kwargs["bot_id"] == scope.bot_id
+    assert seen_contexts
+
+
 async def test_run_agentic_uses_scope_for_rosi_identity(fake_pool, app_env, monkeypatch):
     rosi_spec = build_tante_rosi_spec()
     monkeypatch.setitem(BOT_SPECS, rosi_spec.bot_id, rosi_spec)

@@ -815,6 +815,8 @@ def _nav_cursor_datetime(payload: dict[str, Any], key: str) -> datetime:
 
 
 def _current_anchor_payload(ctx: TurnContext) -> dict[str, Any] | None:
+    if isinstance(ctx.hot_context_window_edge, dict):
+        return ctx.hot_context_window_edge
     extras = ctx.extras or {}
     for key in ("hot_context_edge", "current_anchor"):
         payload = extras.get(key)

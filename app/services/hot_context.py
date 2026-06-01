@@ -21,6 +21,7 @@ from app.services.text_safety import (
     clean_user_facing_text,
     looks_like_internal_process_text,
 )
+from app.services.retrieval import RetrievalQuery, RetrievalResult, hybrid_search
 from app.services.time_context import (
     add_calendar_months,
     temporal_reference,
@@ -32,6 +33,10 @@ from app.services.topic_filter import join_artifact_topics
 
 
 CROSS_BOT_SHAREABLE_SUMMARY_CAP = 12
+HOT_CONTEXT_TOPIC_RECENT_PRIOR_CAP = 5
+HOT_CONTEXT_SEMANTIC_PRIOR_CAP = 5
+HOT_CONTEXT_RELEVANT_PRIOR_CAP = 8
+HOT_CONTEXT_LINE_CLIP_LIMIT = 240
 
 
 @dataclass
@@ -47,6 +52,7 @@ class HotContext:
     recent_messages: list[dict[str, Any]]
     time_since_last_message: str | None
     trigger_metadata: dict[str, Any]
+    relevant_prior: list[dict[str, Any]] = field(default_factory=list)
     temporal_context: dict[str, Any] = field(default_factory=dict)
     distillations: list[dict[str, Any]] = field(default_factory=list)
     bridge_candidates: list[dict[str, Any]] = field(default_factory=list)
@@ -194,6 +200,185 @@ def _queue_outcome_label(item: dict[str, Any]) -> str:
 
 def _message_content(item: dict[str, Any], clip_limit: int) -> str:
     return f"{_media_label(item)}: {_history_content(item)}"
+
+
+def _hot_context_message_from_row(
+    row: dict[str, Any],
+    *,
+    viewer_user_id: UUID,
+    partner_share_by_user: dict[UUID, str],
+    timezone_name: str | None,
+    now_utc: datetime,
+    source: str | None = None,
+    retrieval: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    thread_owner_user_id = _message_thread_owner_id(row)
+    if thread_owner_user_id not in partner_share_by_user:
+        return None
+    visible = raw_message_visibility(
+        viewer_user_id=viewer_user_id,
+        thread_owner_user_id=thread_owner_user_id,
+        thread_owner_partner_share=partner_share_by_user.get(thread_owner_user_id),
+    ).visible
+    item = {
+        "id": row["id"],
+        "direction": row["direction"],
+        "sender_id": row["sender_id"],
+        "recipient_id": row["recipient_id"],
+        "content": row["content"] if visible else None,
+        "media_type": row["media_type"] if "media_type" in row else None,
+        "media_duration_seconds": (
+            row["media_duration_seconds"] if "media_duration_seconds" in row else None
+        ),
+        "media_analysis": row["media_analysis"] if "media_analysis" in row else None,
+        "raw_content_hidden": not visible,
+        "sent_at": _iso(row["sent_at"]),
+        "sent_at_time": _time_context(row["sent_at"], timezone_name, now_utc),
+        "charge": row["charge"],
+        **(
+            {
+                "queue_outcome": {
+                    "handling_result": row["handling_result"],
+                    "handled_at": _iso(row["handled_at"]),
+                    "processing_error": row.get("processing_error"),
+                }
+            }
+            if row.get("direction") == "inbound"
+            and row.get("handling_result") is not None
+            and row["handling_result"] not in (None, "replied")
+            else {}
+        ),
+    }
+    if source is not None:
+        item["source"] = source
+    if retrieval is not None:
+        item["retrieval"] = retrieval
+    return item
+
+
+def _semantic_prior_metadata(result: RetrievalResult) -> dict[str, Any]:
+    return {
+        "match_type": result.match_type,
+        "rrf_score": result.rrf_score,
+        "keyword_rank": result.keyword_rank,
+        "semantic_rank": result.semantic_rank,
+        "semantic_degraded": result.semantic_degraded,
+        "keyword_score": result.keyword_score,
+    }
+
+
+def _semantic_query_text(
+    trigger_rows: list[dict[str, Any]],
+    *,
+    viewer_user_id: UUID,
+    partner_share_by_user: dict[UUID, str],
+    timezone_name: str | None,
+    now_utc: datetime,
+) -> str:
+    parts: list[str] = []
+    for row in trigger_rows:
+        item = _hot_context_message_from_row(
+            row,
+            viewer_user_id=viewer_user_id,
+            partner_share_by_user=partner_share_by_user,
+            timezone_name=timezone_name,
+            now_utc=now_utc,
+        )
+        if item is None:
+            continue
+        if item.get("raw_content_hidden"):
+            continue
+        content = _history_content(item).strip()
+        if content:
+            parts.append(content)
+    return "\n".join(parts).strip()
+
+
+async def _fetch_semantic_prior(
+    pool: Any,
+    *,
+    user: User,
+    partner: User,
+    bot_id: str,
+    primary_topic: UUID,
+    dyad_id: UUID | None,
+    trigger_rows: list[dict[str, Any]],
+    partner_share_by_user: dict[UUID, str],
+    user_timezone: str,
+    now_utc: datetime,
+    excluded_message_ids: set[UUID],
+) -> list[dict[str, Any]]:
+    query_text = _semantic_query_text(
+        trigger_rows,
+        viewer_user_id=user.id,
+        partner_share_by_user=partner_share_by_user,
+        timezone_name=user_timezone,
+        now_utc=now_utc,
+    )
+    if not query_text:
+        return []
+    try:
+        retrieval_results = await hybrid_search(
+            pool,
+            RetrievalQuery(
+                query=query_text,
+                viewer_user_id=user.id,
+                partner_user_id=partner.id,
+                bot_id=bot_id,
+                topic_id=primary_topic,
+                dyad_id=dyad_id,
+                mode="hybrid",
+                limit=HOT_CONTEXT_SEMANTIC_PRIOR_CAP,
+            ),
+        )
+    except Exception:
+        return []
+    ranked_results = [
+        result
+        for result in retrieval_results
+        if result.message_id not in excluded_message_ids
+    ][:HOT_CONTEXT_SEMANTIC_PRIOR_CAP]
+    if not ranked_results:
+        return []
+    try:
+        hydrated_rows = await pool.fetch(
+            """
+            SELECT id, direction, sender_id, recipient_id, content, media_type,
+                   media_duration_seconds, media_analysis, sent_at,
+                   COALESCE(charge, 'routine') AS charge, bot_id, topic_id,
+                   processing_state, handling_result, handled_at, processing_error
+            FROM messages
+            WHERE deleted_at IS NULL
+              AND id = ANY($1::uuid[])
+              AND (sender_id = ANY($2::uuid[]) OR recipient_id = ANY($2::uuid[]))
+              AND bot_id = $3
+              AND topic_id = $4
+            """,
+            [result.message_id for result in ranked_results],
+            [user.id, partner.id],
+            bot_id,
+            primary_topic,
+        )
+        rows_by_id = {row["id"]: dict(row) for row in hydrated_rows}
+        semantic_prior: list[dict[str, Any]] = []
+        for result in ranked_results:
+            row = rows_by_id.get(result.message_id)
+            if row is None:
+                continue
+            item = _hot_context_message_from_row(
+                row,
+                viewer_user_id=user.id,
+                partner_share_by_user=partner_share_by_user,
+                timezone_name=user_timezone,
+                now_utc=now_utc,
+                source="semantic",
+                retrieval=_semantic_prior_metadata(result),
+            )
+            if item is not None:
+                semantic_prior.append(item)
+        return semantic_prior
+    except Exception:
+        return []
 
 
 def _clip_id(value: Any, clip_limit: int) -> str:
@@ -921,6 +1106,62 @@ async def build_hot_context(
         for row in reversed(message_rows)
         if _message_thread_owner_id(row) in partner_share_by_user
     ]
+    hot_context_window_edge = (
+        {
+            "message_id": str(recent_messages[0]["id"]),
+            "sent_at": recent_messages[0]["sent_at"],
+        }
+        if recent_messages
+        else None
+    )
+
+    # ── Topic-recent prior older than the hot-context window edge ──────
+    # Same bot, same topic, same participant scope, undeleted messages
+    # strictly older than the window edge (or older than now if no edge).
+    # Transformed with the identical visibility / redaction logic as the
+    # recent-message window.
+    topic_recent_edge_sent_at = (
+        hot_context_window_edge["sent_at"]
+        if hot_context_window_edge is not None
+        else now_utc.isoformat()
+    )
+    topic_recent_prior_rows = await pool.fetch(
+        """\
+        SELECT id, direction, sender_id, recipient_id, content, media_type,
+               media_duration_seconds, media_analysis, sent_at,
+               COALESCE(charge, 'routine') AS charge, bot_id, topic_id,
+               processing_state, handling_result, handled_at, processing_error
+        FROM messages
+        WHERE deleted_at IS NULL
+          AND (sender_id = ANY($1::uuid[]) OR recipient_id = ANY($1::uuid[]))
+          AND bot_id = $2
+          AND topic_id = $3
+          AND sent_at < $4::timestamptz
+        ORDER BY sent_at DESC, id DESC
+        LIMIT $5
+        """,
+        [user.id, partner.id],
+        bot_id,
+        primary_topic,
+        topic_recent_edge_sent_at,
+        HOT_CONTEXT_TOPIC_RECENT_PRIOR_CAP,
+    )
+    relevant_prior = [
+        item
+        for row in reversed(topic_recent_prior_rows)
+        if (
+            item := _hot_context_message_from_row(
+                dict(row),
+                viewer_user_id=user.id,
+                partner_share_by_user=partner_share_by_user,
+                timezone_name=user_timezone,
+                now_utc=now_utc,
+                source="topic_recent",
+            )
+        )
+        is not None
+    ]
+
     bridge_candidate_rows = await pool.fetch(
         """
         SELECT id, source_user_id, target_user_id, kind, status, sensitivity, partner_path,
@@ -965,6 +1206,61 @@ async def build_hot_context(
         bot_id,
         primary_topic,
     )
+    excluded_prior_ids = {
+        item["id"] for item in recent_messages if item.get("id") is not None
+    }
+    semantic_prior = await _fetch_semantic_prior(
+        pool,
+        user=user,
+        partner=partner,
+        bot_id=bot_id,
+        primary_topic=primary_topic,
+        dyad_id=dyad_id,
+        trigger_rows=[dict(row) for row in trigger_rows],
+        partner_share_by_user=partner_share_by_user,
+        user_timezone=user_timezone,
+        now_utc=now_utc,
+        excluded_message_ids=excluded_prior_ids,
+    )
+    # ── Merge: topic-recent floor + semantic net-new ────────────────────
+    # Build a combined relevant_prior.  Invariants:
+    #   • Exclude recent-window IDs (already handled: semantic retrieval
+    #     filters excluded_prior_ids; topic-recent query filters by
+    #     sent_at < window edge).
+    #   • Prefer topic-recent records on duplicate message IDs — the
+    #     topic_recent item stays as the canonical row while semantic
+    #     retrieval metadata is carried over as enrichment.
+    #   • Keep up to HOT_CONTEXT_TOPIC_RECENT_PRIOR_CAP (5) topic-recent
+    #     rows plus up to 3 net-new semantic rows, final cap at
+    #     HOT_CONTEXT_RELEVANT_PRIOR_CAP (8).
+    #   • Sort the merged list chronologically (oldest first) so the
+    #     agent sees a readable, time-ordered context block.
+    if semantic_prior:
+        topic_recent_items = list(relevant_prior[:HOT_CONTEXT_TOPIC_RECENT_PRIOR_CAP])
+        topic_recent_by_id: dict[Any, dict[str, Any]] = {
+            item["id"]: item for item in topic_recent_items if item.get("id") is not None
+        }
+        semantic_items: list[dict[str, Any]] = []
+        for item in semantic_prior:
+            existing = topic_recent_by_id.get(item["id"])
+            if existing is not None:
+                # Duplicate: keep the topic_recent item but carry over
+                # semantic retrieval metadata (match_type, rrf_score,
+                # keyword_rank, semantic_rank, semantic_degraded,
+                # keyword_score).
+                existing["retrieval"] = item.get("retrieval")
+                continue
+            semantic_items.append(item)
+        net_new_semantic = semantic_items[
+            : max(0, HOT_CONTEXT_RELEVANT_PRIOR_CAP - len(topic_recent_items))
+        ]
+        relevant_prior = sorted(
+            topic_recent_items + net_new_semantic,
+            key=lambda item: (item["sent_at"] or "", str(item["id"])),
+        )[:HOT_CONTEXT_RELEVANT_PRIOR_CAP]
+    else:
+        # No semantic results: cap topic-recent at the overall cap.
+        relevant_prior = relevant_prior[:HOT_CONTEXT_RELEVANT_PRIOR_CAP]
     recent_reactions = [
         {
             "id": row["id"],
@@ -1148,6 +1444,7 @@ async def build_hot_context(
         recent_reactions=recent_reactions,
         silent_turns=silent_turns,
         recent_messages=recent_messages,
+        relevant_prior=relevant_prior,
         topic_status=topic_status,
         cross_topic_peek=cross_topic_peek,
         cross_topic_status=cross_topic_status,
@@ -1158,6 +1455,14 @@ async def build_hot_context(
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
             **(trigger_metadata or {}),
+            **(
+                {
+                    "hot_context_window_edge": hot_context_window_edge,
+                    "hot_context_edge": hot_context_window_edge,
+                }
+                if hot_context_window_edge is not None
+                else {}
+            ),
             "triggering_message_ids": triggering_message_ids,
             "messages": [
                 {
@@ -1494,6 +1799,42 @@ def _render_with_counts(
         f"- {_time_label(item, 'sent_at') or item['sent_at']} {item['direction']} charge={item['charge']} sender={item['sender_id']} recipient={item['recipient_id']}{_message_content(item, clip_limit)}{_queue_outcome_label(item)}"
         for item in hc.recent_messages
     )
+    if hc.relevant_prior:
+        lines += ["", "## Previous on this topic"]
+        if truncations.get("relevant_prior"):
+            lines.append(
+                f"- [truncated, {truncations['relevant_prior']} older]"
+            )
+        lines.append(
+            "- These are older messages from earlier in this topic that "
+            "may be relevant to the current exchange. Use the message ids "
+            "below as cursor anchors with read tools to explore further "
+            "back."
+        )
+        for item in hc.relevant_prior:
+            source = item.get("source", "")
+            source_label = f" source={source}" if source else ""
+            retrieval = item.get("retrieval")
+            retrieval_label = ""
+            if retrieval and isinstance(retrieval, dict):
+                match = retrieval.get("match_type", "")
+                score = retrieval.get("rrf_score")
+                if match or score is not None:
+                    parts = []
+                    if match:
+                        parts.append(match)
+                    if score is not None:
+                        parts.append(f"rrf={score:.4f}")
+                    retrieval_label = f" [{', '.join(parts)}]"
+            lines.append(
+                f"- {_time_label(item, 'sent_at') or item['sent_at']} "
+                f"id={_clip_id(item['id'], clip_limit)} "
+                f"{item['direction']} charge={item['charge']} "
+                f"sender={item['sender_id']} recipient={item['recipient_id']}"
+                f"{source_label}{retrieval_label}"
+                f"{_media_label(item)}: {_clip(_history_content(item), clip_limit)}"
+                f"{_queue_outcome_label(item)}"
+            )
     # Silent agent turns since the user's last message — work the agent
     # already did that produced no outbound message. The message timeline
     # cannot show these; this section is the only record.
@@ -1597,6 +1938,7 @@ def render_hot_context(hc: HotContext) -> str:
         recent_reactions=list(hc.recent_reactions),
         silent_turns=list(hc.silent_turns),
         recent_messages=list(hc.recent_messages),
+        relevant_prior=list(hc.relevant_prior),
         partner_shareable_summaries=list(hc.partner_shareable_summaries),
         topic_status=hc.topic_status,
         cross_topic_peek=list(hc.cross_topic_peek),
@@ -1611,26 +1953,29 @@ def render_hot_context(hc: HotContext) -> str:
         "distillations": 0,
         "observations": 0,
         "memories": 0,
+        "relevant_prior": 0,
         "partner_shareable_summaries": 0,
         "recent_messages": 0,
         "conversation_load": 0,
     }
-    clip_limit = 240
+    clip_limit = HOT_CONTEXT_LINE_CLIP_LIMIT
     text = _render_with_counts(working, truncations, clip_limit)
     for name in (
         "distillations",
         "partner_shareable_summaries",
         "observations",
         "memories",
+        "relevant_prior",
         "recent_messages",
     ):
         items = getattr(working, name)
         while _estimated_tokens(text) > budget and items:
-            # recent_messages is ordered oldest -> newest, so drop from the
-            # front to evict stale backlog and keep the most recent turns (the
-            # immediate context the model needs). The other lists are ranked
-            # with the least valuable entries last, so they pop from the tail.
-            items.pop(0 if name == "recent_messages" else -1)
+            # recent_messages and relevant_prior are ordered oldest -> newest,
+            # so drop from the front to evict stale backlog and keep the most
+            # recent turns (the immediate context the model needs). The other
+            # lists are ranked with the least valuable entries last, so they
+            # pop from the tail.
+            items.pop(0 if name in ("recent_messages", "relevant_prior") else -1)
             truncations[name] += 1
             text = _render_with_counts(working, truncations, clip_limit)
     for clip_limit in (160, 100, 60, 30):
