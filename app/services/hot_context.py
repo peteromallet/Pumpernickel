@@ -1828,10 +1828,11 @@ def _render_with_counts(
                     retrieval_label = f" [{', '.join(parts)}]"
             lines.append(
                 f"- {_time_label(item, 'sent_at') or item['sent_at']} "
+                f"id={_clip_id(item['id'], clip_limit)} "
                 f"{item['direction']} charge={item['charge']} "
                 f"sender={item['sender_id']} recipient={item['recipient_id']}"
                 f"{source_label}{retrieval_label}"
-                f"{_message_content(item, clip_limit)}"
+                f"{_media_label(item)}: {_clip(_history_content(item), clip_limit)}"
                 f"{_queue_outcome_label(item)}"
             )
     # Silent agent turns since the user's last message — work the agent

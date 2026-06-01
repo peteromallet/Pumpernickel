@@ -1640,6 +1640,167 @@ def test_render_hot_context_truncates_oldest_recent_messages_first(monkeypatch):
     get_settings.cache_clear()
 
 
+def test_render_hot_context_previous_topic_section_has_navigation_cues(monkeypatch):
+    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "2000")
+    get_settings.cache_clear()
+    user_id = uuid4()
+    partner_id = uuid4()
+    recent_id = uuid4()
+    prior_id = uuid4()
+    hc = HotContext(
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 2,
+            "inbound_count": 1,
+            "outbound_count": 1,
+        },
+        active_oob=[],
+        memories=[],
+        active_themes=[],
+        open_watch_items=[],
+        observations=[],
+        recent_messages=[
+            {
+                "id": recent_id,
+                "direction": "inbound",
+                "sender_id": user_id,
+                "recipient_id": partner_id,
+                "content": "latest turn",
+                "sent_at": "2026-05-25T12:05:00+00:00",
+                "charge": "routine",
+            }
+        ],
+        relevant_prior=[
+            {
+                "id": prior_id,
+                "direction": "outbound",
+                "sender_id": partner_id,
+                "recipient_id": user_id,
+                "content": "older topic context " + "x" * 260,
+                "sent_at": "2026-05-25T11:45:00+00:00",
+                "charge": "routine",
+                "source": "semantic",
+                "retrieval": {"match_type": "semantic", "rrf_score": 0.4321},
+            }
+        ],
+        time_since_last_message="1m",
+        trigger_metadata={"triggering_message_ids": [recent_id], "messages": []},
+    )
+
+    text = render_hot_context(hc)
+
+    assert text.index("## Recent messages") < text.index("## Previous on this topic")
+    assert text.index("## Previous on this topic") < text.index(
+        "## Your silent turns since the user's last message"
+    )
+    assert "Use the message ids below as cursor anchors with read tools" in text
+    assert f"id={str(prior_id)[:14]}" in text
+    assert "source=semantic [semantic, rrf=0.4321]" in text
+    assert "older topic context " in text
+    assert "x" * 240 not in text
+    assert "..." in text
+    get_settings.cache_clear()
+
+
+def test_render_hot_context_truncates_prior_before_recent_messages(monkeypatch):
+    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "560")
+    get_settings.cache_clear()
+    user_id = uuid4()
+    partner_id = uuid4()
+    recent_id = uuid4()
+    base = datetime(2026, 5, 25, 12, 0, tzinfo=UTC)
+    hc = HotContext(
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 7,
+            "inbound_count": 6,
+            "outbound_count": 1,
+        },
+        active_oob=[],
+        memories=[],
+        active_themes=[],
+        open_watch_items=[],
+        observations=[],
+        recent_messages=[
+            {
+                "id": recent_id,
+                "direction": "inbound",
+                "sender_id": user_id,
+                "recipient_id": partner_id,
+                "content": "keep-this-immediate-context",
+                "sent_at": "2026-05-25T12:05:00+00:00",
+                "charge": "routine",
+            }
+        ],
+        relevant_prior=[
+            {
+                "id": uuid4(),
+                "direction": "outbound",
+                "sender_id": partner_id,
+                "recipient_id": user_id,
+                "content": f"prior-{i} " + "y" * 220,
+                "sent_at": (base + timedelta(minutes=i)).isoformat(),
+                "charge": "routine",
+                "source": "topic_recent",
+            }
+            for i in range(6)
+        ],
+        time_since_last_message="1m",
+        trigger_metadata={"triggering_message_ids": [recent_id], "messages": []},
+    )
+
+    text = render_hot_context(hc)
+
+    assert "## Previous on this topic" in text
+    assert "[truncated," in text
+    assert "keep-this-immediate-context" in text
+    assert "prior-0" not in text
+    assert "prior-5" in text
+    get_settings.cache_clear()
+
+
 def test_render_hot_context_labels_voice_transcripts(monkeypatch):
     monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "2000")
     get_settings.cache_clear()
