@@ -36,6 +36,7 @@ class TurnContext:
     cross_topic_policy: str | None = None
     dyad_id: UUID | None = None
     flat_allowed_tools: set[str] | None = None
+    hot_context_window_edge: dict[str, Any] | None = None
     # Existing fields preserved in original order
     current_step: TurnStep = "respond"
     turn_plan: TurnPlan = field(default_factory=lambda: make_turn_plan("quick_reply"))

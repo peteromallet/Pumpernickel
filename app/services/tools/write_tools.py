@@ -24,6 +24,10 @@ from app.services.partner_sharing import (
 )
 from app.services.vision import explain_stored_image
 from app.services.messaging import send_outbound, _append_turn_reasoning, _call_oob_hook
+from app.services.message_embedding_lifecycle import (
+    enqueue_message_embedding_drop,
+    enqueue_message_reembed,
+)
 from app.services import discord, scoring
 from app.services.templates import TemplateCall
 from app.services.time_context import temporal_reference
@@ -2327,7 +2331,7 @@ async def escalate_to_partner(
 async def _fetch_dyad_message(ctx: TurnContext, message_id: Any) -> Any | None:
     return await ctx.pool.fetchrow(
         """
-        SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at
+        SELECT id, direction, sender_id, recipient_id, content, whatsapp_message_id, deleted_at, media_analysis
         FROM messages
         WHERE id=$1
           AND (
@@ -2428,6 +2432,12 @@ async def edit_outbound_message(
         encrypt_value(args.content),
         args.message_id,
     )
+    await enqueue_message_reembed(
+        ctx.pool,
+        message_id=args.message_id,
+        content=args.content,
+        media_analysis=row["media_analysis"],
+    )
     result = EditOutboundMessageOutput(
         action="edited",
         message_id=args.message_id,
@@ -2492,6 +2502,7 @@ async def delete_outbound_message(
         "UPDATE messages SET deleted_at = now(), processing_state='expired' WHERE id=$1",
         args.message_id,
     )
+    await enqueue_message_embedding_drop(ctx.pool, message_id=args.message_id)
     result = DeleteOutboundMessageOutput(
         action="deleted",
         message_id=args.message_id,
@@ -2577,7 +2588,7 @@ async def explain_media_item(
     started = _start()
     row = await ctx.pool.fetchrow(
         """
-        SELECT id, direction, sender_id, recipient_id, media_type, media_url, deleted_at, bot_id
+        SELECT id, direction, sender_id, recipient_id, content, media_type, media_url, media_analysis, deleted_at, bot_id
         FROM messages
         WHERE id=$1
           AND (
@@ -2645,6 +2656,12 @@ async def explain_media_item(
         media_type=row["media_type"],
         explanation=analysis.get("explanation") or analysis.get("description"),
         reason=args.reason,
+    )
+    await enqueue_message_reembed(
+        ctx.pool,
+        message_id=args.message_id,
+        content=row["content"],
+        media_analysis=analysis,
     )
     await _log_tool_call(ctx, "explain_media_item", args, started, result)
     return result

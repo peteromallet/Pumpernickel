@@ -1,0 +1,84 @@
+name: positional-scrollback-cursor
+tier: 2
+description: >
+  Positional navigation with cursor-based scrollback — agent must first use
+  messages_before(anchor='current') for an initial page, then scroll backward
+  via cursor to retrieve older messages. Must demonstrate pagination without
+  semantic search.
+mode: structural
+agents:
+  - id: positional-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOLS: messages_before AND scroll MUST both appear in
+      project_specific/tool_transcript.json (check tool_name fields in all
+      step_results and tool_calls entries). If either tool is missing, fail.
+    - >
+      FORBIDDEN TOOLS: search, search_messages, messages_after, open_thread, and
+      topic_recent MUST NOT appear in project_specific/tool_transcript.json.
+      Scrollback via cursor only — no semantic search, no forward navigation
+      permitted. Fail if any forbidden tool is observed.
+    - >
+      EXPECTED NEIGHBOR MESSAGE IDs (TWO PAGES): project_specific/tool_transcript.json
+      MUST contain retrieved_message_ids for all 8 expected messages across both
+      pages. The first page (messages_before) MUST retrieve m08, m09, m10, m11.
+      The second page (scroll older) MUST retrieve m04, m05, m06, m07. Fail if any
+      expected neighbor ID is missing from the transcript.
+    - >
+      GROUNDED FINAL ANSWER: project_specific/final_answer.md MUST contain the
+      following quote fragments (case-insensitive substring match): "Should we
+      invite your sister", "I'll text her tonight", "the first weekend of June",
+      "That works for me", "the coast", "that little town we visited two years
+      ago", "seafood restaurant on the pier", "the little bookshop on the
+      corner". Fail if any expected quote is missing.
+    - >
+      CURSOR-BASED PAGINATION: The scroll call MUST use a cursor obtained from
+      the preceding messages_before result — not a hardcoded message ID or
+      anchor. Verify in project_specific/tool_transcript.json that scroll args
+      include a cursor value propagated from the prior call's result.
+    - >
+      NO SEMANTIC SEARCH: Verify that the agent solved the task using ONLY
+      positional navigation and scrollback (messages_before + scroll) and did
+      NOT call search, search_messages, messages_after, or topic_recent. Check
+      project_specific/tool_transcript.json for tool_name values.
+  graded:
+    - >
+      TOOL ARGUMENT CORRECTNESS: messages_before was called with
+      anchor='current' and a reasonable n (3-5). scroll was called with
+      direction='older' and a cursor from the previous result. Score 0-100
+      based on argument correctness in project_specific/tool_transcript.json.
+    - >
+      ANSWER GROUNDING: The final answer in project_specific/final_answer.md
+      covers BOTH pages of retrieved messages (recent: sister invitation,
+      dates; earlier: coastal destination, restaurant, bookshop). Score 0-100.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases). Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata. Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'messages_before', 'scroll',
+      'cursor', 'tool_transcript', or 'step_results'. Note presence/absence but
+      do not score.
+tags:
+  - positional
+  - navigation
+  - scrollback
+  - cursor
+  - messages-before
+  - scroll
+extras:
+  scripted_tool_case_ids:
+    - scrollback_cursor
+  fixture_files:
+    - tests/agentic/fixtures/search_nav_cases.py

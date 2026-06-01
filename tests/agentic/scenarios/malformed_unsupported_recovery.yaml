@@ -1,0 +1,115 @@
+name: malformed-unsupported-recovery
+tier: 2
+description: >
+  Malformed-cursor / missing-anchor recovery scenario — the agent attempts to
+  call messages_before with a non-existent anchor ID ('m999') that does not
+  exist in the message pool.  The tool returns is_error=True with
+  error='not_found'.  The agent MUST recognise this as a recoverable error,
+  switch to a valid anchor (anchor='current'), and retrieve the correct
+  messages.  Must NOT fabricate content from the failed call, treat the error
+  as a successful empty result, or proceed to answer without recovery.
+  Evidence of the error signal and the subsequent recovery attempt must be
+  present in the tool transcript.  The final answer must be grounded in
+  successfully retrieved messages only.
+mode: structural
+agents:
+  - id: recovery-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOLS — POSITIONAL NAVIGATION: messages_before and
+      messages_after MUST both appear in project_specific/tool_transcript.json
+      (check tool_name fields in all step_results and tool_calls entries).
+      The agent must use positional navigation to retrieve context.  If either
+      required tool is missing, fail.
+    - >
+      FORBIDDEN TOOLS — NO SEMANTIC/TOPIC_RECENT/SCROLL: search,
+      search_messages, topic_recent, and scroll MUST NOT appear in
+      project_specific/tool_transcript.json.  This is a recovery scenario
+      within positional navigation — semantic or recency shortcuts bypass
+      the recovery path.  Fail if any forbidden tool is observed.
+    - >
+      RECOVERABLE ERROR EVIDENCE: project_specific/tool_transcript.json MUST
+      contain at least one tool call result where is_error is True.  This
+      represents the initial malformed call (messages_before with a
+      non-existent anchor).  Check step_results[*].result.is_error across all
+      cases and tool_calls entries.  If no error signal is recorded — i.e.,
+      the malformed call was not made or its error was not captured — fail.
+    - >
+      RECOVERY ATTEMPT AFTER ERROR: The tool transcript in
+      project_specific/tool_transcript.json MUST show that AFTER the errored
+      call, at least one subsequent call to messages_before was made with a
+      valid anchor — either anchor='current' or a valid, existing message
+      UUID.  Check step_results ordering: the recovery call must appear at a
+      later index than the errored call.  If only the failed call exists with
+      no retry, fail.  If the agent answered without retrying, fail.
+    - >
+      EXPECTED MESSAGE IDs AFTER RECOVERY: The successful recovery call(s) in
+      project_specific/tool_transcript.json MUST retrieve at least these
+      message IDs (the messages before and after the hot-context edge at
+      m12 — note that m12 is the anchor / hot-context-edge message and is
+      NOT expected in retrieval results, per strict cursor semantics):
+      m05, m06, m07, m08, m09, m10, m11, m13, m14, m15, m16.
+      Check retrieved_message_ids across all step_results.  Fail if any of
+      these critical messages is missing — they should all be reachable
+      via messages_before(anchor='current', n=8) and messages_after(
+      anchor='current', n=4).
+    - >
+      NO FABRICATION FROM ERROR — HONEST RESPONSE:
+      project_specific/final_answer.md MUST NOT contain content fabricated
+      from the failed tool call.  Since the failed call returned no messages
+      (is_error=True, not an empty success), the agent must NOT present
+      information as if it was retrieved from that call.  The final answer
+      must be grounded exclusively in the messages successfully retrieved
+      by the recovery call(s).  If the final answer contains claims
+      unsupported by any successfully retrieved message, fail.  Additionally,
+      the answer MUST NOT contain references to a "message m999" or claim
+      that it retrieved content from a non-existent anchor.
+  graded:
+    - >
+      RECOVERY CORRECTNESS: The agent detected an error signal (is_error=True)
+      from the malformed call and correctly retried with a valid anchor.
+      Score 0-100 based on: 100 = error detected, retried with valid anchor,
+      all expected messages retrieved; 50 = error detected but retry was
+      partial or suboptimal; 0 = error ignored, fabricated from failure, or
+      no retry attempted.  Check project_specific/tool_transcript.json for
+      error signal presence, retry ordering, and retrieval completeness.
+    - >
+      ANSWER GROUNDING AFTER RECOVERY: The final answer in
+      project_specific/final_answer.md synthesizes information from the
+      successfully retrieved messages: coastal destination, the town from
+      two years ago, seafood restaurant, bookshop, sister invite, first
+      weekend of June dates, lemon-caper pasta plans, car insurance check-in.
+      Score 0-100 based on coverage and grounding in retrieved (not
+      fabricated) message content.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases).  Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata.  Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'messages_before', 'messages_after',
+      'tool_transcript', or 'step_results'.  Note presence/absence but do not
+      score.
+tags:
+  - recovery
+  - malformed-cursor
+  - missing-anchor
+  - error-handling
+  - retry
+  - non-fabrication
+  - honest-response
+extras:
+  scripted_tool_case_ids:
+    - malformed_recovery
+  fixture_files:
+    - tests/agentic/fixtures/search_nav_cases.py

@@ -1,0 +1,90 @@
+name: topic-recent
+tier: 2
+description: >
+  Topic-recent recency retrieval — agent must use topic_recent(n=6) to retrieve
+  the most recent messages on the trip-planning topic. The agent must not confuse
+  globally-recent messages on other topics (car insurance) with in-topic recent
+  messages. Using cheap positional or semantic tools instead of the correct
+  topic-scoped recency tool must cause explicit failure.
+mode: structural
+agents:
+  - id: topic-recent-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOL — TOPIC_RECENT: topic_recent MUST appear in
+      project_specific/tool_transcript.json (check tool_name fields in all
+      step_results and tool_calls entries). The call must use n=6 (or at minimum
+      n between 4-8) as the count. If topic_recent is not used at all, fail.
+    - >
+      FORBIDDEN TOOLS — NO CHEAP ALTERNATIVES: search, search_messages,
+      messages_before, messages_after, and scroll MUST NOT appear in
+      project_specific/tool_transcript.json. This is a topic-scoped recency task —
+      using keyword search, semantic search, or raw positional navigation instead of
+      topic_recent is the wrong tool choice and must fail explicitly. Fail if any
+      forbidden tool is observed.
+    - >
+      EXPECTED IN-TOPIC RECENT MESSAGE IDs: project_specific/tool_transcript.json
+      MUST contain retrieved_message_ids (across all step_results entries) for all
+      six most recent trip-planning messages: m19 (cute B&B with ocean views), m20
+      (book soon before it fills up), m21 (booking a table at the seafood place),
+      m22 (table for two at 7pm), m23 (fresh seafood and local wines), m24 (sister
+      confirmation follow-up). Fail if any expected in-topic recent message ID is
+      missing.
+    - >
+      WRONG-CHOICE FAILURE — CROSS-TOPIC DISTRACTORS MUST BE ABSENT: The following
+      message IDs are globally recent but on the car-insurance topic and must NOT
+      appear in the retrieved_message_ids: m16 (did you renew the car insurance),
+      m17 (the deadline is next Friday), m18 (I set a reminder on my phone). These
+      are recent messages on a different topic — topic_recent scoped to the trip
+      topic must exclude them. If ANY of these wrong-topic IDs appears in the
+      transcript, fail.
+    - >
+      GROUNDED FINAL ANSWER: project_specific/final_answer.md MUST contain the
+      following quote fragments (case-insensitive substring match): "cute B&B with
+      ocean views", "book soon before it fills up", "book a table for Friday",
+      "table for two around 7pm", "fresh seafood and local wines", "did you confirm
+      with your sister". Fail if any expected quote is missing.
+    - >
+      EXPLICIT WRONG-TOOL-CHOICE FAILURE: Verify that the agent chose topic_recent
+      over cheap alternatives. If the transcript shows only search, search_messages,
+      messages_before, messages_after, or scroll with no topic_recent call, fail
+      explicitly as wrong tool choice. This scenario tests recency-scoped-to-topic
+      retrieval — global recency or keyword search is the wrong approach.
+  graded:
+    - >
+      TOPIC_RECENT ARGUMENT CORRECTNESS: topic_recent was called with n=6 (or
+      n between 4-8) and the correct topic scope. Score 0-100 based on argument
+      correctness observed in project_specific/tool_transcript.json.
+    - >
+      TOPIC-SCOPE GROUNDING: The final answer in project_specific/final_answer.md
+      correctly identifies the most recent trip-planning items (accommodation search,
+      dinner reservation, local food research, sister confirmation) and does NOT
+      mention car insurance or other off-topic content. Score 0-100.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases). Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata. Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'topic_recent', 'tool_transcript',
+      or 'step_results'. Note presence/absence but do not score.
+tags:
+  - topic-recent
+  - recency
+  - trip-planning
+  - topic-scoped
+extras:
+  scripted_tool_case_ids:
+    - topic_recent
+  fixture_files:
+    - tests/agentic/fixtures/search_nav_cases.py

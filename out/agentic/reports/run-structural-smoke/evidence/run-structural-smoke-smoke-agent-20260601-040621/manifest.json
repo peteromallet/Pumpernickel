@@ -1,0 +1,49 @@
+{
+  "scenario_id": "structural-smoke",
+  "actor_id": "smoke-agent",
+  "mode": "structural",
+  "dispatcher": "fake",
+  "tag": "run",
+  "slug": "run-structural-smoke-smoke-agent-20260601-040621",
+  "started_at": "2026-06-01T04:06:21.081916+00:00",
+  "finished_at": "2026-06-01T04:06:21.677948+00:00",
+  "command_policy": {
+    "allow_patterns": [
+      "^cat\\b",
+      "^git\\s+(?:status|diff|rev-parse|show)\\b",
+      "^ls\\b",
+      "^pytest\\b",
+      "^python(?:3)?\\b",
+      "^rg\\b",
+      "^sed\\b",
+      "^uv\\b"
+    ],
+    "deny_patterns": [
+      "^curl\\b",
+      "^git\\s+(?:push|reset|rebase|checkout\\b.*--)\\b",
+      "^rm\\s+-rf\\b",
+      "^wget\\b"
+    ],
+    "enforce": true
+  },
+  "success_proof_level": "authored",
+  "evidence_dir": "out/agentic/reports/run-structural-smoke/evidence/run-structural-smoke-smoke-agent-20260601-040621",
+  "workdir": "/Users/peteromalley/Documents/Veas",
+  "capture_trigger": "normal",
+  "evidence_confidence": "high",
+  "actions_supported": true,
+  "capture_gaps": {},
+  "files": {
+    "brief.md": "brief.md",
+    "report.md": "report.md",
+    "stdout.log": "stdout.log",
+    "stderr.log": "stderr.log",
+    "command_log.jsonl": "command_log.jsonl",
+    "actions.jsonl": "actions.jsonl",
+    "tree_before.txt": "tree_before.txt",
+    "tree_after.txt": "tree_after.txt",
+    "git_status_before.txt": "git_status_before.txt",
+    "git_status_after.txt": "git_status_after.txt",
+    "git_diff.patch": "git_diff.patch"
+  }
+}

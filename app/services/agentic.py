@@ -1872,6 +1872,7 @@ async def _run_agentic(
                 allow_cross_topic_status_injection=getattr(
                     bot_spec.read_scopes, "allow_cross_topic_status_injection", False
                 ),
+                bot_id=scope.bot_id,
             )
             rendered_hot_context = render_hot_context(hot_context)
         current_user_partner_share = await get_partner_share(
@@ -1995,6 +1996,9 @@ async def _run_agentic(
         hot_context_signals = _build_hot_context_signals(hot_context)
         hot_context_signals["bot_id"] = scope.bot_id
         hot_context_signals["primary_topic_slug"] = bot_spec.primary_topic_slug
+        hot_context_window_edge = hot_context.trigger_metadata.get(
+            "hot_context_window_edge"
+        ) or hot_context.trigger_metadata.get("hot_context_edge")
         skeleton_name = pick_default_skeleton(
             trigger_metadata=hot_context.trigger_metadata,
             charge=charge,
@@ -2029,6 +2033,12 @@ async def _run_agentic(
             sent_message_parts=[],
             hot_context_rendered=rendered_hot_context,
             trigger_metadata=hot_context.trigger_metadata,
+            hot_context_window_edge=hot_context_window_edge,
+            extras=(
+                {"hot_context_edge": hot_context_window_edge}
+                if hot_context_window_edge is not None
+                else {}
+            ),
         )
         seed_messages = bot_spec.build_initial_seed(
             trigger_metadata=hot_context.trigger_metadata,

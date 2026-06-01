@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings",
     "cryptography",
     "httpx",
+    "openai>=1.0",
     "python-multipart",
     "websockets",
     "PyYAML",
@@ -27,6 +28,13 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "anyio",
+]
+retrieval-db = [
+    "pgvector",
+    "psycopg[binary]",
+]
+agentic = [
+    "sisypy @ git+https://github.com/peteromallet/sisypy.git@650f80307d7f1d14005b954e254e9be3804f8002",
 ]
 
 [tool.setuptools.packages.find]

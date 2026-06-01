@@ -1,0 +1,1 @@
+"""Sisypy scenario definitions (YAML)."""

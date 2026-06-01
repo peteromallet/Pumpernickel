@@ -292,6 +292,49 @@ class TestSubmitSuccess:
             f"tool_call_count mismatch: {result.tool_call_count}"
         )
 
+    async def test_nonchat_runner_propagates_hot_context_edge_into_turn_context(
+        self, monkeypatch: Any
+    ) -> None:
+        from app.services import nonchat_agentic as nac
+        from app.services.nonchat_agentic import NonchatJobConfig
+
+        user = _make_user()
+        bot_spec = _make_bot_spec()
+        conversation_id = uuid4()
+        edge = {
+            "message_id": str(uuid4()),
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        monkeypatch.setattr(nac, "_open_nonchat_turn", _fake_open_nonchat_turn)
+        monkeypatch.setattr(nac, "_finalize_turn_atomically", _fake_finalize_turn)
+
+        async def fake_run_step(client, ctx, system_prompt, hot_context_rendered,
+                                allowed_tools, seed_messages, **kwargs):
+            assert ctx.hot_context_window_edge == edge
+            assert ctx.extras["hot_context_edge"] == edge
+            ctx.extras["submitted_live_brief"] = {"agenda": {"items": []}}
+            return "", [], 1
+
+        monkeypatch.setattr(nac, "run_step", fake_run_step)
+
+        result = await run_agentic_nonchat_job(
+            kind="live_prep",
+            user=user,
+            conversation_id=conversation_id,
+            system_task="Test system task",
+            max_tool_iterations=10,
+            pool=None,
+            bot_spec=bot_spec,
+            bot_id=bot_spec.bot_id,
+            topic_id=uuid4(),
+            partner=None,
+            hot_context="",
+            config=NonchatJobConfig(hot_context_window_edge=edge),
+        )
+
+        assert result.success is True
+
 
 # ── (c) Cap exhaustion ──────────────────────────────────────────────────────
 

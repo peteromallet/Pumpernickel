@@ -8,6 +8,12 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_SEED_BOT = "mediator"
+_KNOWN_EMBEDDING_DIMENSIONS: dict[tuple[str, str], int] = {
+    ("openai", "text-embedding-3-small"): 1536,
+    ("local", "bge-small"): 384,
+    ("local", "bge-small-en-v1.5"): 384,
+    ("local", "BAAI/bge-small-en-v1.5"): 384,
+}
 
 # Environment-variable names that a Railway-deployed container sets in every
 # running instance.  Their mere presence is a positive signal that we are in a
@@ -31,6 +37,7 @@ class Settings(BaseSettings):
 
     env_name: str = "local"
     database_url: str
+    direct_database_url: str | None = None
     database_schema: str = "public"
     supabase_url: str
     supabase_service_role_key: SecretStr
@@ -179,6 +186,22 @@ class Settings(BaseSettings):
     # consult ``messages.next_retry_at`` + ``messages.failure_class``.
     # Flip OFF to revert to messages-only writes without a redeploy.
     ledger_dual_write_enabled: bool = False
+    # ── Xen M1 retrieval / embedding settings ─────────────────────────
+    # Default: hosted OpenAI text-embedding-3-small at 1536 dimensions.
+    # Local bge-small is intentionally lazy/optional and must use 384 dims.
+    embedding_provider: str = "openai"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimension: int = Field(default=1536, ge=1)
+    query_embed_timeout_s: float = Field(default=0.4, gt=0.0, le=30.0)
+    query_embed_cache_ttl_s: int = Field(default=300, ge=0, le=86400)
+    query_embed_cache_max_entries: int = Field(default=1024, ge=0, le=100000)
+    retrieval_hnsw_ef_search: int = Field(default=80, ge=1, le=10000)
+    embedding_worker_enabled: bool = False
+    embedding_worker_poll_interval_s: float = Field(default=5.0, gt=0.0, le=300.0)
+    embedding_worker_batch_size: int = Field(default=32, ge=1, le=1000)
+    embedding_backfill_batch_size: int = Field(default=64, ge=1, le=1000)
+    embedding_backfill_rate_limit_per_min: int = Field(default=60, ge=1, le=100000)
+    embedding_backfill_coverage_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
     heartbeat_interval_hours: int = 24
     anthropic_input_usd_per_mtok: float = 3.0  # Cache creation is 1.25x input.
     anthropic_output_usd_per_mtok: float = 15.0  # Cache reads are 0.10x input.
@@ -315,6 +338,34 @@ class Settings(BaseSettings):
     def default_consult_model(self) -> "Settings":
         if not self.consult_model:
             self.consult_model = self.conversational_model
+        return self
+
+    @model_validator(mode="after")
+    def validate_embedding_config(self) -> "Settings":
+        provider = self.embedding_provider.strip()
+        model = self.embedding_model.strip()
+        self.embedding_provider = provider
+        self.embedding_model = model
+        if not provider:
+            raise ValueError("EMBEDDING_PROVIDER must not be empty")
+        if not model:
+            raise ValueError("EMBEDDING_MODEL must not be empty")
+
+        expected_dimension = _KNOWN_EMBEDDING_DIMENSIONS.get((provider, model))
+        if expected_dimension is not None and self.embedding_dimension != expected_dimension:
+            raise ValueError(
+                "EMBEDDING_DIMENSION must be "
+                f"{expected_dimension} for {provider}/{model}"
+            )
+        if provider == "openai" and model == "text-embedding-3-small":
+            return self
+        if provider == "local" and model in {"bge-small", "bge-small-en-v1.5", "BAAI/bge-small-en-v1.5"}:
+            return self
+        if provider in {"openai", "local"}:
+            raise ValueError(
+                "Unknown built-in embedding model; register a custom provider name "
+                "or use OpenAI text-embedding-3-small / local bge-small"
+            )
         return self
 
 

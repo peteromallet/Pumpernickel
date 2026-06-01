@@ -1,0 +1,446 @@
+{
+  "scenario_name": "proactive-context-gathering",
+  "scenario_tier": 2,
+  "tag": "t19-proactive-context-gathering",
+  "mode": "structural",
+  "dispatchers_used": [
+    "recorded-real"
+  ],
+  "started_at": "2026-06-01T06:27:54.630082+00:00",
+  "finished_at": "2026-06-01T06:28:31.009343+00:00",
+  "runs": [
+    {
+      "agent_id": "proactive-agent",
+      "dispatcher": "recorded-real",
+      "outcome": "undetermined",
+      "success_proof_level": "authored",
+      "summary": "Required evidence files (project_specific/tool_transcript.json, project_specific/final_answer.md) are not present in the frozen evidence pack; all rubric items that depend on them are undetermined.",
+      "errors": [
+        "Structural-mode guard active: RUNPOD_API_KEY and cloud credentials stripped, no-GPU constraints enforced."
+      ],
+      "workdir": "/Users/peteromalley/Documents/Veas",
+      "evidence_dir": "out/agentic/reports/t19-recorded-real/t19-proactive-context-gathering-proactive-context-gathering/evidence/t19-proactive-context-gathering-proactive-context-gathering-proactive-agent-20260601-062754",
+      "actions_count": 2,
+      "evidence_confidence": "high",
+      "universal_checks": {
+        "all_passed": false,
+        "any_undetermined": true,
+        "checks": {
+          "deliverable_shape": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "report.md present with 2 numbered sections.",
+            "missing_report": false,
+            "section_count": 2,
+            "min_required": 2
+          },
+          "contradictions": {
+            "passed": false,
+            "severity": "error",
+            "detail": "Found 1 unsupported claim(s).",
+            "claimed_levels": {
+              "compiled": [
+                "compiled\\s+",
+                "api[\\s._-]?json",
+                "compiled ",
+                "api json",
+                "api.json"
+              ]
+            },
+            "full_claimed_levels": {
+              "compiled": [
+                "compiled\\s+",
+                "api[\\s._-]?json",
+                "compiled ",
+                "api json",
+                "api.json"
+              ]
+            },
+            "highest_claimed": "compiled",
+            "actual_level": "authored",
+            "contradictions": [
+              "Claims at 'compiled' level (compiled\\s+, api[\\s._-]?json, compiled , api json, api.json) exceed actual evidence level 'authored'."
+            ]
+          },
+          "bypass_patterns": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "No bypass pattern matches detected.",
+            "matches": []
+          },
+          "forbidden_commands": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "No forbidden commands detected.",
+            "violations": []
+          },
+          "success_proof_ladder": {
+            "passed": false,
+            "severity": "error",
+            "detail": "Actor claims exceed evidence: 1 violation(s).",
+            "actual_level": "authored",
+            "derived_level": "validated",
+            "highest_claimed": "compiled",
+            "unsupported_claims": [
+              "Actor claims 'compiled' (compiled\\s+, api[\\s._-]?json, compiled , api json, api.json) but evidence only supports 'authored'."
+            ],
+            "ladder_evidence": {
+              "authored": {
+                "found": true,
+                "sources": [
+                  "git_diff.patch",
+                  "tree_after.txt"
+                ]
+              },
+              "compiled": {
+                "found": false,
+                "sources": []
+              },
+              "validated": {
+                "found": true,
+                "sources": [
+                  "stderr.log",
+                  "command_log.jsonl",
+                  "actions.jsonl"
+                ],
+                "low_confidence_capped": false
+              },
+              "runtime_attempted": {
+                "found": false,
+                "sources": []
+              },
+              "runtime_proven": {
+                "found": false,
+                "sources": []
+              },
+              "artifact_proven": {
+                "found": false,
+                "sources": []
+              },
+              "quality_assessed": {
+                "found": false,
+                "sources": []
+              }
+            }
+          },
+          "adapter_manifest_present": {
+            "passed": true,
+            "severity": "error",
+            "detail": "out/agentic/reports/t19-recorded-real/t19-proactive-context-gathering-proactive-context-gathering/evidence/t19-proactive-context-gathering-proactive-context-gathering-proactive-agent-20260601-062754/project_specific/veas_adapter_manifest.json"
+          },
+          "behavior_mode_gating": {
+            "passed": true,
+            "severity": "info",
+            "detail": "Runner-level gating keeps fake/scripted-tool structural-only; real-agent and recorded-real are the only behavior-eligible modes."
+          },
+          "frozen_repo_capture": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "Frozen repo files captured successfully.",
+            "missing_files": []
+          },
+          "fixture_capture": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "Declared fixtures captured successfully.",
+            "missing_files": []
+          },
+          "generic_evidence": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "Generic frozen evidence files are present.",
+            "missing_files": [],
+            "missing_groups": {}
+          },
+          "project_specific_evidence": {
+            "passed": false,
+            "undetermined": true,
+            "severity": "undetermined",
+            "detail": "Project-specific evidence missing from frozen evidence pack.",
+            "missing_files": [
+              "tool_transcript.json",
+              "hot_context.md",
+              "messages_seed.json",
+              "expected_behavior.json",
+              "final_answer.md",
+              "assertions.json",
+              "infrastructure.json"
+            ]
+          },
+          "infrastructure_status": {
+            "passed": false,
+            "undetermined": true,
+            "severity": "undetermined",
+            "detail": "infrastructure.json is missing from project-specific evidence.",
+            "infrastructure_failed": false,
+            "status": "missing"
+          },
+          "evidence_manifest_present": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "out/agentic/reports/t19-recorded-real/t19-proactive-context-gathering-proactive-context-gathering/evidence/t19-proactive-context-gathering-proactive-context-gathering-proactive-agent-20260601-062754/project_specific/veas_evidence_manifest.json"
+          }
+        }
+      },
+      "assessment": {
+        "ungraded": false,
+        "model": "deepseek-v4-pro",
+        "overall_passed": false,
+        "summary": "Required evidence files (project_specific/tool_transcript.json, project_specific/final_answer.md) are not present in the frozen evidence pack; all rubric items that depend on them are undetermined.",
+        "verdicts": {
+          "enforced": [
+            {
+              "item": "REQUIRED TOOL \u2014 PROACTIVE DEEPENING",
+              "passed": false,
+              "reasoning": "Undetermined \u2014 project_specific/tool_transcript.json missing, cannot verify messages_before or messages_after usage."
+            },
+            {
+              "item": "FORBIDDEN TOOLS \u2014 NO SEMANTIC SEARCH, NO TOPIC_RECENT, NO SCROLL",
+              "passed": false,
+              "reasoning": "Undetermined \u2014 cannot check tool_transcript.json for forbidden tool names."
+            },
+            {
+              "item": "DEEPER CONTEXT BEFORE ANSWER",
+              "passed": false,
+              "reasoning": "Undetermined \u2014 no transcript to verify deepening call before final-answer phase."
+            },
+            {
+              "item": "EXPECTED DEEPER MESSAGE IDs",
+              "passed": false,
+              "reasoning": "Undetermined \u2014 cannot inspect retrieved_message_ids without tool_transcript.json."
+            },
+            {
+              "item": "GROUNDING IN DEEPER RESULTS \u2014 SPECIFIC QUOTES",
+              "passed": false,
+              "reasoning": "Undetermined \u2014 final_answer.md missing, unable to check for required deeper-only quote fragments."
+            },
+            {
+              "item": "NO FABRICATION FROM THIN GIST",
+              "passed": false,
+              "reasoning": "Undetermined \u2014 no final answer available to assess whether it paraphrases gist or cites retrieved messages."
+            }
+          ],
+          "graded": [
+            {
+              "item": "DEEPENING THOROUGHNESS",
+              "passed": false,
+              "score": 0,
+              "reasoning": "Undetermined \u2014 depth and breadth of retrieved messages unknown without tool_transcript.json."
+            },
+            {
+              "item": "ANSWER COMPLETENESS AND GROUNDING",
+              "passed": false,
+              "score": 0,
+              "reasoning": "Undetermined \u2014 final_answer.md missing, cannot evaluate synthesis of deeper and hot-context information."
+            }
+          ],
+          "observed": [
+            {
+              "item": "TOOL-CALL COUNT",
+              "note": "Undetermined \u2014 tool_transcript.json not present; cannot count tool invocations."
+            },
+            {
+              "item": "EXECUTION DURATION",
+              "note": "Undetermined \u2014 no transcript metadata available to measure wall-clock time."
+            },
+            {
+              "item": "INTERNAL TOOL-NAME EXPOSURE",
+              "note": "Undetermined \u2014 final_answer.md missing, cannot check for internal tool names."
+            }
+          ]
+        },
+        "contradictions": [
+          "Actor report describes a vibecomfy recipe workflow unrelated to the trip-planning task, while the manifest and scenario id indicate a proactive-context-gathering task; the evidence appears to be from a different run or the required task outputs were not captured."
+        ],
+        "strengths": [],
+        "weaknesses": [
+          "No task-relevant evidence produced \u2014 missing tool_transcript.json and final_answer.md entirely from the evidence pack."
+        ],
+        "elapsed_sec": 35.486,
+        "_assessor_ts": "2026-06-01T06:28:31.009305+00:00",
+        "undetermined": true,
+        "undetermined_items": [
+          {
+            "item": "REQUIRED TOOL \u2014 PROACTIVE DEEPENING",
+            "evidence_checked": [
+              "tree_after.txt for project_specific directory",
+              "provided file list"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json not found in evidence pack."
+          },
+          {
+            "item": "FORBIDDEN TOOLS",
+            "evidence_checked": [
+              "tree_after.txt",
+              "command_log.jsonl",
+              "actions.jsonl"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json to scan for forbidden tool calls."
+          },
+          {
+            "item": "DEEPER CONTEXT BEFORE ANSWER",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "Transcript of tool calls and final answer phase timing."
+          },
+          {
+            "item": "EXPECTED DEEPER MESSAGE IDs",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json containing retrieved_message_ids."
+          },
+          {
+            "item": "GROUNDING IN DEEPER RESULTS \u2014 SPECIFIC QUOTES",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "project_specific/final_answer.md to examine quoted fragments."
+          },
+          {
+            "item": "NO FABRICATION FROM THIN GIST",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "Final answer file to assess gist paraphrasing vs. retrieval grounding."
+          },
+          {
+            "item": "DEEPENING THOROUGHNESS",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "Tool transcript with call parameters (n values, multiple calls)."
+          },
+          {
+            "item": "ANSWER COMPLETENESS AND GROUNDING",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "project_specific/final_answer.md for answer synthesis."
+          },
+          {
+            "item": "TOOL-CALL COUNT",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json step_results list."
+          },
+          {
+            "item": "EXECUTION DURATION",
+            "evidence_checked": [
+              "actions.jsonl",
+              "tree_after.txt"
+            ],
+            "missing_capture": "Transcript metadata with start/end timestamps for tool calls."
+          },
+          {
+            "item": "INTERNAL TOOL-NAME EXPOSURE",
+            "evidence_checked": [
+              "tree_after.txt"
+            ],
+            "missing_capture": "project_specific/final_answer.md text content."
+          }
+        ]
+      },
+      "cross_assessor_diff": null,
+      "undetermined": true,
+      "undetermined_items": [
+        {
+          "check_name": "project_specific_evidence",
+          "detail": "Project-specific evidence missing from frozen evidence pack."
+        },
+        {
+          "check_name": "infrastructure_status",
+          "detail": "infrastructure.json is missing from project-specific evidence."
+        },
+        {
+          "item": "REQUIRED TOOL \u2014 PROACTIVE DEEPENING",
+          "evidence_checked": [
+            "tree_after.txt for project_specific directory",
+            "provided file list"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json not found in evidence pack."
+        },
+        {
+          "item": "FORBIDDEN TOOLS",
+          "evidence_checked": [
+            "tree_after.txt",
+            "command_log.jsonl",
+            "actions.jsonl"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json to scan for forbidden tool calls."
+        },
+        {
+          "item": "DEEPER CONTEXT BEFORE ANSWER",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "Transcript of tool calls and final answer phase timing."
+        },
+        {
+          "item": "EXPECTED DEEPER MESSAGE IDs",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json containing retrieved_message_ids."
+        },
+        {
+          "item": "GROUNDING IN DEEPER RESULTS \u2014 SPECIFIC QUOTES",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "project_specific/final_answer.md to examine quoted fragments."
+        },
+        {
+          "item": "NO FABRICATION FROM THIN GIST",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "Final answer file to assess gist paraphrasing vs. retrieval grounding."
+        },
+        {
+          "item": "DEEPENING THOROUGHNESS",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "Tool transcript with call parameters (n values, multiple calls)."
+        },
+        {
+          "item": "ANSWER COMPLETENESS AND GROUNDING",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "project_specific/final_answer.md for answer synthesis."
+        },
+        {
+          "item": "TOOL-CALL COUNT",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json step_results list."
+        },
+        {
+          "item": "EXECUTION DURATION",
+          "evidence_checked": [
+            "actions.jsonl",
+            "tree_after.txt"
+          ],
+          "missing_capture": "Transcript metadata with start/end timestamps for tool calls."
+        },
+        {
+          "item": "INTERNAL TOOL-NAME EXPOSURE",
+          "evidence_checked": [
+            "tree_after.txt"
+          ],
+          "missing_capture": "project_specific/final_answer.md text content."
+        }
+      ],
+      "capture_gaps": {}
+    }
+  ],
+  "outcome_counts": {
+    "undetermined": 1
+  },
+  "has_undetermined": true
+}

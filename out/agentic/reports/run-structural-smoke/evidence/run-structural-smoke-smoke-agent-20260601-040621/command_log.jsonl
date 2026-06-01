@@ -1,0 +1,2 @@
+{"command": "python -m vibecomfy.cli inspect image", "exit_code": 0}
+{"command": "python -m vibecomfy.cli validate my_recipe", "exit_code": 0}

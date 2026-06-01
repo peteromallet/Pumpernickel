@@ -1,0 +1,21 @@
+name: structural-smoke
+tier: 1
+description: >
+  Minimal structural smoke scenario proving the Sisypy harness dispatching
+  and evidence capture pipeline works end-to-end with a fake actor.
+mode: structural
+agents:
+  - id: smoke-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced: []
+  graded: []
+  observed: []
+tags:
+  - structural
+  - smoke
+extras: {}
