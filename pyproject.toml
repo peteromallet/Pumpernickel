@@ -33,6 +33,9 @@ retrieval-db = [
     "pgvector",
     "psycopg[binary]",
 ]
+agentic = [
+    "sisypy @ git+https://github.com/peteromallet/sisypy.git@650f80307d7f1d14005b954e254e9be3804f8002",
+]
 
 [tool.setuptools.packages.find]
 include = ["app*", "evals*", "resident_chat_runtime*"]

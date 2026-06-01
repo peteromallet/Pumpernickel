@@ -1,0 +1,64 @@
+{
+  "command_policy": {
+    "allow_patterns": [
+      "^cat\\b",
+      "^git\\s+(?:status|diff|rev-parse|show)\\b",
+      "^ls\\b",
+      "^pytest\\b",
+      "^python(?:3)?\\b",
+      "^rg\\b",
+      "^sed\\b",
+      "^uv\\b"
+    ],
+    "deny_patterns": [
+      "^curl\\b",
+      "^git\\s+(?:push|reset|rebase|checkout\\b.*--)\\b",
+      "^rm\\s+-rf\\b",
+      "^wget\\b"
+    ],
+    "enforce": true
+  },
+  "dispatcher": "fake",
+  "evidence_contract": {
+    "behavior_eligible": false,
+    "dispatcher": "fake",
+    "frozen_repo_files": [
+      "tool_schemas.py",
+      "app/services/tools/read_tools.py",
+      "app/services/tools/registry.py",
+      "app/services/hot_context.py"
+    ],
+    "generic_required_files": [
+      "git_diff.patch",
+      "report.md"
+    ],
+    "generic_required_one_of": {
+      "command_trace": [
+        "actions.jsonl",
+        "command_log.jsonl"
+      ]
+    },
+    "project_specific_files": [
+      "tool_transcript.json",
+      "hot_context.md",
+      "messages_seed.json",
+      "expected_behavior.json",
+      "final_answer.md",
+      "assertions.json",
+      "infrastructure.json"
+    ]
+  },
+  "live_prerequisites": {
+    "OPENAI_API_KEY": false,
+    "VEAS_DATABASE_URL": false,
+    "budget": true,
+    "timeout": true
+  },
+  "mode": "structural",
+  "repo_snapshot": {
+    "agentic_dir_exists": true,
+    "pyproject_exists": true,
+    "repo_root": "/Users/peteromalley/Documents/Veas"
+  },
+  "scenario": "structural-smoke"
+}

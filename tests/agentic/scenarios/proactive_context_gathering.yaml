@@ -1,0 +1,109 @@
+name: proactive-context-gathering
+tier: 2
+description: >
+  Proactive context-gathering scenario — the agent receives a hot context limited
+  to only the 6 most recent trip-planning messages (m19-m24). A "Previous on this
+  topic" gist block hints at earlier decisions (destination, dates, sister invite)
+  but is deliberately insufficient — the actual message content is NOT provided.
+  The agent MUST recognise the gap and proactively deepen by calling
+  messages_before to retrieve earlier trip discussion (m05-m18) before answering.
+  The final answer must be grounded in details only present in the deeper
+  retrieved results, not fabricated from the thin hot-context summary alone.
+  Failure to deepen or reliance on the insufficient gist must cause explicit
+  failure.
+mode: structural
+agents:
+  - id: proactive-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOL — PROACTIVE DEEPENING: At least one of messages_before or
+      messages_after MUST appear in project_specific/tool_transcript.json (check
+      tool_name fields in all step_results and tool_calls entries). The agent must
+      proactively retrieve context beyond the insufficient hot-context gist. If
+      neither deepening tool is used, fail.
+    - >
+      FORBIDDEN TOOLS — NO SEMANTIC SEARCH, NO TOPIC_RECENT, NO SCROLL:
+      search, search_messages, topic_recent, and scroll MUST NOT appear in
+      project_specific/tool_transcript.json. The agent must deepen via positional
+      navigation (messages_before/messages_after) — using cheap recency or
+      semantic tools instead of proactive positional retrieval must fail. Fail
+      if any forbidden tool is observed.
+    - >
+      DEEPER CONTEXT BEFORE ANSWER: The tool transcript in
+      project_specific/tool_transcript.json MUST show at least one call to
+      messages_before or messages_after that retrieves messages from before m19
+      (the earliest hot-context message). The deepening call(s) must appear in
+      the transcript before the final-answer phase. Fail if no deepening call
+      is recorded, or if deepening retrieved only messages already in the hot
+      context.
+    - >
+      EXPECTED DEEPER MESSAGE IDs: project_specific/tool_transcript.json MUST
+      contain retrieved_message_ids (across all step_results entries) for at
+      least these deeper messages NOT in the hot context: m05 (coast suggestion),
+      m06 (town you visited), m09 (invite sister), m11 (first weekend of June),
+      m12 (confirmation). These messages are ONLY accessible via proactive
+      deepening — they are before the hot-context window. Fail if any of these
+      critical deeper IDs is missing.
+    - >
+      GROUNDING IN DEEPER RESULTS — SPECIFIC QUOTES: project_specific/final_answer.md
+      MUST contain the following quote fragments that are ONLY present in deeper
+      retrieved messages (m05-m18), NOT in the hot-context gist (m19-m24):
+      "the coast", "that little town we visited two years ago", "seafood
+      restaurant on the pier", "the little bookshop on the corner", "Should we
+      invite your sister", "I'll text her tonight", "the first weekend of June",
+      "I have that Friday off", "lemon and capers", "grab the ingredients
+      tomorrow". Fail if any expected deeper-only quote is missing.
+    - >
+      NO FABRICATION FROM THIN GIST: The "Previous on this topic" gist is
+      deliberately insufficient. If the final answer in
+      project_specific/final_answer.md contains trip-planning claims that match
+      the gist summary but are NOT substantiated by retrieved message content
+      (i.e., the answer reads like a paraphrase of the gist without citing
+      specific retrieved messages), fail. The agent must demonstrate evidence
+      retrieval, not gist paraphrasing. Check for concrete message details
+      (quotes, message references, specific times/dates/places from retrieved
+      messages) vs. vague summary language from the gist.
+  graded:
+    - >
+      DEEPENING THOROUGHNESS: The agent retrieved sufficient earlier context to
+      answer comprehensively. Check that messages_before was called with an
+      adequate n (>=12 to reach m05) or multiple deepening calls were made.
+      Score 0-100 based on the breadth of deeper messages retrieved vs. the full
+      set m05-m18.
+    - >
+      ANSWER COMPLETENESS AND GROUNDING: The final answer in
+      project_specific/final_answer.md synthesizes information from BOTH the
+      deeper retrieved messages (destination, dates, sister invite, bookshop) AND
+      the hot-context messages (B&B, seafood reservation, local wines) into a
+      complete trip summary. Score 0-100 based on coverage of all major decision
+      points.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases). Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata. Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'messages_before', 'messages_after',
+      'tool_transcript', or 'step_results'. Note presence/absence but do not score.
+tags:
+  - proactive
+  - deepening
+  - insufficient-gist
+  - messages-before
+  - context-gathering
+  - non-fabrication
+extras:
+  scripted_tool_case_ids:
+    - insufficient_hot_context
+  fixture_files:
+    - tests/agentic/fixtures/search_nav_cases.py

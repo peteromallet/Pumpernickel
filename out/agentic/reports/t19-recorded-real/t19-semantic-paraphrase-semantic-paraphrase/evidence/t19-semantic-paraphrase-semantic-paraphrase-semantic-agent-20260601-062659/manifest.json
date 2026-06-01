@@ -1,0 +1,49 @@
+{
+  "scenario_id": "semantic-paraphrase",
+  "actor_id": "semantic-agent",
+  "mode": "structural",
+  "dispatcher": "recorded-real",
+  "tag": "t19-semantic-paraphrase",
+  "slug": "t19-semantic-paraphrase-semantic-paraphrase-semantic-agent-20260601-062659",
+  "started_at": "2026-06-01T06:26:59.582842+00:00",
+  "finished_at": "2026-06-01T06:27:00.301954+00:00",
+  "command_policy": {
+    "allow_patterns": [
+      "^cat\\b",
+      "^git\\s+(?:status|diff|rev-parse|show)\\b",
+      "^ls\\b",
+      "^pytest\\b",
+      "^python(?:3)?\\b",
+      "^rg\\b",
+      "^sed\\b",
+      "^uv\\b"
+    ],
+    "deny_patterns": [
+      "^curl\\b",
+      "^git\\s+(?:push|reset|rebase|checkout\\b.*--)\\b",
+      "^rm\\s+-rf\\b",
+      "^wget\\b"
+    ],
+    "enforce": false
+  },
+  "success_proof_level": "authored",
+  "evidence_dir": "out/agentic/reports/t19-recorded-real/t19-semantic-paraphrase-semantic-paraphrase/evidence/t19-semantic-paraphrase-semantic-paraphrase-semantic-agent-20260601-062659",
+  "workdir": "/Users/peteromalley/Documents/Veas",
+  "capture_trigger": "normal",
+  "evidence_confidence": "high",
+  "actions_supported": true,
+  "capture_gaps": {},
+  "files": {
+    "brief.md": "brief.md",
+    "report.md": "report.md",
+    "stdout.log": "stdout.log",
+    "stderr.log": "stderr.log",
+    "command_log.jsonl": "command_log.jsonl",
+    "actions.jsonl": "actions.jsonl",
+    "tree_before.txt": "tree_before.txt",
+    "tree_after.txt": "tree_after.txt",
+    "git_status_before.txt": "git_status_before.txt",
+    "git_status_after.txt": "git_status_after.txt",
+    "git_diff.patch": "git_diff.patch"
+  }
+}

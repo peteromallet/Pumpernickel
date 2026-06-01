@@ -1,0 +1,76 @@
+name: positional-explicit-message
+tier: 2
+description: >
+  Positional navigation via an explicit message UUID anchor — agent must use
+  messages_before and messages_after around message m07 to retrieve surrounding
+  context about the seafood restaurant discussion without semantic search.
+mode: structural
+agents:
+  - id: positional-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOLS: messages_before AND messages_after MUST both appear in
+      project_specific/tool_transcript.json (check tool_name fields in all
+      step_results and tool_calls entries). If either tool is missing, fail.
+    - >
+      FORBIDDEN TOOLS: search, search_messages, open_thread, topic_recent, and
+      scroll MUST NOT appear in project_specific/tool_transcript.json. Positional
+      navigation only — no semantic search permitted. Fail if any forbidden tool
+      is observed.
+    - >
+      EXPECTED NEIGHBOR MESSAGE IDs: project_specific/tool_transcript.json MUST
+      contain retrieved_message_ids (across all step_results entries) for messages
+      m05, m06 (before anchor m07) AND m08, m09 (after anchor m07). The anchor
+      message m07 is NOT expected in retrieval results. Fail if any expected
+      neighbor ID is missing from the transcript.
+    - >
+      GROUNDED FINAL ANSWER: project_specific/final_answer.md MUST contain the
+      following quote fragments (case-insensitive substring match): "the coast",
+      "that little town we visited two years ago", "seafood restaurant on the
+      pier", "the little bookshop on the corner", "Let's do it". Fail if any
+      expected quote is missing.
+    - >
+      NO SEMANTIC SEARCH: Verify that the agent solved the task using ONLY
+      positional navigation (messages_before/messages_after) and did NOT call
+      search, search_messages, or any other semantic/recency tool. Check
+      project_specific/tool_transcript.json for tool_name values.
+  graded:
+    - >
+      TOOL ARGUMENT CORRECTNESS: messages_before was called with an explicit
+      message UUID as anchor (not 'current') and a reasonable n (2-3).
+      messages_after was called with the same explicit anchor and a reasonable
+      n (2-3). Score 0-100 based on argument correctness observed in
+      project_specific/tool_transcript.json.
+    - >
+      ANSWER GROUNDING: The final answer in project_specific/final_answer.md
+      directly references specific message content (coastal destination, town,
+      seafood restaurant, bookshop) rather than making vague claims. Score 0-100.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases). Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata. Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'messages_before', 'messages_after',
+      'tool_transcript', or 'step_results'. Note presence/absence but do not score.
+tags:
+  - positional
+  - navigation
+  - explicit-message
+  - messages-before
+  - messages-after
+extras:
+  scripted_tool_case_ids:
+    - explicit_message
+  fixture_files:
+    - tests/agentic/fixtures/search_nav_cases.py

@@ -1,0 +1,27 @@
+name: positional-scripted-smoke
+tier: 1
+description: >
+  Scripted-tool positional fixture validation — proves evidence emission
+  and infrastructure classification for the positional (messages_before /
+  messages_after / scroll) nav surface.
+mode: structural
+agents:
+  - id: positional-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced: []
+  graded: []
+  observed: []
+tags:
+  - structural
+  - positional
+  - scripted-tool
+extras:
+  scripted_tool_case_ids:
+    - current_anchor
+    - explicit_message
+    - scrollback_cursor

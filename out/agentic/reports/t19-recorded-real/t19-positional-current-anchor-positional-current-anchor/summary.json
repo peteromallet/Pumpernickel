@@ -1,0 +1,539 @@
+{
+  "scenario_name": "positional-current-anchor",
+  "scenario_tier": 2,
+  "tag": "t19-positional-current-anchor",
+  "mode": "structural",
+  "dispatchers_used": [
+    "recorded-real"
+  ],
+  "started_at": "2026-06-01T06:26:10.643629+00:00",
+  "finished_at": "2026-06-01T06:26:59.558654+00:00",
+  "runs": [
+    {
+      "agent_id": "positional-agent",
+      "dispatcher": "recorded-real",
+      "outcome": "undetermined",
+      "success_proof_level": "authored",
+      "summary": "Unable to evaluate task success because required evidence files (tool_transcript.json, final_answer.md) are absent from the frozen evidence pack.",
+      "errors": [
+        "Structural-mode guard active: RUNPOD_API_KEY and cloud credentials stripped, no-GPU constraints enforced."
+      ],
+      "workdir": "/Users/peteromalley/Documents/Veas",
+      "evidence_dir": "out/agentic/reports/t19-recorded-real/t19-positional-current-anchor-positional-current-anchor/evidence/t19-positional-current-anchor-positional-current-anchor-positional-agent-20260601-062610",
+      "actions_count": 2,
+      "evidence_confidence": "high",
+      "universal_checks": {
+        "all_passed": false,
+        "any_undetermined": true,
+        "checks": {
+          "deliverable_shape": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "report.md present with 2 numbered sections.",
+            "missing_report": false,
+            "section_count": 2,
+            "min_required": 2
+          },
+          "contradictions": {
+            "passed": false,
+            "severity": "error",
+            "detail": "Found 1 unsupported claim(s).",
+            "claimed_levels": {
+              "compiled": [
+                "compiled\\s+",
+                "api[\\s._-]?json",
+                "compiled ",
+                "api json",
+                "api.json"
+              ]
+            },
+            "full_claimed_levels": {
+              "compiled": [
+                "compiled\\s+",
+                "api[\\s._-]?json",
+                "compiled ",
+                "api json",
+                "api.json"
+              ]
+            },
+            "highest_claimed": "compiled",
+            "actual_level": "authored",
+            "contradictions": [
+              "Claims at 'compiled' level (compiled\\s+, api[\\s._-]?json, compiled , api json, api.json) exceed actual evidence level 'authored'."
+            ]
+          },
+          "bypass_patterns": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "No bypass pattern matches detected.",
+            "matches": []
+          },
+          "forbidden_commands": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "No forbidden commands detected.",
+            "violations": []
+          },
+          "success_proof_ladder": {
+            "passed": false,
+            "severity": "error",
+            "detail": "Actor claims exceed evidence: 1 violation(s).",
+            "actual_level": "authored",
+            "derived_level": "validated",
+            "highest_claimed": "compiled",
+            "unsupported_claims": [
+              "Actor claims 'compiled' (compiled\\s+, api[\\s._-]?json, compiled , api json, api.json) but evidence only supports 'authored'."
+            ],
+            "ladder_evidence": {
+              "authored": {
+                "found": true,
+                "sources": [
+                  "git_diff.patch",
+                  "tree_after.txt"
+                ]
+              },
+              "compiled": {
+                "found": false,
+                "sources": []
+              },
+              "validated": {
+                "found": true,
+                "sources": [
+                  "stderr.log",
+                  "command_log.jsonl",
+                  "actions.jsonl"
+                ],
+                "low_confidence_capped": false
+              },
+              "runtime_attempted": {
+                "found": false,
+                "sources": []
+              },
+              "runtime_proven": {
+                "found": false,
+                "sources": []
+              },
+              "artifact_proven": {
+                "found": false,
+                "sources": []
+              },
+              "quality_assessed": {
+                "found": false,
+                "sources": []
+              }
+            }
+          },
+          "adapter_manifest_present": {
+            "passed": true,
+            "severity": "error",
+            "detail": "out/agentic/reports/t19-recorded-real/t19-positional-current-anchor-positional-current-anchor/evidence/t19-positional-current-anchor-positional-current-anchor-positional-agent-20260601-062610/project_specific/veas_adapter_manifest.json"
+          },
+          "behavior_mode_gating": {
+            "passed": true,
+            "severity": "info",
+            "detail": "Runner-level gating keeps fake/scripted-tool structural-only; real-agent and recorded-real are the only behavior-eligible modes."
+          },
+          "frozen_repo_capture": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "Frozen repo files captured successfully.",
+            "missing_files": []
+          },
+          "fixture_capture": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "Declared fixtures captured successfully.",
+            "missing_files": []
+          },
+          "generic_evidence": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "Generic frozen evidence files are present.",
+            "missing_files": [],
+            "missing_groups": {}
+          },
+          "project_specific_evidence": {
+            "passed": false,
+            "undetermined": true,
+            "severity": "undetermined",
+            "detail": "Project-specific evidence missing from frozen evidence pack.",
+            "missing_files": [
+              "tool_transcript.json",
+              "hot_context.md",
+              "messages_seed.json",
+              "expected_behavior.json",
+              "final_answer.md",
+              "assertions.json",
+              "infrastructure.json"
+            ]
+          },
+          "infrastructure_status": {
+            "passed": false,
+            "undetermined": true,
+            "severity": "undetermined",
+            "detail": "infrastructure.json is missing from project-specific evidence.",
+            "infrastructure_failed": false,
+            "status": "missing"
+          },
+          "evidence_manifest_present": {
+            "passed": true,
+            "severity": "ok",
+            "detail": "out/agentic/reports/t19-recorded-real/t19-positional-current-anchor-positional-current-anchor/evidence/t19-positional-current-anchor-positional-current-anchor-positional-agent-20260601-062610/project_specific/veas_evidence_manifest.json"
+          }
+        }
+      },
+      "assessment": {
+        "ungraded": false,
+        "model": "deepseek-v4-pro",
+        "overall_passed": false,
+        "summary": "Unable to evaluate task success because required evidence files (tool_transcript.json, final_answer.md) are absent from the frozen evidence pack.",
+        "verdicts": {
+          "enforced": [
+            {
+              "item": "REQUIRED TOOLS (messages_before, messages_after)",
+              "passed": false,
+              "reasoning": "Undetermined: project_specific/tool_transcript.json not provided, cannot check tool presence."
+            },
+            {
+              "item": "FORBIDDEN TOOLS (search, search_messages, open_thread, topic_recent, scroll)",
+              "passed": false,
+              "reasoning": "Undetermined: project_specific/tool_transcript.json not provided, cannot verify absence."
+            },
+            {
+              "item": "EXPECTED NEIGHBOR MESSAGE IDs (m07-m11, m13-m16)",
+              "passed": false,
+              "reasoning": "Undetermined: project_specific/tool_transcript.json missing, cannot inspect retrieved_message_ids."
+            },
+            {
+              "item": "GROUNDED FINAL ANSWER (quote fragments in final_answer.md)",
+              "passed": false,
+              "reasoning": "Undetermined: project_specific/final_answer.md not provided, cannot check for required quotes."
+            },
+            {
+              "item": "NO SEMANTIC SEARCH (positional-only navigation)",
+              "passed": false,
+              "reasoning": "Undetermined: project_specific/tool_transcript.json missing, cannot verify tool calls."
+            }
+          ],
+          "graded": [
+            {
+              "item": "TOOL ARGUMENT CORRECTNESS (messages_before/messages_after args)",
+              "passed": false,
+              "score": 0,
+              "reasoning": "Undetermined: project_specific/tool_transcript.json absent, no argument data to score."
+            },
+            {
+              "item": "ANSWER GROUNDING (references to specific message content)",
+              "passed": false,
+              "score": 0,
+              "reasoning": "Undetermined: project_specific/final_answer.md absent, no final answer to evaluate."
+            }
+          ],
+          "observed": [
+            {
+              "item": "TOOL-CALL COUNT",
+              "note": "Cannot count; project_specific/tool_transcript.json missing."
+            },
+            {
+              "item": "EXECUTION DURATION",
+              "note": "Cannot determine; no tool transcript metadata available."
+            },
+            {
+              "item": "INTERNAL TOOL-NAME EXPOSURE",
+              "note": "Cannot check; project_specific/final_answer.md missing."
+            }
+          ]
+        },
+        "contradictions": [
+          "Actor report (report.md) describes a recipe validation workflow unrelated to the trip-planning objective, indicating the agent may have performed a different task than assigned."
+        ],
+        "strengths": [],
+        "weaknesses": [
+          "All required project-specific files (tool_transcript.json, final_answer.md) are missing from the evidence pack, making any rubric-based assessment impossible."
+        ],
+        "elapsed_sec": 47.074,
+        "_assessor_ts": "2026-06-01T06:26:59.558376+00:00",
+        "undetermined": true,
+        "undetermined_items": [
+          {
+            "item": "REQUIRED TOOLS (enforced)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json not present in evidence pack."
+          },
+          {
+            "item": "FORBIDDEN TOOLS (enforced)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json missing."
+          },
+          {
+            "item": "EXPECTED NEIGHBOR MESSAGE IDs (enforced)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json missing."
+          },
+          {
+            "item": "GROUNDED FINAL ANSWER (enforced)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/final_answer.md missing."
+          },
+          {
+            "item": "NO SEMANTIC SEARCH (enforced)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json missing."
+          },
+          {
+            "item": "TOOL ARGUMENT CORRECTNESS (graded)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json missing."
+          },
+          {
+            "item": "ANSWER GROUNDING (graded)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/final_answer.md missing."
+          },
+          {
+            "item": "TOOL-CALL COUNT (observed)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json missing."
+          },
+          {
+            "item": "EXECUTION DURATION (observed)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/tool_transcript.json metadata missing."
+          },
+          {
+            "item": "INTERNAL TOOL-NAME EXPOSURE (observed)",
+            "evidence_checked": [
+              "evidence pack files",
+              "report.md",
+              "stdout.log",
+              "command_log.jsonl",
+              "actions.jsonl",
+              "tree_after.txt",
+              "git_diff.patch"
+            ],
+            "missing_capture": "project_specific/final_answer.md missing."
+          }
+        ]
+      },
+      "cross_assessor_diff": null,
+      "undetermined": true,
+      "undetermined_items": [
+        {
+          "check_name": "project_specific_evidence",
+          "detail": "Project-specific evidence missing from frozen evidence pack."
+        },
+        {
+          "check_name": "infrastructure_status",
+          "detail": "infrastructure.json is missing from project-specific evidence."
+        },
+        {
+          "item": "REQUIRED TOOLS (enforced)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json not present in evidence pack."
+        },
+        {
+          "item": "FORBIDDEN TOOLS (enforced)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json missing."
+        },
+        {
+          "item": "EXPECTED NEIGHBOR MESSAGE IDs (enforced)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json missing."
+        },
+        {
+          "item": "GROUNDED FINAL ANSWER (enforced)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/final_answer.md missing."
+        },
+        {
+          "item": "NO SEMANTIC SEARCH (enforced)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json missing."
+        },
+        {
+          "item": "TOOL ARGUMENT CORRECTNESS (graded)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json missing."
+        },
+        {
+          "item": "ANSWER GROUNDING (graded)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/final_answer.md missing."
+        },
+        {
+          "item": "TOOL-CALL COUNT (observed)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json missing."
+        },
+        {
+          "item": "EXECUTION DURATION (observed)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/tool_transcript.json metadata missing."
+        },
+        {
+          "item": "INTERNAL TOOL-NAME EXPOSURE (observed)",
+          "evidence_checked": [
+            "evidence pack files",
+            "report.md",
+            "stdout.log",
+            "command_log.jsonl",
+            "actions.jsonl",
+            "tree_after.txt",
+            "git_diff.patch"
+          ],
+          "missing_capture": "project_specific/final_answer.md missing."
+        }
+      ],
+      "capture_gaps": {}
+    }
+  ],
+  "outcome_counts": {
+    "undetermined": 1
+  },
+  "has_undetermined": true
+}

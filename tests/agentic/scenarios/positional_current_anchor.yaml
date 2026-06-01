@@ -1,0 +1,76 @@
+name: positional-current-anchor
+tier: 2
+description: >
+  Positional navigation via anchor='current' — agent must use messages_before
+  and messages_after around the hot-context edge to retrieve surrounding
+  messages and answer a grounded question without semantic search.
+mode: structural
+agents:
+  - id: positional-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOLS: messages_before AND messages_after MUST both appear in
+      project_specific/tool_transcript.json (check tool_name fields in all
+      step_results and tool_calls entries). If either tool is missing, fail.
+    - >
+      FORBIDDEN TOOLS: search, search_messages, open_thread, topic_recent, and
+      scroll MUST NOT appear in project_specific/tool_transcript.json. Positional
+      navigation only — no semantic search permitted. Fail if any forbidden tool
+      is observed.
+    - >
+      EXPECTED NEIGHBOR MESSAGE IDs: project_specific/tool_transcript.json MUST
+      contain retrieved_message_ids (across all step_results entries) for messages
+      m07, m08, m09, m10, m11 (before the current anchor) AND m13, m14, m15, m16
+      (after the current anchor). The anchor message m12 is in the hot context and
+      NOT expected in retrieval results. Fail if any expected neighbor ID is
+      missing from the transcript.
+    - >
+      GROUNDED FINAL ANSWER: project_specific/final_answer.md MUST contain the
+      following quote fragments (case-insensitive substring match): "the first
+      weekend of June", "I have that Friday off", "That works for me", "seafood
+      restaurant on the pier", "the one with the lemon and capers", "I'll grab
+      the ingredients tomorrow". Fail if any expected quote is missing.
+    - >
+      NO SEMANTIC SEARCH: Verify that the agent solved the task using ONLY
+      positional navigation (messages_before/messages_after) and did NOT call
+      search, search_messages, or any other semantic/recency tool. Check
+      project_specific/tool_transcript.json for tool_name values.
+  graded:
+    - >
+      TOOL ARGUMENT CORRECTNESS: messages_before was called with
+      anchor='current' and a reasonable n (4-6). messages_after was called with
+      anchor='current' and a reasonable n (3-5). Score 0-100 based on argument
+      correctness observed in project_specific/tool_transcript.json.
+    - >
+      ANSWER GROUNDING: The final answer in project_specific/final_answer.md
+      directly references specific message content (dates, places, food) rather
+      than making vague or unsupported claims. Score 0-100.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases). Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata. Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'messages_before', 'messages_after',
+      'tool_transcript', or 'step_results'. Note presence/absence but do not score.
+tags:
+  - positional
+  - navigation
+  - current-anchor
+  - messages-before
+  - messages-after
+extras:
+  scripted_tool_case_ids:
+    - current_anchor
+  fixture_files:
+    - tests/agentic/fixtures/search_nav_cases.py
