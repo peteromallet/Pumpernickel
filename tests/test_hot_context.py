@@ -765,6 +765,12 @@ async def test_semantic_prior_skips_explicit_non_message_results(
 ):
     pool, user, partner = hot_context_seed
     memory_id = uuid4()
+    # A dedicated-source (observation) result with a populated message_id.
+    # It must be excluded by the _DEDICATED_SOURCE_TYPES filter even though
+    # message_id is not None.  The message itself may appear via the
+    # independent topic_recent path, but it will not carry retrieval
+    # metadata because the semantic path was excluded.
+    dedicated_msg_id = pool.messages[2]["id"]
 
     async def fake_hybrid_search(_pool, request):
         return [
@@ -779,11 +785,21 @@ async def test_semantic_prior_skips_explicit_non_message_results(
                 semantic_degraded=False,
             ),
             RetrievalResult(
+                message_id=dedicated_msg_id,
+                source_type="observation",
+                source_id=uuid4(),
+                match_type="semantic",
+                rrf_score=0.81,
+                keyword_rank=None,
+                semantic_rank=2,
+                semantic_degraded=False,
+            ),
+            RetrievalResult(
                 message_id=pool.messages[0]["id"],
                 match_type="semantic",
                 rrf_score=0.74,
                 keyword_rank=None,
-                semantic_rank=2,
+                semantic_rank=3,
                 semantic_degraded=False,
                 keyword_score=None,
             ),
@@ -793,10 +809,25 @@ async def test_semantic_prior_skips_explicit_non_message_results(
 
     hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
 
+    # Dedicated source with null message_id: excluded (by null check).
     assert memory_id not in {item["id"] for item in hc.relevant_prior}
-    assert any(
-        item["id"] == pool.messages[0]["id"] and item["source"] == "topic_recent"
-        for item in hc.relevant_prior
+
+    # Dedicated source with populated message_id: excluded by source_type
+    # filter.  The message may appear via topic_recent but without
+    # retrieval metadata (the semantic path was excluded).
+    by_id = {item["id"]: item for item in hc.relevant_prior}
+    if dedicated_msg_id in by_id:
+        assert by_id[dedicated_msg_id].get("retrieval") is None, (
+            "dedicated source must not enrich with retrieval metadata"
+        )
+
+    # Normal message result still hydrates and merges with retrieval
+    # metadata as before.
+    normal_item = by_id.get(pool.messages[0]["id"])
+    assert normal_item is not None, "normal message must appear in relevant_prior"
+    assert normal_item["source"] == "topic_recent"
+    assert normal_item.get("retrieval") is not None, (
+        "normal message must carry retrieval metadata"
     )
 
 
@@ -1791,7 +1822,7 @@ def test_render_hot_context_previous_topic_section_has_navigation_cues(monkeypat
     assert text.index("## Previous on this topic") < text.index(
         "## Your silent turns since the user's last message"
     )
-    assert "Use the message ids below as cursor anchors with read tools" in text
+    assert "Use message ids below as cursor anchors with read tools to explore further back." in text
     assert f"id={str(prior_id)[:14]}" in text
     assert "source=semantic [semantic, rrf=0.4321]" in text
     assert "older topic context " in text
@@ -1871,7 +1902,8 @@ def test_render_hot_context_truncates_prior_before_recent_messages(monkeypatch):
     text = render_hot_context(hc)
 
     assert "## Previous on this topic" in text
-    assert "[truncated," in text
+    assert "+4 more" in text
+    assert "search() for older relevant context" in text
     assert "keep-this-immediate-context" in text
     assert "prior-0" not in text
     assert "prior-5" in text
@@ -2242,4 +2274,531 @@ def test_render_hot_context_scrubs_internal_leaks_from_outbound_history(monkeypa
     assert "No new tools needed" not in text
     assert "The person's message is rich" not in text
     assert "That's the real reply." in text
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# T7 — Render-focused dedicated-section tests (memories / observations /
+# distillations).  Prove type labels, handles, resolved names, clipped
+# snippets, and no raw dyad UUIDs in those section lines.  Also add a
+# selection-parity assertion using the fake pool's known selected IDs
+# without snapshotting old render text.
+# ---------------------------------------------------------------------------
+
+
+async def test_dedicated_section_selection_parity_matches_fake_pool(hot_context_seed):
+    """`hc.memories`, `hc.observations`, and `hc.distillations` IDs match the
+    fake pool's known selected rows without snapshotting old render text."""
+    pool, user, partner = hot_context_seed
+
+    # Add distillations so the fake pool returns them via fetch().
+    dist_id = uuid4()
+    pool.distillations = [
+        {
+            "id": dist_id,
+            "about_user_id": user.id,
+            "content": "distilled insight from conversation history",
+            "shareable_summary": None,
+            "display": "synthesized",
+            "confidence": "high",
+            "sensitivity": "medium",
+            "visibility": "dyad_shareable",
+            "source_user_ids": [user.id],
+            "revision_count": 1,
+            "related_memory_ids": [],
+            "related_observation_ids": [],
+            "related_theme_ids": [],
+            "supporting_message_ids": [],
+            "updated_at": pool.now,
+            "created_at": pool.now,
+            "status": "active",
+            "recorded_by_bot_id": "mediator",
+            "triggering_message_id": pool.messages[0]["id"],
+        }
+    ]
+
+    hc = await build_hot_context(pool, user, partner, [pool.trigger_id])
+
+    # --- Selection parity: memories ---
+    # The fake pool returns all memories (no significance filter), all 3.
+    expected_memory_ids = {row["id"] for row in pool.memories}
+    actual_memory_ids = {item["id"] for item in hc.memories}
+    assert actual_memory_ids == expected_memory_ids, (
+        f"memory selection drifted: expected {expected_memory_ids}, "
+        f"got {actual_memory_ids}"
+    )
+
+    # --- Selection parity: observations ---
+    # The fake pool only returns observations with significance >= 3.
+    expected_obs_ids = {
+        row["id"]
+        for row in pool.observations
+        if row["significance"] is not None and row["significance"] >= 3
+    }
+    actual_obs_ids = {item["id"] for item in hc.observations}
+    assert actual_obs_ids == expected_obs_ids, (
+        f"observation selection drifted: expected {expected_obs_ids}, "
+        f"got {actual_obs_ids}"
+    )
+
+    # --- Selection parity: distillations ---
+    expected_dist_ids = {row["id"] for row in pool.distillations}
+    actual_dist_ids = {item["id"] for item in hc.distillations}
+    assert actual_dist_ids == expected_dist_ids, (
+        f"distillation selection drifted: expected {expected_dist_ids}, "
+        f"got {actual_dist_ids}"
+    )
+
+
+def test_dedicated_section_memory_lines_show_type_label_and_resolved_names(
+    monkeypatch,
+):
+    """Memory lines must carry the 'memory' type label, resolve about_user_id
+    to a human name (not a raw UUID), and clip long content."""
+    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "2000")
+    get_settings.cache_clear()
+    user_id = uuid4()
+    partner_id = uuid4()
+    memory_id = uuid4()
+    hc = HotContext(
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 1,
+            "inbound_count": 1,
+            "outbound_count": 0,
+        },
+        active_oob=[],
+        memories=[
+            {
+                "id": memory_id,
+                "about_user_id": partner_id,
+                "content": "Ben prefers direct communication " + "x" * 300,
+                "created_at": datetime(2026, 5, 20, tzinfo=UTC),
+                "last_referenced_at": datetime(2026, 5, 25, tzinfo=UTC),
+            }
+        ],
+        active_themes=[],
+        open_watch_items=[],
+        observations=[],
+        recent_messages=[
+            {
+                "id": uuid4(),
+                "direction": "inbound",
+                "sender_id": user_id,
+                "recipient_id": partner_id,
+                "content": "hello",
+                "sent_at": datetime.now(UTC).isoformat(),
+                "charge": "routine",
+            }
+        ],
+        time_since_last_message="1m",
+        trigger_metadata={"triggering_message_ids": [uuid4()], "messages": []},
+    )
+
+    text = render_hot_context(hc)
+
+    # Extract the ## Memories section
+    assert "## Memories" in text
+    mem_start = text.index("## Memories")
+    next_section = text.find("##", mem_start + len("## Memories"))
+    memory_section = text[mem_start:next_section] if next_section != -1 else text[mem_start:]
+
+    # Type label
+    assert "memory" in memory_section
+    # Resolved name (not raw UUID)
+    assert "Ben" in memory_section
+    assert str(partner_id) not in memory_section
+    # Clipped content snippet
+    assert "x" * 240 not in memory_section
+    assert "..." in memory_section
+    # ID is present (clipped)
+    assert str(memory_id)[:14] in memory_section
+
+    get_settings.cache_clear()
+
+
+def test_dedicated_section_observation_lines_show_type_label_and_resolved_names(
+    monkeypatch,
+):
+    """Observation lines must carry the 'observation' type label, resolve
+    about_user_id to a human name, show confidence/significance, and clip."""
+    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "2000")
+    get_settings.cache_clear()
+    user_id = uuid4()
+    partner_id = uuid4()
+    obs_id = uuid4()
+    hc = HotContext(
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 1,
+            "inbound_count": 1,
+            "outbound_count": 0,
+        },
+        active_oob=[],
+        memories=[],
+        active_themes=[],
+        open_watch_items=[],
+        observations=[
+            {
+                "id": obs_id,
+                "about_user_id": user_id,
+                "content": "Maya shows increased engagement " + "y" * 300,
+                "confidence": "high",
+                "significance": 4,
+                "created_at": datetime(2026, 5, 20, tzinfo=UTC),
+                "last_reinforced_at": None,
+            }
+        ],
+        recent_messages=[
+            {
+                "id": uuid4(),
+                "direction": "inbound",
+                "sender_id": user_id,
+                "recipient_id": partner_id,
+                "content": "hello",
+                "sent_at": datetime.now(UTC).isoformat(),
+                "charge": "routine",
+            }
+        ],
+        time_since_last_message="1m",
+        trigger_metadata={"triggering_message_ids": [uuid4()], "messages": []},
+    )
+
+    text = render_hot_context(hc)
+
+    assert "## High-significance observations" in text
+    obs_start = text.index("## High-significance observations")
+    next_section = text.find(
+        "##", obs_start + len("## High-significance observations")
+    )
+    obs_section = (
+        text[obs_start:next_section] if next_section != -1 else text[obs_start:]
+    )
+
+    # Type label
+    assert "observation" in obs_section
+    # Confidence + significance shown
+    assert "confidence=high" in obs_section
+    assert "sig=4" in obs_section
+    # Resolved name (not raw UUID)
+    assert "Maya" in obs_section
+    assert str(user_id) not in obs_section
+    # Clipped content snippet
+    assert "y" * 240 not in obs_section
+    assert "..." in obs_section
+    # ID is present (clipped)
+    assert str(obs_id)[:14] in obs_section
+
+    get_settings.cache_clear()
+
+
+def test_dedicated_section_distillation_lines_show_type_label_and_metadata(
+    monkeypatch,
+):
+    """Distillation lines must carry the 'distillation' type label, show
+    display/confidence/sensitivity/visibility, and clip content."""
+    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "2000")
+    get_settings.cache_clear()
+    user_id = uuid4()
+    partner_id = uuid4()
+    dist_id = uuid4()
+    hc = HotContext(
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 1,
+            "inbound_count": 1,
+            "outbound_count": 0,
+        },
+        active_oob=[],
+        memories=[],
+        active_themes=[],
+        open_watch_items=[],
+        observations=[],
+        distillations=[
+            {
+                "id": dist_id,
+                "content": "Key insight about communication patterns " + "z" * 300,
+                "display": "synthesized",
+                "confidence": "high",
+                "sensitivity": "medium",
+                "visibility": "dyad_shareable",
+                "source_user_ids": [user_id],
+                "updated_at": datetime(2026, 5, 25, tzinfo=UTC),
+                "created_at": datetime(2026, 5, 20, tzinfo=UTC),
+            }
+        ],
+        recent_messages=[
+            {
+                "id": uuid4(),
+                "direction": "inbound",
+                "sender_id": user_id,
+                "recipient_id": partner_id,
+                "content": "hello",
+                "sent_at": datetime.now(UTC).isoformat(),
+                "charge": "routine",
+            }
+        ],
+        time_since_last_message="1m",
+        trigger_metadata={"triggering_message_ids": [uuid4()], "messages": []},
+    )
+
+    text = render_hot_context(hc)
+
+    assert "## Distillations" in text
+    dist_start = text.index("## Distillations")
+    next_section = text.find("##", dist_start + len("## Distillations"))
+    dist_section = (
+        text[dist_start:next_section] if next_section != -1 else text[dist_start:]
+    )
+
+    # Type label
+    assert "distillation" in dist_section
+    # Display + metadata
+    assert "display=synthesized" in dist_section
+    assert "confidence=high" in dist_section
+    assert "sensitivity=medium" in dist_section
+    assert "visibility=dyad_shareable" in dist_section
+    # Clipped content snippet
+    assert "z" * 240 not in dist_section
+    assert "..." in dist_section
+    # ID is present (clipped)
+    assert str(dist_id)[:14] in dist_section
+    # Follow-up instruction preserved
+    assert "use get_distillations before adding" in dist_section.lower()
+
+    get_settings.cache_clear()
+
+
+def test_dedicated_section_lines_resolve_about_user_id_to_names_not_raw_uuids(
+    monkeypatch,
+):
+    """All three dedicated sections — memories, observations, distillations —
+    must resolve about_user_id to human names (Maya / Ben) in the ``about=``
+    position instead of leaking raw dyad UUIDs there.
+
+    Note: distillation ``source_user_ids`` are rendered as raw UUID strings
+    by the current helper (provenance display).  This test only enforces
+    name resolution for the ``about_user_id`` field, which is the
+    user-facing identity in all three dedicated section lines.
+    """
+    monkeypatch.setenv("HOT_CONTEXT_TOKEN_BUDGET", "2000")
+    get_settings.cache_clear()
+    user_id = uuid4()
+    partner_id = uuid4()
+    hc = HotContext(
+        current_user={
+            "id": user_id,
+            "name": "Maya",
+            "phone": "1",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "welcomed",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        partner_user={
+            "id": partner_id,
+            "name": "Ben",
+            "phone": "2",
+            "timezone": "UTC",
+            "style_notes": "",
+            "onboarding_state": "pending",
+            "partner_share": "opt_in",
+            "partner_sharing_state": "opt_in",
+        },
+        conversation_load={
+            "period": "today",
+            "timezone": "UTC",
+            "total_count": 3,
+            "inbound_count": 2,
+            "outbound_count": 1,
+        },
+        active_oob=[],
+        memories=[
+            {
+                "id": uuid4(),
+                "about_user_id": user_id,
+                "content": "memory about Maya",
+                "created_at": datetime(2026, 5, 20, tzinfo=UTC),
+                "last_referenced_at": None,
+            },
+            {
+                "id": uuid4(),
+                "about_user_id": partner_id,
+                "content": "memory about Ben",
+                "created_at": datetime(2026, 5, 21, tzinfo=UTC),
+                "last_referenced_at": None,
+            },
+        ],
+        active_themes=[],
+        open_watch_items=[],
+        observations=[
+            {
+                "id": uuid4(),
+                "about_user_id": user_id,
+                "content": "observation about Maya",
+                "confidence": "medium",
+                "significance": 3,
+                "created_at": datetime(2026, 5, 20, tzinfo=UTC),
+                "last_reinforced_at": None,
+            },
+            {
+                "id": uuid4(),
+                "about_user_id": partner_id,
+                "content": "observation about Ben",
+                "confidence": "high",
+                "significance": 4,
+                "created_at": datetime(2026, 5, 21, tzinfo=UTC),
+                "last_reinforced_at": None,
+            },
+        ],
+        distillations=[
+            {
+                "id": uuid4(),
+                "content": "distillation about both",
+                "display": "synthesized",
+                "confidence": "high",
+                "sensitivity": "low",
+                "visibility": "dyad_shareable",
+                "source_user_ids": [user_id, partner_id],
+                "updated_at": datetime(2026, 5, 25, tzinfo=UTC),
+                "created_at": datetime(2026, 5, 20, tzinfo=UTC),
+            }
+        ],
+        recent_messages=[
+            {
+                "id": uuid4(),
+                "direction": "inbound",
+                "sender_id": user_id,
+                "recipient_id": partner_id,
+                "content": "hello",
+                "sent_at": datetime.now(UTC).isoformat(),
+                "charge": "routine",
+            }
+        ],
+        time_since_last_message="1m",
+        trigger_metadata={"triggering_message_ids": [uuid4()], "messages": []},
+    )
+
+    text = render_hot_context(hc)
+
+    # Extract the three dedicated sections.
+    sections_of_interest: list[tuple[str, str]] = []
+    for header in (
+        "## Memories",
+        "## High-significance observations",
+        "## Distillations",
+    ):
+        if header in text:
+            start = text.index(header)
+            rest = text[start + len(header) :]
+            next_marker = rest.find("## ")
+            section_body = rest[:next_marker] if next_marker != -1 else rest
+            sections_of_interest.append((header, section_body))
+
+    assert len(sections_of_interest) == 3, (
+        f"expected 3 dedicated sections, found {len(sections_of_interest)}"
+    )
+
+    raw_user_id = str(user_id)
+    raw_partner_id = str(partner_id)
+
+    for header, body in sections_of_interest:
+        if header == "## Distillations":
+            # Distillations do not carry an about= field — they use
+            # source_user_ids for provenance (rendered as raw UUIDs by
+            # the current helper).  Verify the distillation section is
+            # present and has the expected type label; name resolution
+            # is enforced only on memories + observations below.
+            assert "distillation" in body, (
+                f"distillation type label missing from {header}"
+            )
+            continue
+
+        # Memories and observations: about_user_id must resolve to names.
+        assert "Maya" in body, f"resolved name 'Maya' missing from {header}"
+        assert "Ben" in body, f"resolved name 'Ben' missing from {header}"
+
+        # The about_user_id field must NOT appear as a raw UUID
+        # (it is resolved via _user_label → name_map).
+        assert f"about={raw_user_id}" not in body, (
+            f"raw user UUID in about= position leaked into {header}"
+        )
+        assert f"about={raw_partner_id}" not in body, (
+            f"raw partner UUID in about= position leaked into {header}"
+        )
+
+        # Memories and observations do not have a source_user_ids field,
+        # so their dedicated-section bodies must be completely free of
+        # raw dyad UUIDs.
+        assert raw_user_id not in body, (
+            f"raw user UUID leaked into {header} section"
+        )
+        assert raw_partner_id not in body, (
+            f"raw partner UUID leaked into {header} section"
+        )
+
     get_settings.cache_clear()

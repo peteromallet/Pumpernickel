@@ -38,6 +38,14 @@ HOT_CONTEXT_SEMANTIC_PRIOR_CAP = 5
 HOT_CONTEXT_RELEVANT_PRIOR_CAP = 8
 HOT_CONTEXT_LINE_CLIP_LIMIT = 240
 
+# Source types that produce dedicated hot-context sections (memories,
+# observations, distillations).  Semantic retrieval candidates with these
+# source types are excluded from relevant_prior so they do not double-
+# surface in both their dedicated section and the prior block.
+_DEDICATED_SOURCE_TYPES: frozenset[str] = frozenset(
+    {"memory", "observation", "distillation"}
+)
+
 
 @dataclass
 class HotContext:
@@ -338,6 +346,7 @@ async def _fetch_semantic_prior(
         for result in retrieval_results
         if result.message_id is not None
         and result.message_id not in excluded_message_ids
+        and result.source_type not in _DEDICATED_SOURCE_TYPES
     ][:HOT_CONTEXT_SEMANTIC_PRIOR_CAP]
     if not ranked_results:
         return []
@@ -1583,6 +1592,216 @@ def _render_partner_pregnancy_state(
     return f"- {partner_label} is currently {weeks}w{days}d pregnant (EDD {edd_str})."
 
 
+# ---------------------------------------------------------------------------
+# Render-only helper functions (shared vocabulary across prior + dedicated
+# sections).  These are render-only, deterministic, and free of database
+# access / selection-side effects.  Name resolution uses only hc.current_user
+# and hc.partner_user (no additional queries).
+# ---------------------------------------------------------------------------
+
+
+def _hot_context_name_map(hc: "HotContext") -> dict[str, str]:
+    """Build a user-id → name lookup from hc.current_user / hc.partner_user.
+
+    No database queries — the two in-memory user dicts are the only
+    resolution sources.  Unknown ids fall back to str(id) downstream.
+    """
+    name_map: dict[str, str] = {}
+    for user in (hc.current_user, hc.partner_user):
+        if isinstance(user, dict):
+            uid = user.get("id")
+            if uid is not None:
+                name_map[str(uid)] = user.get("name") or str(uid)
+    return name_map
+
+
+def _user_label(user_id: object, name_map: dict[str, str]) -> str:
+    """Return a human-readable label for *user_id*.
+
+    Resolves through *name_map* (built by ``_hot_context_name_map``);
+    falls back to ``str(user_id)`` when no entry exists.
+    """
+    key = str(user_id) if user_id is not None else "unknown"
+    return name_map.get(key, key)
+
+
+def _source_handle(
+    item: dict[str, object], name_map: dict[str, str] | None = None
+) -> str:
+    """Build a compact source-type "handle" for a prior / knowledge item.
+
+    Dedicated types (memory / observation / distillation) return just the
+    type name.  Message items produce ``source=… [match, rrf=…]`` when
+    retrieval metadata is present, falling back to direction + charge.
+    """
+    source_type = str(item.get("source_type", ""))
+
+    # ---- dedicated types ---------------------------------------------------
+    if source_type in ("memory", "observation", "distillation"):
+        return source_type
+
+    # ---- message-like items ------------------------------------------------
+    parts: list[str] = []
+    source = str(item.get("source", ""))
+    if source:
+        parts.append(f"source={source}")
+
+    retrieval = item.get("retrieval")
+    if isinstance(retrieval, dict):
+        match = str(retrieval.get("match_type", ""))
+        score = retrieval.get("rrf_score")
+        retrieval_parts: list[str] = []
+        if match:
+            retrieval_parts.append(match)
+        if score is not None:
+            retrieval_parts.append(f"rrf={float(score):.4f}")
+        if retrieval_parts:
+            parts.append(f"[{', '.join(retrieval_parts)}]")
+
+    if not parts:
+        # Fallback to direction + charge when neither source nor retrieval is set
+        direction = str(item.get("direction", ""))
+        charge = str(item.get("charge", ""))
+        if direction:
+            segment = direction
+            if charge:
+                segment = f"{direction} charge={charge}"
+            parts.append(segment)
+
+    return " ".join(parts) if parts else "message"
+
+
+def _knowledge_time_label(item: dict[str, object]) -> str:
+    """Best-available time label for a knowledge item (memory / observation / distillation).
+
+    Precedence (memory):  last_referenced_at > created_at
+    Precedence (observation): last_reinforced_at > created_at
+    Precedence (distillation): updated_at
+    """
+    source_type = str(item.get("source_type", ""))
+
+    if source_type == "memory":
+        t = _time_label(item, "last_referenced_at") or _time_label(item, "created_at")
+    elif source_type == "observation":
+        t = _time_label(item, "last_reinforced_at") or _time_label(item, "created_at")
+    elif source_type == "distillation":
+        t = _time_label(item, "updated_at")
+    else:
+        t = _time_label(item, "created_at") or _time_label(item, "updated_at")
+
+    return t or "unknown"
+
+
+def _relevant_prior_sort_key(item: dict[str, object]) -> tuple[int, str, str]:
+    """Sort key for relevant_prior items (future-proofing for M4 mixed-type prior).
+
+    Orders: dedicated types first in memory→observation→distillation order,
+    then message items, then by timestamp descending, then by id for ties.
+
+    **Not applied in M3.**  M3 renders message-only prior most-recent-first
+    via ``reversed(hc.relevant_prior)`` (SD3).
+    """
+    source_type = str(item.get("source_type", ""))
+    TYPE_ORDER: dict[str, int] = {"memory": 0, "observation": 1, "distillation": 2}
+    type_rank = TYPE_ORDER.get(source_type, 3)
+
+    # Timestamp: prefer sent_at (messages), fall back to created_at / updated_at
+    ts = (
+        _iso(item.get("sent_at"))
+        or _iso(item.get("created_at"))
+        or _iso(item.get("updated_at"))
+        or ""
+    )
+
+    item_id = str(item.get("id", ""))
+    return (type_rank, ts, item_id)
+
+
+def _render_relevant_prior_line(
+    item: dict[str, object], clip_limit: int, name_map: dict[str, str]
+) -> str:
+    """Render a single **relevant_prior** item line.
+
+    Uses the shared ``_source_handle`` for source + retrieval metadata
+    and existing content / media / queue-outcome helpers.
+    """
+    time_str = _time_label(item, "sent_at") or str(item.get("sent_at", "unknown"))
+    item_id = _clip_id(item.get("id", ""), clip_limit)
+    handle = _source_handle(item, name_map)
+    content = _clip(_history_content(item), clip_limit)
+    media = _media_label(item)
+    outcome = _queue_outcome_label(item)
+
+    return (
+        f"- {time_str} id={item_id} {handle}"
+        f"{media}: {content}"
+        f"{outcome}"
+    )
+
+
+def _render_memory_line(
+    item: dict[str, object], clip_limit: int, name_map: dict[str, str]
+) -> str:
+    """Render a single memory line (shared vocabulary with prior sections)."""
+    # Ensure source_type is set so shared helpers (_knowledge_time_label,
+    # _source_handle) pick the correct precedence / label even when the
+    # upstream item dict omits the field (e.g. test fixtures).
+    item = {**item, "source_type": "memory"}
+    time_str = _knowledge_time_label(item)
+    item_id = _clip_id(item.get("id", ""), clip_limit)
+    handle = _source_handle(item, name_map)
+    about = _user_label(item.get("about_user_id"), name_map)
+    content = _clip(str(item.get("content", "")), clip_limit)
+    return f"- id={item_id} time={time_str} {handle} about={about}: {content}"
+
+
+def _render_observation_line(
+    item: dict[str, object], clip_limit: int, name_map: dict[str, str]
+) -> str:
+    """Render a single observation line (shared vocabulary with prior sections)."""
+    # Ensure source_type is set so shared helpers (_knowledge_time_label,
+    # _source_handle) pick the correct precedence / label even when the
+    # upstream item dict omits the field (e.g. test fixtures).
+    item = {**item, "source_type": "observation"}
+    time_str = _knowledge_time_label(item)
+    item_id = _clip_id(item.get("id", ""), clip_limit)
+    handle = _source_handle(item, name_map)
+    sig = str(item.get("significance", ""))
+    confidence = str(item.get("confidence", ""))
+    about = _user_label(item.get("about_user_id"), name_map)
+    content = _clip(str(item.get("content", "")), clip_limit)
+    return (
+        f"- id={item_id} time={time_str} {handle} sig={sig}"
+        f" confidence={confidence} about={about}: {content}"
+    )
+
+
+def _render_distillation_line(
+    item: dict[str, object], clip_limit: int, name_map: dict[str, str]
+) -> str:
+    """Render a single distillation line (shared vocabulary with prior sections)."""
+    # Ensure source_type is set so shared helpers (_knowledge_time_label,
+    # _source_handle) pick the correct precedence / label even when the
+    # upstream item dict omits the field (e.g. test fixtures).
+    item = {**item, "source_type": "distillation"}
+    time_str = _knowledge_time_label(item)
+    item_id = _clip_id(item.get("id", ""), clip_limit)
+    handle = _source_handle(item, name_map)
+    display = item.get("display", "")
+    confidence = item.get("confidence", "")
+    sensitivity = item.get("sensitivity", "")
+    visibility = item.get("visibility", "")
+    sources = _clip(
+        ", ".join(str(s) for s in item.get("source_user_ids", [])), clip_limit
+    )
+    content = _clip(str(item.get("content", "")), clip_limit)
+    return (
+        f"- id={item_id} time={time_str} {handle} display={display}"
+        f" confidence={confidence} sensitivity={sensitivity}"
+        f" visibility={visibility} sources={sources}: {content}"
+    )
+
+
 def _render_with_counts(
     hc: HotContext, truncations: dict[str, int], clip_limit: int = 240
 ) -> str:
@@ -1738,9 +1957,10 @@ def _render_with_counts(
         f"- id={_clip_id(theme['id'], clip_limit)} last={_clip(_time_label(theme, 'last_reinforced_at') or _time_label(theme, 'last_active_at') or 'unknown', clip_limit)} {_clip(theme['title'], clip_limit)} ({theme['status']}, {theme['sentiment']}, {theme['health']}): {_clip(theme['description'], clip_limit)}"
         for theme in hc.active_themes
     )
+    name_map = _hot_context_name_map(hc)
     lines += ["", "## Memories"]
     lines.extend(
-        f"- id={_clip_id(item['id'], clip_limit)} time={_clip(_time_label(item, 'last_referenced_at') or _time_label(item, 'created_at') or 'unknown', clip_limit)} about={_clip_id(item['about_user_id'], clip_limit)}: {_clip(item['content'], clip_limit)}"
+        _render_memory_line(item, clip_limit, name_map)
         for item in hc.memories
     )
     if truncations.get("memories"):
@@ -1752,7 +1972,7 @@ def _render_with_counts(
     )
     lines += ["", "## High-significance observations"]
     lines.extend(
-        f"- id={_clip_id(item['id'], clip_limit)} time={_clip(_time_label(item, 'last_reinforced_at') or _time_label(item, 'created_at') or 'unknown', clip_limit)} sig={item['significance']} confidence={item['confidence']} about={_clip_id(item['about_user_id'], clip_limit)}: {_clip(item['content'], clip_limit)}"
+        _render_observation_line(item, clip_limit, name_map)
         for item in hc.observations
     )
     if truncations.get("observations"):
@@ -1760,7 +1980,7 @@ def _render_with_counts(
     lines += ["", "## Distillations"]
     if hc.distillations:
         lines.extend(
-            f"- id={_clip_id(item['id'], clip_limit)} time={_clip(_time_label(item, 'updated_at') or 'unknown', clip_limit)} display={item['display']} confidence={item['confidence']} sensitivity={item['sensitivity']} visibility={item['visibility']} sources={_clip(', '.join(str(source) for source in item['source_user_ids']), clip_limit)}: {_clip(item['content'], clip_limit)}"
+            _render_distillation_line(item, clip_limit, name_map)
             for item in hc.distillations
         )
         lines.append(
@@ -1804,38 +2024,13 @@ def _render_with_counts(
         lines += ["", "## Previous on this topic"]
         if truncations.get("relevant_prior"):
             lines.append(
-                f"- [truncated, {truncations['relevant_prior']} older]"
+                f"- +{truncations['relevant_prior']} more \u2014 search() for older relevant context"
             )
         lines.append(
-            "- These are older messages from earlier in this topic that "
-            "may be relevant to the current exchange. Use the message ids "
-            "below as cursor anchors with read tools to explore further "
-            "back."
+            "- Use message ids below as cursor anchors with read tools to explore further back."
         )
-        for item in hc.relevant_prior:
-            source = item.get("source", "")
-            source_label = f" source={source}" if source else ""
-            retrieval = item.get("retrieval")
-            retrieval_label = ""
-            if retrieval and isinstance(retrieval, dict):
-                match = retrieval.get("match_type", "")
-                score = retrieval.get("rrf_score")
-                if match or score is not None:
-                    parts = []
-                    if match:
-                        parts.append(match)
-                    if score is not None:
-                        parts.append(f"rrf={score:.4f}")
-                    retrieval_label = f" [{', '.join(parts)}]"
-            lines.append(
-                f"- {_time_label(item, 'sent_at') or item['sent_at']} "
-                f"id={_clip_id(item['id'], clip_limit)} "
-                f"{item['direction']} charge={item['charge']} "
-                f"sender={item['sender_id']} recipient={item['recipient_id']}"
-                f"{source_label}{retrieval_label}"
-                f"{_media_label(item)}: {_clip(_history_content(item), clip_limit)}"
-                f"{_queue_outcome_label(item)}"
-            )
+        for item in reversed(hc.relevant_prior):
+            lines.append(_render_relevant_prior_line(item, clip_limit, name_map))
     # Silent agent turns since the user's last message — work the agent
     # already did that produced no outbound message. The message timeline
     # cannot show these; this section is the only record.
