@@ -33,6 +33,9 @@ FROZEN_NOW = datetime(2026, 5, 12, 12, 0, 0, tzinfo=UTC)
 
 # Captured from s2b-constraints-soak tip (13fb67e) via capture_hot_context.py
 # with mocked datetime.now(UTC) → 2026-05-12T12:00:00+00:00.
+# Updated for M3 dedicated-section render redesign (T6/T7): type labels
+# (memory/observation/distillation) now appear in render output, and
+# about_user_id is resolved to names instead of raw UUIDs.
 _S2B_RENDERED_HOT_CONTEXT = (
     "## You\n"
     "- id: aaaaaaaa-aaaa-4aaa-8aaa-000000000001\n"
@@ -101,8 +104,8 @@ _S2B_RENDERED_HOT_CONTEXT = (
     "## Memories\n"
     "- id=cccccccc-cccc-4ccc-8ccc-000000000003"
     " time=5 days ago 08:00 New York (5 days ago;"
-    " utc=2026-05-07T12:00:00+00:00)"
-    " about=aaaaaaaa-aaaa-4aaa-8aaa-000000000001:"
+    " utc=2026-05-07T12:00:00+00:00) memory"
+    " about=Alice:"
     " Alice prefers direct communication\n"
     "\n"
     "## Open watch items\n"
@@ -113,14 +116,14 @@ _S2B_RENDERED_HOT_CONTEXT = (
     "## High-significance observations\n"
     "- id=ffffffff-ffff-4fff-8fff-000000000006"
     " time=2026-04-27 08:00 New York (15 days ago;"
-    " utc=2026-04-27T12:00:00+00:00) sig=4 confidence=high"
-    " about=bbbbbbbb-bbbb-4bbb-8bbb-000000000002:"
+    " utc=2026-04-27T12:00:00+00:00) observation sig=4 confidence=high"
+    " about=Bob:"
     " Bob responds better to written communication than calls\n"
     "\n"
     "## Distillations\n"
     "- id=11111111-1111-4111-8111-000000000007"
     " time=2026-05-02 08:00 New York (10 days ago;"
-    " utc=2026-05-02T12:00:00+00:00) display=shareable_summary"
+    " utc=2026-05-02T12:00:00+00:00) distillation display=shareable_summary"
     " confidence=high sensitivity=low visibility=dyad_shareable"
     " sources=aaaaaaaa-aaaa-4aaa-8aaa-000000000001,"
     " bbbbbbbb-bbbb-4bbb-8bbb-000000000002: Written communication helps clarify"
