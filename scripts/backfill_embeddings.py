@@ -167,11 +167,16 @@ def _is_current(row: Any, *, model: str, dimension: int, hash_value: str) -> boo
 
 def _refuses_pooler_url(url: str) -> str | None:
     parsed = urlparse(url)
+    # The transaction pooler (port 6543) breaks the backfill (prepared-statement /
+    # session-state churn). The SESSION pooler is port 5432 on the same pooler host
+    # and is genuine session mode — Supabase newer projects expose ONLY the pooler
+    # host (no resolvable db.<ref> direct host), so port 5432 there is the correct
+    # and only session-mode endpoint. Refuse 6543; allow 5432 even on a pooler host.
     if parsed.port == 6543:
-        return "port 6543 is a Supabase pooler endpoint"
+        return "port 6543 is a Supabase transaction-pooler endpoint"
     host = (parsed.hostname or "").casefold()
-    if "pooler" in host or "pgbouncer" in host:
-        return f"host {parsed.hostname!r} looks like a pooler endpoint"
+    if ("pooler" in host or "pgbouncer" in host) and parsed.port != 5432:
+        return f"host {parsed.hostname!r} looks like a non-session pooler endpoint"
     return None
 
 
