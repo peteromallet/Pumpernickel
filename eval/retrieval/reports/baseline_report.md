@@ -1,9 +1,9 @@
 # Retrieval Evaluation Report
 
 - **Adapter:** IlikeBaselineRetriever
-- **Corpus:** /Users/peteromalley/Documents/Veas/eval/retrieval/corpus.yaml
-- **Golden Set:** /Users/peteromalley/Documents/Veas/eval/retrieval/golden_set.yaml
-- **Generated:** 2026-06-02T03:56:43.198123+00:00
+- **Corpus:** /Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/corpus.yaml
+- **Golden Set:** /Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/golden_set.yaml
+- **Generated:** 2026-06-14T17:19:09.132324+00:00
 - **Cases:** 80
 
 ## Overall Metrics

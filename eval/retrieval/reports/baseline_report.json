@@ -1,7 +1,7 @@
 {
   "adapter_name": "IlikeBaselineRetriever",
-  "corpus_path": "/Users/peteromalley/Documents/Veas/eval/retrieval/corpus.yaml",
-  "golden_set_path": "/Users/peteromalley/Documents/Veas/eval/retrieval/golden_set.yaml",
+  "corpus_path": "/Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/corpus.yaml",
+  "golden_set_path": "/Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/golden_set.yaml",
   "overall": {
     "recall@1": 0.29604166666666665,
     "recall@5": 0.43895833333333334,
@@ -3887,5 +3887,5 @@
       "reciprocal_rank": 0.0
     }
   ],
-  "generated_at": "2026-06-02T03:56:43.198123+00:00"
+  "generated_at": "2026-06-14T17:19:09.132324+00:00"
 }
