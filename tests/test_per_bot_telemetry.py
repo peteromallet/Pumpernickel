@@ -167,3 +167,88 @@ async def test_obs_fields_includes_bot_id_and_topic_id() -> None:
     assert extra["bot_id"] == "coach"
     assert "binding_id" in extra
     # channel_id is None (not set on TurnContext), so obs_fields filters it
+
+
+# ── check_per_bot_panels script tests ─────────────────────────────────────────
+
+
+def test_check_per_bot_panels_help_runs_without_asyncpg(tmp_path) -> None:
+    """The panels script can print --help even when asyncpg is unavailable."""
+    import os
+    import subprocess
+    import sys
+
+    sitecustomize = tmp_path / "sitecustomize.py"
+    sitecustomize.write_text(
+        """
+import builtins
+
+_real_import = builtins.__import__
+
+
+def _blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "asyncpg":
+        raise ModuleNotFoundError("No module named 'asyncpg'")
+    return _real_import(name, globals, locals, fromlist, level)
+
+
+builtins.__import__ = _blocked_import
+""",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in [str(tmp_path), env.get("PYTHONPATH", "")] if part
+    )
+
+    result = subprocess.run(
+        [sys.executable, "scripts/check_per_bot_panels.py", "--help"],
+        capture_output=True,
+        env=env,
+        text=True,
+        check=True,
+    )
+    assert "--bot-id" in result.stdout
+    assert "--hours" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_check_per_bot_panels_turn_audit_events_uses_metadata_bot_id() -> None:
+    """Filtering by --bot-id queries metadata->>'bot_id' for turn_audit_events."""
+    import os
+    import sys
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from scripts.check_per_bot_panels import _parse_args, _run
+
+    fake_pool = MagicMock()
+    fake_pool.fetch = AsyncMock(return_value=[])
+    fake_pool.close = AsyncMock()
+
+    mock_asyncpg = MagicMock()
+    mock_asyncpg.create_pool = AsyncMock(return_value=fake_pool)
+
+    with patch.dict(os.environ, {"DATABASE_URL": "postgres://fake"}):
+        with patch.dict(sys.modules, {"asyncpg": mock_asyncpg}):
+            result = await _run(_parse_args(["--bot-id", "superpom", "--hours", "6"]))
+
+    assert result == 0
+    mock_asyncpg.create_pool.assert_awaited_once_with(
+        "postgres://fake",
+        statement_cache_size=0,
+    )
+    assert fake_pool.fetch.call_count == 2
+    events_call = fake_pool.fetch.call_args_list[0][0]
+    tools_call = fake_pool.fetch.call_args_list[1][0]
+    events_sql = events_call[0]
+    tools_sql = tools_call[0]
+
+    assert "metadata->>'bot_id' = $2" in events_sql
+    assert "bt.bot_id = $2" in tools_sql
+    assert events_call[1:] == (6, "superpom")
+    assert tools_call[1:] == (6, "superpom")
+    # Sanity: the events query must not rely on a non-existent top-level bot_id column.
+    assert "AND bot_id = $2" not in events_sql
+    assert "AND bt.bot_id = $2" not in events_sql
+    assert "WHERE" in events_sql
+    assert "turn_audit_events" in events_sql

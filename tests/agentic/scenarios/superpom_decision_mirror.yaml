@@ -1,0 +1,108 @@
+name: superpom-decision-mirror
+tier: 2
+description: >
+  SuperPOM decision-mirror flow — the agent receives a user message asking for
+  help weighing a tradeoff between two competing priorities.  The agent MUST
+  load the Compass via list_orientation_items, ground the reflection in the
+  user's own stated headings, name both the alignment and the tension, and end
+  with ONE concrete next move (not a sprawling menu of options).  The agent
+  must not prescribe the user's choice — it must invite the user to decide.
+  Any bot_proposed orientation items must carry source='bot_proposed' and an
+  explicit review ask.
+mode: structural
+agents:
+  - id: superpom-agent
+    model: ""
+    dispatcher: fake
+    config: {}
+budget: {}
+priming: []
+assessment:
+  enforced:
+    - >
+      REQUIRED TOOL — COMPASS-FIRST READ: list_orientation_items MUST appear
+      in project_specific/tool_transcript.json (check tool_name fields in all
+      step_results and tool_calls entries).  SuperPOM must load the user's
+      Compass before reflecting.  If list_orientation_items is missing, fail.
+    - >
+      FORBIDDEN TOOLS — NO DOMAIN-SPECIFIC TOOLS: create_commitment, log_event,
+      set_pregnancy_edd, create_bridge_candidate, escalate_to_partner,
+      read_conversation_plan, create_conversation_plan, and set_topic_status
+      MUST NOT appear in project_specific/tool_transcript.json.  SuperPOM is a
+      reflection bot, not a dyad/pregnancy/commitment-event/live-plan bot.
+      Fail if any forbidden tool is observed.
+    - >
+      GROUNDED FINAL ANSWER — COMPASS HEADINGS REFLECTED:
+      project_specific/final_answer.md MUST reference at least two of the
+      following heading labels (case-insensitive substring match): "deep work",
+      "morning workout", "hustle", "rest".  The answer must name BOTH the
+      alignment (where recent behavior matches a heading) AND the tension
+      (where two headings pull in different directions).  Fail if the answer
+      does not reference at least two headings from the Compass.
+    - >
+      ONE CONCRETE NEXT MOVE — NOT A MENU: project_specific/final_answer.md
+      MUST contain exactly ONE concrete next-move suggestion phrased as an
+      invitation (e.g., "You could...", "One thing you might try...").  The
+      answer must NOT contain a bulleted or numbered list of three or more
+      options — this is a decision-mirror scenario, not a brainstorming
+      exercise.  Fail if the answer presents a menu of options instead of
+      one clear next move.
+    - >
+      NO PRESCRIPTION — INVITES USER DECISION: project_specific/final_answer.md
+      MUST contain language that invites the user to decide (e.g., "What do you
+      want to adjust?", "Does that feel right?", "You decide").  The answer
+      must NOT contain prescriptive language like "You should", "You need to",
+      "The right choice is".  Fail if the answer prescribes rather than
+      invites.
+    - >
+      BOT_PROPOSED ITEMS USE REVIEW GATE: If project_specific/tool_transcript.json
+      contains a create_orientation_item call, the args MUST include
+      source='bot_proposed' (check step_results[*].args.source).  Furthermore,
+      project_specific/final_answer.md MUST contain an explicit review ask
+      (e.g., "review this", "let me know if this looks right", "I've drafted a
+      candidate — take a look").  Fail if a bot_proposed item is created
+      without a review ask in the final answer.
+    - >
+      NO SHAME, NO MORAL SCORING: project_specific/final_answer.md MUST NOT
+      contain shame language (e.g., "you failed", "you should be better",
+      "you're letting yourself down") or moral scoring (e.g., "good/bad",
+      "right/wrong", "healthy/unhealthy" as judgments).  The answer must
+      describe the tradeoff neutrally using the user's own heading language.
+      Fail if shame or moral scoring language is detected.
+  graded:
+    - >
+      COMPASS GROUNDING QUALITY: The final answer in
+      project_specific/final_answer.md synthesizes the Compass headings into
+      a coherent reflection — it does not merely list headings but weaves them
+      into a narrative about the user's stated priorities.  Score 0-100 based
+      on whether headings are woven into a reflective synthesis vs. listed as
+      bullet points.
+    - >
+      CONCRETE-NEXT-MOVE QUALITY: The one next move suggested is specific,
+      actionable, and grounded in the Compass headings — not vague ("take
+      care of yourself") or generic ("find balance").  Score 0-100 based on
+      specificity and actionability.
+  observed:
+    - >
+      TOOL-CALL COUNT: Record the total number of distinct tool invocations in
+      project_specific/tool_transcript.json (sum of step_results across all
+      cases).  Note the count but do not score.
+    - >
+      EXECUTION DURATION: Note the wall-clock duration from first tool call to
+      last tool call if available in the transcript metadata.  Do not score.
+    - >
+      INTERNAL TOOL-NAME EXPOSURE: Check whether project_specific/final_answer.md
+      contains internal tool names such as 'list_orientation_items',
+      'create_orientation_item', 'tool_transcript', or 'step_results'.  Note
+      presence/absence but do not score.
+tags:
+  - superpom
+  - decision-mirror
+  - compass-first
+  - reflection
+  - concrete-next-move
+  - no-prescription
+  - no-shame
+extras:
+  scripted_tool_case_ids:
+    - superpom_decision_mirror

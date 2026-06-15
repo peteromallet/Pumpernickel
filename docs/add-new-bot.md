@@ -4,6 +4,8 @@ N-step procedure for adding a new bot.  Proves the architecture supports a
 third bot without another foundational sprint.  Reference commits: S4 `02f84d4`
 (bot binding + staging), S5 `b0e0495` (solo bot — coach exemplar).
 
+For a concrete end-to-end example, see [`docs/superpom-compass.md`](superpom-compass.md).
+
 ---
 
 ## Step 1 — Pick a `bot_id` slug

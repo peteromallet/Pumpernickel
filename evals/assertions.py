@@ -18,6 +18,7 @@ KIND_TO_TABLE = {
     "distillation": "distillations",
     "style_note": "users",
     "oob_entry": "out_of_bounds",
+    "orientation_item": "user_orientation_items",
 }
 
 
@@ -158,7 +159,7 @@ def _matches_row(row: dict[str, Any], expected: PrimitiveWriteExpectation) -> bo
 
 
 def _searchable_text(row: dict[str, Any]) -> str:
-    fields = ("content", "title", "description", "sensitive_core", "shareable_context", "shareable_summary", "revision_note", "style_notes", "addressing_note")
+    fields = ("content", "title", "description", "sensitive_core", "shareable_context", "shareable_summary", "revision_note", "style_notes", "addressing_note", "label", "detail")
     return "\n".join(str(row.get(field) or "") for field in fields)
 
 

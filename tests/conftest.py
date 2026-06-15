@@ -180,6 +180,7 @@ class FakePool:
         self.bridge_candidates = {}
         self.pacing_events = {}
         self.scheduled_jobs = {}
+        self.user_orientation_items = {}
         self.eval_runs = {}
         self.eval_results = {}
         self.system_state = {
@@ -5749,6 +5750,160 @@ class FakePool:
                     row["session_fields"] = session_fields
                     count += 1
             return f"UPDATE {count}"
+        # --- mediator.user_orientation_items ---
+        if compact.startswith("INSERT INTO mediator.user_orientation_items"):
+            # Extract parameters from the VALUES clause.
+            # Expect: ($1..$21) for all fields.
+            if len(args) == 21:
+                (
+                    orientation_id, user_id, topic_id, bot_id, created_by_turn_id,
+                    kind, status, source, review_state,
+                    label, detail,
+                    started_at, effective_at, target_date, completed_at,
+                    closed_reason, outcome_note,
+                    supersedes_item_id, priority_rank,
+                    created_at, updated_at,
+                ) = args
+            else:
+                (
+                    orientation_id, user_id, topic_id, bot_id, created_by_turn_id,
+                    kind, status, source, review_state,
+                    label, detail,
+                    started_at, effective_at, target_date, completed_at,
+                    closed_reason, outcome_note,
+                    supersedes_item_id, priority_rank,
+                    created_at, updated_at,
+                ) = (args[i] if i < len(args) else None for i in range(21))
+            row = {
+                "id": orientation_id or uuid4(),
+                "user_id": user_id,
+                "topic_id": topic_id,
+                "bot_id": bot_id,
+                "created_by_turn_id": created_by_turn_id,
+                "kind": kind,
+                "status": status,
+                "source": source,
+                "review_state": review_state,
+                "label": label,
+                "detail": detail,
+                "started_at": started_at,
+                "effective_at": effective_at,
+                "target_date": target_date,
+                "completed_at": completed_at,
+                "closed_reason": closed_reason,
+                "outcome_note": outcome_note,
+                "supersedes_item_id": supersedes_item_id,
+                "priority_rank": priority_rank,
+                "created_at": created_at or datetime.now(UTC),
+                "updated_at": updated_at or datetime.now(UTC),
+            }
+            self.user_orientation_items[row["id"]] = row
+            return {"id": row["id"]}
+        if compact.startswith("UPDATE mediator.user_orientation_items"):
+            # Extract SET clause and WHERE clause from compact.
+            item_id = None
+            for i, arg in enumerate(args):
+                if isinstance(arg, UUID) and i < 2:
+                    if i == 0:
+                        item_id = arg
+            # Simple UPDATE handler: find the row by scanning for id match
+            if "WHERE id = $1" in compact and "AND user_id = $2" in compact:
+                item_id_val = args[len(args) - 2] if len(args) >= 2 else args[0]
+                user_id_val = args[len(args) - 1] if len(args) >= 2 else args[1]
+                # Actually for UPDATE ... SET ... WHERE id = $X AND user_id = $Y,
+                # the WHERE params are at the end. Let's find the row first.
+                pass
+            # Generic: scan all SET assignments and update matching row
+            row = None
+            for rid, r in self.user_orientation_items.items():
+                if str(rid) == str(item_id) if item_id else False:
+                    row = r
+                    break
+            if row is None:
+                # Try to find by WHERE id = $N AND user_id = $M pattern
+                # The WHERE params come after all SET params
+                # For simplicity, scan all items looking for any match
+                where_clauses_found = False
+                for rid, r in self.user_orientation_items.items():
+                    matches = True
+                    # Check if any arg matches this row's id
+                    for arg in args:
+                        if isinstance(arg, UUID) and str(arg) == str(rid):
+                            row = r
+                            where_clauses_found = True
+                            break
+                    if where_clauses_found:
+                        break
+                if row is None:
+                    return None
+            # Apply SET updates
+            compact_lower = compact.lower()
+            set_parts = compact[compact.index(" SET ") + 5 :]
+            if " WHERE " in set_parts:
+                set_parts = set_parts[: set_parts.index(" WHERE ")]
+            if "status" in compact:
+                # Find the new status value
+                for i, arg in enumerate(args):
+                    if isinstance(arg, str) and arg in ("pending", "active", "completed", "retired", "superseded", "rejected"):
+                        if f"status = ${i+1}" in compact or f"status=${i+1}" in compact:
+                            row["status"] = arg
+            if "review_state" in compact:
+                for i, arg in enumerate(args):
+                    if isinstance(arg, str) and arg in ("unreviewed", "reviewed", "excluded"):
+                        if f"review_state = ${i+1}" in compact or f"review_state=${i+1}" in compact:
+                            row["review_state"] = arg
+            if "label" in compact:
+                for i, arg in enumerate(args):
+                    if isinstance(arg, str) and f"label = ${i+1}" in compact:
+                        row["label"] = arg
+            if "detail" in compact:
+                for i, arg in enumerate(args):
+                    if isinstance(arg, str) and f"detail = ${i+1}" in compact:
+                        row["detail"] = arg
+            if "completed_at" in compact:
+                for i, arg in enumerate(args):
+                    if f"completed_at = ${i+1}" in compact:
+                        row["completed_at"] = arg
+            if "outcome_note" in compact:
+                for i, arg in enumerate(args):
+                    if f"outcome_note = ${i+1}" in compact:
+                        row["outcome_note"] = arg
+            if "closed_reason" in compact:
+                for i, arg in enumerate(args):
+                    if f"closed_reason = ${i+1}" in compact:
+                        row["closed_reason"] = arg
+            row["updated_at"] = datetime.now(UTC)
+            return {"id": row["id"]}
+        if (
+            compact.startswith("SELECT * FROM mediator.user_orientation_items")
+            or compact.startswith("SELECT i.* FROM mediator.user_orientation_items i")
+        ):
+            rows = list(self.user_orientation_items.values())
+            if "WHERE id = $1 AND user_id = $2" in compact and len(args) >= 2:
+                item_id, user_id = args[0], args[1]
+                rows = [r for r in rows if str(r.get("id")) == str(item_id) and str(r.get("user_id")) == str(user_id)]
+            elif "WHERE id = $1 AND user_id = $2" in compact:
+                item_id = args[0] if args else None
+                rows = [r for r in rows if str(r.get("id")) == str(item_id)]
+            elif "WHERE i.user_id = $1" in compact:
+                user_id = args[0]
+                rows = [r for r in rows if str(r.get("user_id")) == str(user_id)]
+            elif "WHERE user_id = $1" in compact:
+                user_id = args[0]
+                rows = [r for r in rows if str(r.get("user_id")) == str(user_id)]
+            # Apply ORDER BY if present
+            if "ORDER BY" in compact:
+                if "i.kind, i.priority_rank NULLS LAST, i.created_at" in compact:
+                    rows.sort(key=lambda r: (r.get("kind") or "", r.get("priority_rank") or 9999, str(r.get("created_at") or "")))
+                elif "id" in compact.upper():
+                    rows.sort(key=lambda r: str(r.get("id") or ""))
+            if compact.startswith("SELECT i.* FROM mediator.user_orientation_items i"):
+                # This is a fetch() call returning all rows
+                return rows
+            # Single row fetchrow
+            if rows:
+                return rows[0]
+            return None
         raise AssertionError(f"unhandled execute SQL: {compact}")
 
 

@@ -28,6 +28,7 @@ from app.routers.live_voice import router as live_voice_router
 # --------------------------------------------------------------------------- #
 
 _RELATIONSHIP_TOPIC_ID = UUID("00000000-0000-4000-8000-000000000001")
+_SUPERPOM_TOPIC_ID = UUID("00000000-0000-4000-8000-000000000020")
 
 
 class _FakeTxn:
@@ -77,6 +78,12 @@ class LiveVoiceFakePool:
         # conversation_table_exists flag
         self._conversations_table_exists: bool = True
         # topic_id returned by primary_topic_id_for (mocked via monkeypatch)
+        # T5: bot_bindings rows for _bound_bot_ids / partner resolution
+        self._bot_bindings: list[dict[str, Any]] = []
+        # T5: dyad_members rows for partner resolution
+        self._dyad_members: list[dict[str, Any]] = []
+        # T5: topics rows keyed by slug
+        self._topics: dict[str, dict[str, Any]] = {}
 
     def acquire(self) -> _FakeAcquire:
         return _FakeAcquire(self)
@@ -144,6 +151,40 @@ class LiveVoiceFakePool:
         # get_session (legacy): SELECT * FROM mediator.conversations WHERE id
         if compact.startswith("SELECT * FROM mediator.conversations WHERE id"):
             return self._conversations.get(self._resolve_uuid(args[0]))
+        # T5: _resolve_live_partner_user_id — dyad partner lookup
+        if ("FROM bot_bindings bb" in compact
+                and "JOIN dyad_members self_dm" in compact
+                and "JOIN dyad_members other_dm" in compact):
+            # args: [user_id, bot_id]
+            user_id = self._resolve_uuid(args[0]) if args else None
+            bot_id = args[1] if len(args) > 1 else None
+            # Find a binding for this bot where the user is a dyad member
+            for bb in self._bot_bindings:
+                if bb.get("bot_id") != bot_id:
+                    continue
+                dyad_id = bb.get("dyad_id")
+                if dyad_id is None:
+                    continue
+                # Check user is in this dyad
+                other_user_ids = []
+                user_in_dyad = False
+                for dm in self._dyad_members:
+                    if dm.get("dyad_id") == dyad_id:
+                        if self._resolve_uuid(dm.get("user_id")) == user_id:
+                            user_in_dyad = True
+                        else:
+                            other_user_ids.append(dm.get("user_id"))
+                if user_in_dyad and other_user_ids:
+                    return {"user_id": other_user_ids[0]}
+            return None
+
+        # T5: primary_topic_id_for — topics slug lookup
+        if "SELECT id FROM mediator.topics WHERE slug" in compact:
+            slug = args[0] if args else None
+            if slug and slug in self._topics:
+                return {"id": self._topics[slug]["id"]}
+            return None
+
         # gather_prep_context: SELECT from users
         if compact.startswith("SELECT id, name, phone, timezone, style_notes, onboarding_state"):
             return {
@@ -166,6 +207,25 @@ class LiveVoiceFakePool:
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         compact = " ".join(sql.split())
+        # T5: _bound_bot_ids — bot_bindings joined with dyad_members
+        if ("SELECT DISTINCT bb.bot_id" in compact
+                and "FROM bot_bindings bb" in compact
+                and "LEFT JOIN dyad_members dm" in compact):
+            user_id = self._resolve_uuid(args[0]) if args else None
+            result: set[str] = set()
+            for bb in self._bot_bindings:
+                if self._resolve_uuid(bb.get("user_id")) == user_id:
+                    result.add(bb["bot_id"])
+                    continue
+                dyad_id = bb.get("dyad_id")
+                if dyad_id is not None:
+                    for dm in self._dyad_members:
+                        if (dm.get("dyad_id") == dyad_id
+                                and self._resolve_uuid(dm.get("user_id")) == user_id):
+                            result.add(bb["bot_id"])
+                            break
+            return [{"bot_id": bid} for bid in sorted(result)]
+
         # list_sessions: SELECT id, status, bot_id, prep_summary, steering_text, created_at, ... FROM mediator.conversations c WHERE (user_id = $1 OR partner_user_id = $1)
         if compact.startswith("SELECT id, status, bot_id, prep_summary, steering_text, created_at"):
             user_id = self._resolve_uuid(args[0]) if args else None
@@ -857,6 +917,227 @@ class TestSingleRowCreation:
 
 
 # --------------------------------------------------------------------------- #
+# T5: Live personas endpoint — SuperPOM visibility
+# --------------------------------------------------------------------------- #
+
+_TEST_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+class TestLivePersonas:
+    """GET /api/live/personas — SuperPOM appears for bound users."""
+
+    def test_personas_includes_superpom_when_direct_bound(self, monkeypatch) -> None:
+        """SuperPOM appears when the user has a direct bot_bindings row."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        # Seed a direct SuperPOM binding for the test user.
+        pool._bot_bindings.append({
+            "user_id": _TEST_USER_ID,
+            "bot_id": "superpom",
+            "dyad_id": None,
+        })
+        client = _client(monkeypatch, pool)
+
+        resp = client.get("/api/live/personas")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["scoped"] is True, data
+        assert data["user_id"] == str(_TEST_USER_ID)
+
+        bot_ids = [p["bot_id"] for p in data["personas"]]
+        assert "superpom" in bot_ids, (
+            f"SuperPOM missing from personas: {bot_ids}"
+        )
+        # Verify the SuperPOM entry carries correct fields
+        superpom = next(p for p in data["personas"] if p["bot_id"] == "superpom")
+        assert superpom["display_name"] == "SuperPOM"
+        assert superpom["topic"] == "superpom"
+
+    def test_personas_excludes_superpom_when_not_bound(self, monkeypatch) -> None:
+        """SuperPOM excluded when user has bindings but none for superpom."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        # Seed a non-superpom binding.
+        pool._bot_bindings.append({
+            "user_id": _TEST_USER_ID,
+            "bot_id": "mediator",
+            "dyad_id": None,
+        })
+        client = _client(monkeypatch, pool)
+
+        resp = client.get("/api/live/personas")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["scoped"] is True, data
+
+        bot_ids = [p["bot_id"] for p in data["personas"]]
+        assert "superpom" not in bot_ids, (
+            f"SuperPOM should be excluded when not bound: {bot_ids}"
+        )
+        assert "mediator" in bot_ids
+
+    def test_personas_scoped_false_without_any_bindings(self, monkeypatch) -> None:
+        """When user has no bindings at all, returns full registry unscoped."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        client = _client(monkeypatch, pool)
+
+        resp = client.get("/api/live/personas")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["scoped"] is False, data
+        # Full registry includes superpom (staging-registered)
+        bot_ids = [p["bot_id"] for p in data["personas"]]
+        assert "superpom" in bot_ids
+        assert "mediator" in bot_ids
+
+
+# --------------------------------------------------------------------------- #
+# T5: SuperPOM session creation — bot_id, solo partner, resolved topic
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperPOMSessionCreation:
+    """POST /api/live/sessions with bot_id='superpom'."""
+
+    def test_create_session_stores_superpom_bot_id(self, monkeypatch) -> None:
+        """Session creation stores 'superpom' as the bot_id."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        monkeypatch.setattr(
+            "app.routers.live_voice.run_live_prep_agentic_job",
+            _noop_prep_job,
+        )
+        client = _client(monkeypatch, pool)
+
+        resp = client.post(
+            "/api/live/sessions",
+            json={"bot_id": "superpom", "steering_text": "reflect on my week"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        session_id = UUID(data["session_id"])
+
+        # Verify the stored bot_id
+        assert session_id in pool._conversations
+        conv = pool._conversations[session_id]
+        assert conv["bot_id"] == "superpom", (
+            f"Expected bot_id='superpom', got {conv['bot_id']!r}"
+        )
+
+    def test_create_session_solo_partner_user_id_is_none(self, monkeypatch) -> None:
+        """Solo SuperPOM session has partner_user_id=None."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        monkeypatch.setattr(
+            "app.routers.live_voice.run_live_prep_agentic_job",
+            _noop_prep_job,
+        )
+        client = _client(monkeypatch, pool)
+
+        resp = client.post(
+            "/api/live/sessions",
+            json={"bot_id": "superpom", "steering_text": "test"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        session_id = UUID(data["session_id"])
+
+        conv = pool._conversations[session_id]
+        assert conv.get("partner_user_id") is None, (
+            f"Expected partner_user_id=None for solo bot, "
+            f"got {conv.get('partner_user_id')!r}"
+        )
+        # Verify mode defaults to "steered" when steering_text is provided
+        assert conv["mode"] == "steered"
+
+    def test_create_session_resolves_superpom_topic_id(self, monkeypatch) -> None:
+        """Session creation resolves the SuperPOM topic_id via primary_topic_id_for."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        monkeypatch.setattr(
+            "app.routers.live_voice.run_live_prep_agentic_job",
+            _noop_prep_job,
+        )
+        client = _client(monkeypatch, pool)
+
+        resp = client.post(
+            "/api/live/sessions",
+            json={"bot_id": "superpom", "steering_text": "test"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        session_id = UUID(data["session_id"])
+
+        conv = pool._conversations[session_id]
+        assert conv.get("topic_id") == _SUPERPOM_TOPIC_ID, (
+            f"Expected topic_id={_SUPERPOM_TOPIC_ID}, "
+            f"got {conv.get('topic_id')!r}"
+        )
+
+    def test_create_session_open_mode_without_steering(self, monkeypatch) -> None:
+        """Session creation without steering_text defaults to open mode."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        monkeypatch.setattr(
+            "app.routers.live_voice.run_live_prep_agentic_job",
+            _noop_prep_job,
+        )
+        client = _client(monkeypatch, pool)
+
+        resp = client.post(
+            "/api/live/sessions",
+            json={"bot_id": "superpom"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        session_id = UUID(data["session_id"])
+
+        conv = pool._conversations[session_id]
+        assert conv["bot_id"] == "superpom"
+        assert conv["mode"] == "open"
+        assert conv.get("partner_user_id") is None
+        assert conv.get("topic_id") == _SUPERPOM_TOPIC_ID
+
+    def test_create_session_rejects_unknown_bot(self, monkeypatch) -> None:
+        """An unknown bot_id returns 400, not 500."""
+        pool = LiveVoiceFakePool()
+        monkeypatch.setattr(
+            "app.routers.live_voice.primary_topic_id_for",
+            _fake_primary_topic_id_for_superpom,
+        )
+        client = _client(monkeypatch, pool)
+
+        resp = client.post(
+            "/api/live/sessions",
+            json={"bot_id": "nonexistent_bot"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "unknown bot_id" in resp.json()["detail"].lower()
+
+
+# --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 
@@ -871,3 +1152,10 @@ async def _noop_prep_job(
 ):
     """No-op prep job: does nothing, leaves conversation in current state."""
     return None
+
+
+async def _fake_primary_topic_id_for_superpom(pool, bot_spec):
+    """Return SUPERPOM_TOPIC_ID for superpom, RELATIONSHIP_TOPIC_ID otherwise."""
+    if getattr(bot_spec, "bot_id", None) == "superpom":
+        return _SUPERPOM_TOPIC_ID
+    return _RELATIONSHIP_TOPIC_ID

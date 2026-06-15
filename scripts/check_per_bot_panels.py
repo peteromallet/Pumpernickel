@@ -8,7 +8,7 @@ on port 6543, see S1 lesson #3) and prints two tables: events grouped by
 bot_id and tool_calls grouped by bot_id, both windowed over a recent
 interval.
 
-Expected bot_ids after first prod deploy: mediator, coach, tante_rosi.
+Expected bot_ids after first prod deploy: mediator, coach, tante_rosi, superpom.
 
 Usage:
     python scripts/check_per_bot_panels.py --help
@@ -50,7 +50,8 @@ async def _run(args: argparse.Namespace) -> int:
     # Supabase pooler is transaction-mode on port 6543 — see S1 lesson #3.
     pool = await asyncpg.create_pool(args.database_url, statement_cache_size=0)
     try:
-        bot_filter = "AND bot_id = $2" if args.bot_id else ""
+        events_bot_filter = "AND metadata->>'bot_id' = $2" if args.bot_id else ""
+        tool_calls_bot_filter = "AND bt.bot_id = $2" if args.bot_id else ""
         params: list[Any] = [args.hours]
         if args.bot_id:
             params.append(args.bot_id)
@@ -61,7 +62,7 @@ async def _run(args: argparse.Namespace) -> int:
             SELECT COALESCE(metadata->>'bot_id', '<null>') AS bot_id, COUNT(*) AS event_count
             FROM turn_audit_events
             WHERE occurred_at >= now() - ($1 || ' hours')::interval
-              {bot_filter}
+              {events_bot_filter}
             GROUP BY 1
             ORDER BY 1
             """,
@@ -74,7 +75,7 @@ async def _run(args: argparse.Namespace) -> int:
             FROM tool_calls tc
             JOIN bot_turns bt ON bt.id = tc.turn_id
             WHERE tc.called_at >= now() - ($1 || ' hours')::interval
-              {bot_filter.replace('bot_id', 'bt.bot_id')}
+              {tool_calls_bot_filter}
             GROUP BY 1
             ORDER BY 1
             """,

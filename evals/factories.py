@@ -64,6 +64,7 @@ async def seed_scenario(pool: Any, scenario: Scenario) -> ScenarioSeed:
     await _seed_watch_items(pool, scenario.setup.get("watch_items", []), refs, user)
     await _seed_oob_entries(pool, scenario.setup.get("oob_entries", []), refs, user)
     await _seed_scheduled_jobs(pool, scenario.setup.get("scheduled_jobs", []), refs, user)
+    await _seed_orientation_items(pool, scenario.setup.get("orientation_items", []), refs, user)
     inbound_message_ids = await _seed_inbound(pool, scenario, user)
     return ScenarioSeed(user=user, partner=partner, inbound_message_ids=inbound_message_ids, refs=refs)
 
@@ -363,6 +364,78 @@ async def _seed_scheduled_jobs(pool: Any, specs: Any, refs: dict[str, UUID], def
             )
         if item.get("key"):
             refs[str(item["key"])] = job_id
+
+
+async def _seed_orientation_items(pool: Any, specs: Any, refs: dict[str, UUID], default_user: User) -> None:
+    for item in _list_specs(specs, "setup.orientation_items"):
+        orientation_id = _coerce_uuid(item.get("id")) or uuid4()
+        topic_id = _ref(item.get("topic"), refs)
+        if topic_id is None:
+            topic_id = UUID("00000000-0000-4000-8000-000000000001")
+        row = {
+            "id": orientation_id,
+            "user_id": _ref(item.get("user"), refs) or default_user.id,
+            "topic_id": topic_id,
+            "bot_id": str(item.get("bot_id") or "superpom"),
+            "created_by_turn_id": _ref(item.get("created_by_turn"), refs),
+            "kind": str(item.get("kind") or "principle"),
+            "status": str(item.get("status") or "active"),
+            "source": str(item.get("source") or "user_stated"),
+            "review_state": str(item.get("review_state") or "reviewed"),
+            "label": str(item.get("label") or ""),
+            "detail": str(item.get("detail") or ""),
+            "started_at": _parse_time(item.get("started_at")),
+            "effective_at": _parse_time(item.get("effective_at")),
+            "target_date": _parse_time(item.get("target_date")),
+            "completed_at": _parse_time(item.get("completed_at")),
+            "closed_reason": item.get("closed_reason"),
+            "outcome_note": item.get("outcome_note"),
+            "supersedes_item_id": _ref(item.get("supersedes"), refs),
+            "priority_rank": item.get("priority_rank"),
+            "created_at": _parse_time(item.get("created_at")) or datetime.now(UTC),
+            "updated_at": _parse_time(item.get("updated_at")) or datetime.now(UTC),
+        }
+        if hasattr(pool, "user_orientation_items"):
+            pool.user_orientation_items[orientation_id] = row
+        else:
+            await pool.fetchrow(
+                """
+                INSERT INTO mediator.user_orientation_items (
+                    id, user_id, topic_id, bot_id, created_by_turn_id,
+                    kind, status, source, review_state,
+                    label, detail,
+                    started_at, effective_at, target_date, completed_at,
+                    closed_reason, outcome_note,
+                    supersedes_item_id, priority_rank,
+                    created_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                RETURNING id
+                """,
+                orientation_id,
+                row["user_id"],
+                row["topic_id"],
+                row["bot_id"],
+                row["created_by_turn_id"],
+                row["kind"],
+                row["status"],
+                row["source"],
+                row["review_state"],
+                row["label"],
+                row["detail"],
+                row["started_at"],
+                row["effective_at"],
+                row["target_date"],
+                row["completed_at"],
+                row["closed_reason"],
+                row["outcome_note"],
+                row["supersedes_item_id"],
+                row["priority_rank"],
+                row["created_at"],
+                row["updated_at"],
+            )
+        if item.get("key"):
+            refs[str(item["key"])] = orientation_id
 
 
 async def _seed_inbound(pool: Any, scenario: Scenario, user: User) -> list[UUID]:

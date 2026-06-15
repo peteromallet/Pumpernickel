@@ -9,7 +9,7 @@ from typing import Any
 from uuid import UUID
 
 
-PRIMITIVE_TABLES = ("users", "memories", "themes", "watch_items", "observations", "distillations", "out_of_bounds")
+PRIMITIVE_TABLES = ("users", "memories", "themes", "watch_items", "observations", "distillations", "out_of_bounds", "user_orientation_items")
 STATE_TABLES = (
     *PRIMITIVE_TABLES,
     "scheduled_jobs",
@@ -137,6 +137,8 @@ async def _fetch_table(pool: Any, table: str) -> list[Any]:
         return await pool.fetch("SELECT * FROM withheld_outbound_reviews ORDER BY id")
     if table == "tool_calls":
         return await pool.fetch("SELECT * FROM tool_calls ORDER BY id")
+    if table == "user_orientation_items":
+        return await pool.fetch("SELECT * FROM mediator.user_orientation_items ORDER BY id")
     raise ValueError(f"unknown snapshot table: {table}")
 
 

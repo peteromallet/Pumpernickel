@@ -114,7 +114,7 @@ def test_render_slots_for_concatenates_with_blank_lines() -> None:
 
 def test_every_known_bot_id_is_in_ALL_BOTS() -> None:
     """ALL_BOTS matches the real bot_id values used in the codebase."""
-    assert ALL_BOTS == frozenset({"mediator", "coach", "hector", "habits", "tante_rosi"}), (
+    assert ALL_BOTS == frozenset({"mediator", "coach", "hector", "habits", "tante_rosi", "superpom"}), (
         f"ALL_BOTS = {ALL_BOTS!r}"
     )
 
@@ -175,12 +175,13 @@ def test_mediator_section_order() -> None:
 
 
 def _build_all_specs():
-    """Build BotSpecs for all five bots, enabling staging if needed."""
+    """Build BotSpecs for all six bots, enabling staging if needed."""
     # The build functions are available directly; they don't require STAGING=1
     # because they only import TOOL_DISPATCH when called.
     from app.bots.coach import build_coach_spec
     from app.bots.hector import build_hector_spec
     from app.bots.habits import build_habits_spec
+    from app.bots.superpom import build_superpom_spec
     from app.bots.tante_rosi import build_tante_rosi_spec
     from app.bots.mediator import MEDIATOR_BOT
 
@@ -188,6 +189,7 @@ def _build_all_specs():
         "coach": build_coach_spec(),
         "hector": build_hector_spec(),
         "habits": build_habits_spec(),
+        "superpom": build_superpom_spec(),
         "tante_rosi": build_tante_rosi_spec(),
         "mediator": MEDIATOR_BOT,
     }
@@ -260,14 +262,14 @@ def test_nav_and_search_read_tools_survive_step_allowed_intersection() -> None:
         "search_messages",
     }
 
-    for bot_id in ("mediator", "coach", "hector", "habits", "tante_rosi"):
+    for bot_id in ("mediator", "coach", "hector", "habits", "tante_rosi", "superpom"):
         allowed = _step_allowed_for(bot_id)
         missing = expected - allowed
         assert not missing, f"{bot_id} lost read tools after _step_allowed: {missing}"
 
 
 def test_recent_activity_stays_excluded_from_solo_bot_step_allowed_sets() -> None:
-    for bot_id in ("coach", "hector", "habits", "tante_rosi"):
+    for bot_id in ("coach", "hector", "habits", "tante_rosi", "superpom"):
         allowed = _step_allowed_for(bot_id)
         assert "recent_activity" not in allowed, (
             f"{bot_id} should still exclude recent_activity"

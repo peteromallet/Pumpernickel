@@ -3,7 +3,7 @@
 - **Adapter:** IlikeBaselineRetriever
 - **Corpus:** /Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/corpus.yaml
 - **Golden Set:** /Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/golden_set.yaml
-- **Generated:** 2026-06-15T01:19:44.940148+00:00
+- **Generated:** 2026-06-15T14:55:46.310426+00:00
 - **Cases:** 80
 
 ## Overall Metrics
