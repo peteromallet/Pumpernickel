@@ -1855,6 +1855,9 @@ async def _run_agentic(
                 allow_cross_topic_peek=getattr(
                     bot_spec.read_scopes, "allow_cross_topic_peek", False
                 ),
+                compass_enabled=bot_spec.compass_enabled,
+                allowed_compass_topic_slugs=frozenset(bot_spec.read_scopes.topics),
+                primary_topic_slug=bot_spec.primary_topic_slug,
             )
             rendered_hot_context = render_hot_context_solo(hot_context)
         else:

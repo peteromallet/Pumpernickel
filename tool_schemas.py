@@ -192,6 +192,59 @@ class PerspectiveTemplate(str, Enum):
     devils_advocate = "devils_advocate"
 
 
+# ── Orientation enums (must match user_orientation.py validators exactly) ──
+
+
+class OrientationKind(str, Enum):
+    principle = "principle"
+    goal = "goal"
+    priority = "priority"
+    anti_pattern = "anti_pattern"
+
+
+class OrientationStatus(str, Enum):
+    pending = "pending"
+    active = "active"
+    completed = "completed"
+    retired = "retired"
+    superseded = "superseded"
+    rejected = "rejected"
+
+
+class OrientationSource(str, Enum):
+    user_stated = "user_stated"
+    user_confirmed = "user_confirmed"
+    bot_proposed = "bot_proposed"
+
+
+class OrientationReviewState(str, Enum):
+    unreviewed = "unreviewed"
+    reviewed = "reviewed"
+    excluded = "excluded"
+
+
+class OrientationVerdict(str, Enum):
+    accepted = "accepted"
+    corrected = "corrected"
+    rejected = "rejected"
+    retired = "retired"
+    superseded = "superseded"
+    completed = "completed"
+
+
+class OrientationTargetTable(str, Enum):
+    commitments = "commitments"
+    events = "events"
+
+
+class OrientationRelation(str, Enum):
+    evidence = "evidence"
+    progress = "progress"
+    supports = "supports"
+    contradicts = "contradicts"
+    completes = "completes"
+
+
 Significance = Annotated[int, Field(ge=1, le=5)]
 
 
@@ -2454,6 +2507,342 @@ class GetAdherenceOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Orientation tools — user-stated/reviewed principles, goals, priorities,
+# and anti-patterns.  Orientation is durable directional data distinct from
+# memories (factual recall), observations (behaviour patterns),
+# distillations (tentative synthesis), commitments/events (execution
+# tracking), and OOB (boundary protection).
+#
+# bot_proposed items are hidden from Compass rendering until explicitly
+# reviewed by the user.  Visibility is governed by is_compass_visible().
+# ---------------------------------------------------------------------------
+
+
+class OrientationItemRow(BaseModel):
+    """Read model for a single orientation item (matches app/services/user_orientation.OrientationItem)."""
+
+    id: UUID
+    user_id: UUID
+    topic_id: UUID | None = None
+    bot_id: str
+    created_by_turn_id: UUID | None = None
+    kind: OrientationKind
+    status: OrientationStatus
+    source: OrientationSource
+    review_state: OrientationReviewState
+    label: str
+    detail: str | None = None
+    started_at: datetime | None = None
+    effective_at: datetime | None = None
+    target_date: dt_date | None = None
+    completed_at: datetime | None = None
+    closed_reason: str | None = None
+    outcome_note: str | None = None
+    supersedes_item_id: UUID | None = None
+    priority_rank: int | None = Field(default=None, ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class OrientationLinkRow(BaseModel):
+    """Read model for an evidence/progress link (matches app/services/user_orientation.OrientationLink)."""
+
+    id: UUID
+    item_id: UUID
+    user_id: UUID
+    topic_id: UUID | None = None
+    target_table: OrientationTargetTable
+    target_id: UUID
+    relation: OrientationRelation
+    note: str | None = None
+    created_at: datetime
+
+
+# --- list_orientation_items ---
+
+
+class ListOrientationItemsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["own", "all"] = "own"
+    kinds: list[OrientationKind] | None = Field(
+        default=None,
+        description="Filter by kind. None = all kinds.",
+    )
+    statuses: list[OrientationStatus] | None = Field(
+        default=None,
+        description="Filter by status. None = all statuses (defaults exclude superseded).",
+    )
+    include_unreviewed: bool = Field(
+        default=False,
+        description="Include pending/unreviewed items. These are hidden from Compass by default.",
+    )
+    include_rejected: bool = Field(
+        default=False,
+        description="Include rejected items. These are hidden from Compass by default.",
+    )
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class ListOrientationItemsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    items: list[OrientationItemRow] = Field(default_factory=list)
+
+
+# --- get_orientation_item ---
+
+
+class GetOrientationItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: UUID = Field(description="UUID of the orientation item to fetch.")
+
+
+class GetOrientationItemOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    item: OrientationItemRow | None = None  # None if not found
+
+
+# --- create_orientation_item ---
+
+
+class CreateOrientationItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    topic_slugs: list[str] | None = Field(
+        default=None,
+        description="Topic slugs for write scope resolution. The handler resolves exactly one topic_id.",
+    )
+    kind: OrientationKind = Field(
+        description="Kind of orientation: principle, goal, priority, or anti_pattern."
+    )
+    label: str = Field(
+        min_length=1,
+        description="Short human-readable label for this orientation item.",
+    )
+    detail: str | None = Field(
+        default=None,
+        description="Longer description or context for this item.",
+    )
+    source: OrientationSource = Field(
+        default=OrientationSource.user_stated,
+        description="How this orientation was obtained. bot_proposed items start as pending/unreviewed and require explicit user review before becoming Compass-visible.",
+    )
+    started_at: datetime | None = Field(
+        default=None,
+        description="When the user started working toward this goal. For goals only.",
+    )
+    effective_at: datetime | None = Field(
+        default=None,
+        description="When this principle/priority took effect. Optional.",
+    )
+    target_date: dt_date | None = Field(
+        default=None,
+        description="Target completion date for goals. For goals only.",
+    )
+    supersedes_item_id: UUID | None = Field(
+        default=None,
+        description="ID of an existing orientation item this one supersedes.",
+    )
+    priority_rank: int | None = Field(
+        default=None,
+        ge=1,
+        description="Numeric rank for priority items. Lower = higher priority.",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Why the bot is creating this orientation item. Logged for audit.",
+    )
+
+    @model_validator(mode="after")
+    def validate_kind_constraints(self) -> "CreateOrientationItemInput":
+        if self.kind == OrientationKind.priority and self.priority_rank is None:
+            raise ValueError("priority items require a priority_rank")
+        if (
+            self.kind in (OrientationKind.principle, OrientationKind.anti_pattern)
+            and self.priority_rank is not None
+        ):
+            raise ValueError(
+                "principles and anti-patterns must not set priority_rank"
+            )
+        return self
+
+
+class CreateOrientationItemOutput(WriteCreated):
+    """Orientation item created.  bot_proposed items are pending/unreviewed until explicit review."""
+
+    kind: OrientationKind
+    status: OrientationStatus
+    source: OrientationSource
+    review_state: OrientationReviewState
+    label: str
+
+
+# --- update_orientation_item ---
+
+
+class UpdateOrientationItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: UUID = Field(description="UUID of the orientation item to update.")
+    label: str | None = Field(default=None, min_length=1)
+    detail: str | None = None
+    started_at: datetime | None = None
+    effective_at: datetime | None = None
+    target_date: dt_date | None = None
+    priority_rank: int | None = Field(default=None, ge=1)
+    status: OrientationStatus | None = Field(
+        default=None,
+        description="New status. Transition rules enforced by UserOrientationStore.",
+    )
+    source: OrientationSource | None = None
+    review_state: OrientationReviewState | None = Field(
+        default=None,
+        description="New review state. bot_proposed items must stay unreviewed or excluded.",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Why this update is being made. Required for cross-topic updates.",
+    )
+
+
+class UpdateOrientationItemOutput(WriteUpdated):
+    """Orientation item updated.  Lifecycle transition rules enforced server-side."""
+
+    kind: OrientationKind
+    status: OrientationStatus
+    review_state: OrientationReviewState
+    label: str
+
+
+# --- review_orientation_item ---
+
+
+class ReviewOrientationItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: UUID = Field(
+        description="UUID of the orientation item to review.  Must be in pending status."
+    )
+    verdict: OrientationVerdict = Field(
+        description="Review verdict. The resulting status is computed from the verdict: accepted/corrected → active, rejected → rejected, retired → retired, superseded → superseded, completed → completed."
+    )
+    note: str | None = Field(
+        default=None,
+        description="Optional review note recorded in the audit log.",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Why this review is happening now. Logged for audit.",
+    )
+
+
+class ReviewOrientationItemOutput(WriteUpdated):
+    """Orientation item reviewed.  Verdict determines the new status."""
+
+    verdict: OrientationVerdict
+    status: OrientationStatus
+    review_state: OrientationReviewState = OrientationReviewState.reviewed
+
+
+# --- close_orientation_item ---
+
+
+class CloseOrientationItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: UUID = Field(
+        description="UUID of the orientation item to close.  Must be in active status."
+    )
+    new_status: Literal["completed", "retired", "superseded"] = Field(
+        description="Target close status. completed requires completed_at."
+    )
+    closed_reason: str | None = Field(
+        default=None,
+        description="Why this item is being closed/retired/superseded.",
+    )
+    outcome_note: str | None = Field(
+        default=None,
+        description="What was achieved or learned. Rendered in Compass for completed goals.",
+    )
+    completed_at: datetime | None = Field(
+        default=None,
+        description="When the goal was completed. Required when new_status is 'completed'. Must be timezone-aware.",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Why this close is happening now. Logged for audit.",
+    )
+
+    @model_validator(mode="after")
+    def validate_close_params(self) -> "CloseOrientationItemInput":
+        if self.new_status == "completed" and self.completed_at is None:
+            raise ValueError(
+                "completed_at is required when closing with status 'completed'"
+            )
+        if self.completed_at is not None and self.new_status != "completed":
+            raise ValueError(
+                "completed_at must not be set unless new_status is 'completed'"
+            )
+        return self
+
+
+class CloseOrientationItemOutput(WriteUpdated):
+    """Orientation item closed.  Does not mutate commitment/event adherence rows."""
+
+    status: OrientationStatus
+    closed_reason: str | None = None
+    outcome_note: str | None = None
+    completed_at: datetime | None = None
+
+
+# --- link_orientation_evidence ---
+
+
+class LinkOrientationEvidenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: UUID = Field(
+        description="UUID of the orientation item to link evidence to."
+    )
+    target_table: OrientationTargetTable = Field(
+        description="Target table: 'commitments' or 'events'."
+    )
+    target_id: UUID = Field(
+        description="UUID of the commitment or event row to link."
+    )
+    relation: OrientationRelation = Field(
+        description="Relationship: evidence, progress, supports, contradicts, or completes."
+    )
+    note: str | None = Field(
+        default=None,
+        description="Optional note about why this link was made.",
+    )
+    topic_slugs: list[str] | None = Field(
+        default=None,
+        description="Topic slugs for scope resolution. If omitted, inherits from the orientation item.",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Why this evidence link is being created. Logged for audit.",
+    )
+
+
+class LinkOrientationEvidenceOutput(BaseModel):
+    """Evidence/progress link created.  Does not mutate commitment/event lifecycle state."""
+
+    action: Literal["linked"] = "linked"
+    id: UUID
+    item_id: UUID
+    target_table: OrientationTargetTable
+    target_id: UUID
+    relation: OrientationRelation
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
 #
@@ -2658,6 +3047,9 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "get_self_model": (GetSelfModelInput, GetSelfModelOutput),
     "get_bot_actions": (GetBotActionsInput, GetBotActionsOutput),
     "get_tool_call": (GetToolCallInput, GetToolCallOutput),
+    # orientation read
+    "list_orientation_items": (ListOrientationItemsInput, ListOrientationItemsOutput),
+    "get_orientation_item": (GetOrientationItemInput, GetOrientationItemOutput),
     "send_message_part": (SendMessagePartInput, SendMessagePartOutput),
     "consult_perspective": (ConsultPerspectiveInput, ConsultPerspectiveOutput),
     "list_bridge_candidates": (ListBridgeCandidatesInput, ListBridgeCandidatesOutput),
@@ -2718,6 +3110,12 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "react_to_message": (ReactToMessageInput, ReactToMessageOutput),
     "explain_media_item": (ExplainMediaItemInput, ExplainMediaItemOutput),
     "log_feedback": (LogFeedbackInput, LogFeedbackOutput),
+    # orientation write
+    "create_orientation_item": (CreateOrientationItemInput, CreateOrientationItemOutput),
+    "update_orientation_item": (UpdateOrientationItemInput, UpdateOrientationItemOutput),
+    "review_orientation_item": (ReviewOrientationItemInput, ReviewOrientationItemOutput),
+    "close_orientation_item": (CloseOrientationItemInput, CloseOrientationItemOutput),
+    "link_orientation_evidence": (LinkOrientationEvidenceInput, LinkOrientationEvidenceOutput),
     # pregnancy
     "set_pregnancy_edd": (SetPregnancyEddInput, SetPregnancyEddOutput),
     "correct_pregnancy_edd": (CorrectPregnancyEddInput, CorrectPregnancyEddOutput),

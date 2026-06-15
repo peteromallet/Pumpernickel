@@ -10,7 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from app.bots.ids import MEDIATOR_BOT_ID, TANTE_ROSI_BOT_ID
-from app.bots.registry import get_relationship_topic_id, get_pregnancy_topic_id
+from app.bots.registry import get_bot_spec, get_relationship_topic_id, get_pregnancy_topic_id
 from app.config import get_settings
 from app.db import db_lifespan
 from app.models.user import fetch_user_by_id
@@ -145,6 +145,7 @@ async def _rosi_replay(pool: Any, user_id: str) -> None:
     )
 
     # Build and render solo hot context.
+    bot_spec = get_bot_spec(TANTE_ROSI_BOT_ID)
     hc = await build_hot_context_solo(
         pool,
         user,
@@ -153,6 +154,9 @@ async def _rosi_replay(pool: Any, user_id: str) -> None:
         primary_topic_id=topic_id,
         bot_id=TANTE_ROSI_BOT_ID,
         allow_cross_topic_peek=True,
+        compass_enabled=bot_spec.compass_enabled,
+        allowed_compass_topic_slugs=frozenset(bot_spec.read_scopes.topics),
+        primary_topic_slug=bot_spec.primary_topic_slug,
     )
     rendered = render_hot_context_solo(hc)
     print(

@@ -26,6 +26,8 @@ ARTIFACT_READ_TOOLS: frozenset[str] = frozenset(
         "list_watch_items",
         "list_bridge_candidates",
         "get_self_model",
+        # orientation read tools
+        "list_orientation_items",
     }
 )
 
@@ -55,6 +57,12 @@ ARTIFACT_WRITE_TOOLS: frozenset[str] = frozenset(
         "add_oob",
         "update_oob",
         "lift_oob",
+        # orientation write tools
+        "create_orientation_item",
+        "update_orientation_item",
+        "review_orientation_item",
+        "close_orientation_item",
+        "link_orientation_evidence",
     }
 )
 

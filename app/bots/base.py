@@ -59,6 +59,7 @@ class BotSpec:
     write_scopes: WriteScopes = field(default_factory=WriteScopes)
     cross_topic_policy: str | None = None
     tool_allowlist: frozenset[str] | None = None
+    compass_enabled: bool = False
     bot_spec_version: str = "1.1.0"
     hot_context_builder_version: str = "1.0.0"
     tool_schema_version: str = "1.0.0"

@@ -126,6 +126,12 @@ from tool_schemas import (
     PlanItem,
     TopicRecentInput,
     TopicRecentOutput,
+    # orientation read tools
+    ListOrientationItemsInput,
+    ListOrientationItemsOutput,
+    GetOrientationItemInput,
+    GetOrientationItemOutput,
+    OrientationItemRow,
 )
 
 logger = logging.getLogger(__name__)
@@ -3408,3 +3414,198 @@ async def list_conversation_plans(
     ]
 
     return ListConversationPlansOutput(plans=plans)
+
+
+# ── Orientation read tools ──────────────────────────────────────────────────
+
+
+def _resolve_orientation_topic_ids(
+    ctx: TurnContext, scope: str
+) -> list[UUID]:
+    """Resolve orientation read scope to explicit topic UUIDs.
+
+    Orientation reads reject broad ``all`` — Compass/orientation state is
+    intentionally scoped to user-owned topics.  ``own`` resolves to
+    ``ctx.primary_topic_id``.  Any other scope string is treated as an
+    explicit topic ID and must parse as a valid UUID.
+    """
+    from app.services.tools.write_tools import ToolCallRejected  # noqa: PLC0415
+
+    if scope == "all":
+        raise ToolCallRejected({
+            "error": "scope_denied",
+            "is_error": True,
+            "error_code": "scope_denied",
+            "field": "scope",
+            "reason": "Broad 'all' scope is not allowed for orientation reads. "
+                      "Orientation state is scoped to user-owned topics only.",
+            "correction_hint": "Use scope='own' for the primary topic or pass "
+                               "an explicit topic ID.",
+            "retryable": True,
+            "failure_class": "tool_validation_recoverable",
+        })
+
+    if scope == "own":
+        if ctx.primary_topic_id is None:
+            raise ToolCallRejected({
+                "error": "scope_denied",
+                "is_error": True,
+                "error_code": "scope_denied",
+                "field": "scope",
+                "reason": "Cannot resolve scope='own' because "
+                          "ctx.primary_topic_id is None.",
+                "correction_hint": "Ensure the turn context has a primary topic "
+                                   "set before calling orientation read tools.",
+                "retryable": False,
+                "failure_class": "tool_call_invalid",
+            })
+        return [ctx.primary_topic_id]
+
+    # Treat scope as an explicit topic UUID.
+    try:
+        topic_uuid = UUID(str(scope).strip())
+    except (ValueError, AttributeError):
+        raise ToolCallRejected({
+            "error": "invalid_topic_id",
+            "is_error": True,
+            "error_code": "invalid_topic_id",
+            "field": "scope",
+            "reason": f"Scope must be 'own', 'all' (rejected), or a valid "
+                      f"UUID topic ID. Got: {scope!r}",
+            "correction_hint": "Use scope='own' or pass an explicit topic "
+                               "UUID as the scope value.",
+            "retryable": True,
+            "failure_class": "tool_validation_recoverable",
+        })
+
+    return [topic_uuid]
+
+
+async def list_orientation_items(
+    ctx: TurnContext, args: ListOrientationItemsInput
+) -> ListOrientationItemsOutput:
+    """List orientation items for the current user within explicit topic scope.
+
+    ``scope='own'`` resolves to ``ctx.primary_topic_id``.  ``scope='all'`` is
+    rejected.  Only explicit UUID topic IDs are passed into the
+    ``UserOrientationStore``.
+    """
+    logger.info("read tool list_orientation_items turn_id=%s", ctx.turn_id)
+
+    from app.services.user_orientation import UserOrientationStore  # noqa: PLC0415
+    from app.services.tools.write_tools import ToolCallRejected  # noqa: PLC0415
+
+    try:
+        topic_ids = _resolve_orientation_topic_ids(ctx, args.scope)
+    except ToolCallRejected as exc:
+        rejection: dict[str, Any] = getattr(exc, "result", {}) or {}
+        return ListOrientationItemsOutput(
+            is_error=True,
+            error=rejection.get("reason", str(exc)),
+            items=[],
+        )
+
+    if ctx.user.id is None:
+        raise ValueError("ctx.user.id is required for orientation reads")
+
+    store = UserOrientationStore(ctx.pool)
+
+    # Resolve kind/status filter lists
+    kinds: list[str] | None = (
+        [k.value for k in args.kinds] if args.kinds else None
+    )
+    statuses: list[str] | None = (
+        [s.value for s in args.statuses] if args.statuses else None
+    )
+
+    items = await store.list_items(
+        user_id=ctx.user.id,
+        topic_ids=topic_ids,
+        kinds=kinds,
+        statuses=statuses,
+        include_unreviewed=args.include_unreviewed,
+        include_rejected=args.include_rejected,
+    )
+
+    # Apply limit
+    items = items[: args.limit]
+
+    return ListOrientationItemsOutput(
+        items=[
+            OrientationItemRow(
+                id=item.id,
+                user_id=item.user_id,
+                topic_id=item.topic_id,
+                bot_id=item.bot_id,
+                created_by_turn_id=item.created_by_turn_id,
+                kind=item.kind,
+                status=item.status,
+                source=item.source,
+                review_state=item.review_state,
+                label=item.label,
+                detail=item.detail,
+                started_at=item.started_at,
+                effective_at=item.effective_at,
+                target_date=item.target_date,
+                completed_at=item.completed_at,
+                closed_reason=item.closed_reason,
+                outcome_note=item.outcome_note,
+                supersedes_item_id=item.supersedes_item_id,
+                priority_rank=item.priority_rank,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            for item in items
+        ],
+    )
+
+
+async def get_orientation_item(
+    ctx: TurnContext, args: GetOrientationItemInput
+) -> GetOrientationItemOutput:
+    """Fetch a single orientation item by ID, scoped to the current user."""
+    logger.info("read tool get_orientation_item turn_id=%s", ctx.turn_id)
+
+    from app.services.user_orientation import UserOrientationStore  # noqa: PLC0415
+
+    if ctx.user.id is None:
+        raise ValueError("ctx.user.id is required for orientation reads")
+
+    store = UserOrientationStore(ctx.pool)
+    item = await store.get_item(
+        user_id=ctx.user.id,
+        item_id=args.item_id,
+    )
+
+    if item is None:
+        return GetOrientationItemOutput(
+            is_error=False,
+            error=None,
+            item=None,
+        )
+
+    return GetOrientationItemOutput(
+        item=OrientationItemRow(
+            id=item.id,
+            user_id=item.user_id,
+            topic_id=item.topic_id,
+            bot_id=item.bot_id,
+            created_by_turn_id=item.created_by_turn_id,
+            kind=item.kind,
+            status=item.status,
+            source=item.source,
+            review_state=item.review_state,
+            label=item.label,
+            detail=item.detail,
+            started_at=item.started_at,
+            effective_at=item.effective_at,
+            target_date=item.target_date,
+            completed_at=item.completed_at,
+            closed_reason=item.closed_reason,
+            outcome_note=item.outcome_note,
+            supersedes_item_id=item.supersedes_item_id,
+            priority_rank=item.priority_rank,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        ),
+    )

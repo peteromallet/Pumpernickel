@@ -159,6 +159,14 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "log_event": "Log an event against a commitment (or standalone with a metric_key). Provide at least one of adherence_status ('done', 'missed', 'excused'), value_numeric, or value_text. Use adherence_status to mark whether a scheduled slot was completed, missed, or excused. Events are scoped to the current user, topic, and bot.",
     "list_events": "List recent events for the current user and topic, optionally filtered by commitment_id. Use before logging a corrective event to avoid duplicates, and to answer questions about recent activity.",
     "get_adherence": "Compute this week's adherence status for active commitments. Returns per-day slot status for each commitment (done, missed, excused, unknown, pending). Use this before asking the user about missed days — check the adherence board first so you can distinguish unknown from missed and avoid shaming.",
+    # orientation tools — principles/goals/priorities/anti-patterns (not memory facts, observation patterns, distillation explanations, commitment/event tracking, or OOB boundaries)
+    "list_orientation_items": "List your stated principles, goals, priorities, and anti-patterns for a topic — these are your compass headings, not memory facts, observations, or distillations. Use scope='own' for the primary topic; 'all' is not allowed for orientation reads. By default excludes unreviewed and rejected items because they are not Compass-visible. Use include_unreviewed=true or include_rejected=true to widen the result set when reviewing pending proposals.",
+    "get_orientation_item": "Fetch a single orientation item by its UUID. Use to inspect a specific principle, goal, priority, or anti-pattern's full detail before reviewing, updating, or linking evidence to it. Unreviewed bot_proposed items are hidden from Compass and only visible via this tool.",
+    "create_orientation_item": "Create a new orientation item (principle, goal, priority, or anti-pattern) for a topic — distinct from memories (durable facts), observations (learned patterns), distillations (tentative explanations), commitments/events (tracked plans), and OOB (boundaries). Use topic_slugs to specify the topic scope (defaults to the primary topic). Set source='bot_proposed' to propose an item the user should review; bot_proposed items start as pending/unreviewed and are hidden from Compass until explicitly reviewed via review_orientation_item. Set source='user_stated' or 'user_confirmed' for items the user has explicitly stated or confirmed; these become Compass-visible immediately.",
+    "update_orientation_item": "Update mutable fields (label, detail, dates, priority_rank, status, etc.) on an existing orientation item. Only fields you provide are changed. Call get_orientation_item first to get the item_id. Cross-topic updates require a non-empty reason. Updated items remain Compass-visible according to their current status and review state.",
+    "review_orientation_item": "Record a review verdict on a pending orientation item — this is the gate that makes bot_proposed items Compass-visible. Verdict determines the new status: accepted/corrected→active (becomes Compass-visible), rejected→rejected (stays hidden from Compass), retired→retired, superseded→superseded, completed→completed. Only pending items can be reviewed. Creates an audit record.",
+    "close_orientation_item": "Close an active orientation item by setting its status to completed, retired, or superseded. completed requires completed_at. Completed and retired goals remain visible in Compass under their respective sections. Does NOT mutate any linked commitment/event adherence rows.",
+    "link_orientation_evidence": "Link an orientation item to a commitment or event as evidence, progress, support, contradiction, or completion — this connects Compass goals to the commitment/event tracking system. Use to connect goals to the commitments and events that demonstrate progress toward them. Evidence links are visible in Compass goal renderings.",
     # plan tools (mediator only)
     "read_conversation_plan": "Read the agenda for a specific planned live-voice conversation. Use to inspect an existing plan by conversation_id before deciding whether to propose edits.",
     "list_conversation_plans": "List the user's recent planned live-voice conversations (status prepping / preparing / ready). Use to orient before proposing a new plan or looking up an existing one.",
@@ -246,6 +254,15 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "list_commitments": read_tools.list_commitments,
     "list_events": read_tools.list_events,
     "get_adherence": read_tools.get_adherence,
+    # orientation read tools
+    "list_orientation_items": read_tools.list_orientation_items,
+    "get_orientation_item": read_tools.get_orientation_item,
+    # orientation write tools
+    "create_orientation_item": write_tools.create_orientation_item,
+    "update_orientation_item": write_tools.update_orientation_item,
+    "review_orientation_item": write_tools.review_orientation_item,
+    "close_orientation_item": write_tools.close_orientation_item,
+    "link_orientation_evidence": write_tools.link_orientation_evidence,
     # plan tools (mediator only)
     "read_conversation_plan": read_tools.read_conversation_plan,
     "list_conversation_plans": read_tools.list_conversation_plans,
@@ -339,6 +356,12 @@ _SELF_LOGGING_TOOLS: frozenset[str] = frozenset({
     "update_commitment",
     "close_commitment",
     "log_event",
+    # orientation write tools — all self-log
+    "create_orientation_item",
+    "update_orientation_item",
+    "review_orientation_item",
+    "close_orientation_item",
+    "link_orientation_evidence",
     # read-shaped but lives in write_tools.py and self-logs
     "list_scheduled_tasks",
 }) | PLAN_WRITE_TOOLS
@@ -377,6 +400,9 @@ READ_PHASE_TOOLS = {
     "list_commitments",
     "list_events",
     "get_adherence",
+    # orientation read tools
+    "list_orientation_items",
+    "get_orientation_item",
 } | PLAN_READ_TOOLS
 
 WRITE_PHASE_TOOLS = {
@@ -416,6 +442,12 @@ WRITE_PHASE_TOOLS = {
     "explain_media_item",
     "log_feedback",
     "set_topic_status",
+    # orientation write tools
+    "create_orientation_item",
+    "update_orientation_item",
+    "review_orientation_item",
+    "close_orientation_item",
+    "link_orientation_evidence",
 }
 
 CONSULT_PHASE_TOOLS = READ_PHASE_TOOLS - {"send_message_part", "consult_perspective"}
@@ -731,6 +763,12 @@ READ_BEFORE_WRITE: dict[str, set[str]] = {
     "create_commitment": {"list_commitments"},
     "update_commitment": {"list_commitments"},
     "close_commitment": {"list_commitments"},
+    # orientation: require read before any write
+    "create_orientation_item": {"list_orientation_items"},
+    "update_orientation_item": {"get_orientation_item"},
+    "review_orientation_item": {"get_orientation_item"},
+    "close_orientation_item": {"get_orientation_item"},
+    "link_orientation_evidence": {"get_orientation_item"},
 }
 
 _CONSULT_OWNER_INJECTING_TOOLS = {"check_oob"}

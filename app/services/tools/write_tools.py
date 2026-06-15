@@ -155,6 +155,17 @@ from tool_schemas import (
     PlanItem,
     UpdateConversationPlanInput,
     UpdateConversationPlanOutput,
+    # orientation tools
+    CreateOrientationItemInput,
+    CreateOrientationItemOutput,
+    UpdateOrientationItemInput,
+    UpdateOrientationItemOutput,
+    ReviewOrientationItemInput,
+    ReviewOrientationItemOutput,
+    CloseOrientationItemInput,
+    CloseOrientationItemOutput,
+    LinkOrientationEvidenceInput,
+    LinkOrientationEvidenceOutput,
 )
 from app.services.live.plan_markdown import markdown_to_agenda, agenda_to_display
 
@@ -1357,6 +1368,337 @@ async def update_theme(ctx: TurnContext, args: UpdateThemeInput) -> UpdateThemeO
     result = UpdateThemeOutput(id=row["id"])
     await _log_tool_call(ctx, "update_theme", args, started, result)
     await _sync_theme_embedding_after_update(ctx, row["id"])
+    return result
+
+
+# ── Orientation write handlers (§M1) ──────────────────────────────────────
+
+
+async def create_orientation_item(
+    ctx: TurnContext, args: CreateOrientationItemInput
+) -> CreateOrientationItemOutput:
+    """Create a new orientation item (principle, goal, priority, anti-pattern).
+
+    Enforces write-scope and cross-topic reason checks.  bot_proposed items
+    start as pending/unreviewed and are hidden from Compass until explicit
+    review.
+    """
+    from app.services.user_orientation import UserOrientationStore  # noqa: PLC0415
+
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+
+    topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+    require_reason_for_cross_topic(topic_slugs, ctx.primary_topic_slug, args.reason)
+    topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+    # Orientation items are single-topic: use the first resolved topic.
+    topic_id = topic_id_map[topic_slugs[0]]
+
+    store = UserOrientationStore(ctx.pool)
+    started = _start()
+    item = await store.create_item(
+        user_id=ctx.user.id,
+        topic_id=topic_id,
+        bot_id=ctx.bot_id,
+        kind=args.kind.value,
+        label=args.label,
+        detail=args.detail,
+        source=args.source.value,
+        started_at=args.started_at,
+        effective_at=args.effective_at,
+        target_date=args.target_date,
+        supersedes_item_id=args.supersedes_item_id,
+        priority_rank=args.priority_rank,
+        created_by_turn_id=ctx.turn_id,
+    )
+
+    result = CreateOrientationItemOutput(
+        id=item.id,
+        kind=item.kind,
+        status=item.status,
+        source=item.source,
+        review_state=item.review_state,
+        label=item.label,
+    )
+    await _log_tool_call(ctx, "create_orientation_item", args, started, result)
+    return result
+
+
+async def update_orientation_item(
+    ctx: TurnContext, args: UpdateOrientationItemInput
+) -> UpdateOrientationItemOutput:
+    """Update mutable fields on an existing orientation item.
+
+    Fetches the item first to verify ownership, then enforces write-scope.
+    Cross-topic updates (item on a different topic than primary) require a
+    non-empty reason.
+    """
+    from app.services.user_orientation import UserOrientationStore  # noqa: PLC0415
+
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+
+    store = UserOrientationStore(ctx.pool)
+
+    # Fetch and verify ownership before mutation.
+    item_current = await store.get_item(user_id=ctx.user.id, item_id=args.item_id)
+    if item_current is None:
+        raise ToolCallRejected(
+            {
+                "error": f"Orientation item {args.item_id} not found "
+                f"or not owned by user {ctx.user.id}",
+                "is_error": True,
+            }
+        )
+
+    # Cross-topic enforcement: if the item lives on a different topic, require reason.
+    if (
+        item_current.topic_id is not None
+        and ctx.primary_topic_id is not None
+        and item_current.topic_id != ctx.primary_topic_id
+    ):
+        require_reason_for_cross_topic(
+            ["__cross_topic__"], ctx.primary_topic_slug, args.reason
+        )
+
+    status_val = args.status.value if args.status else None
+    source_val = args.source.value if args.source else None
+    review_state_val = args.review_state.value if args.review_state else None
+
+    started = _start()
+    updated = await store.update_item(
+        user_id=ctx.user.id,
+        item_id=args.item_id,
+        label=args.label,
+        detail=args.detail,
+        started_at=args.started_at,
+        effective_at=args.effective_at,
+        target_date=args.target_date,
+        priority_rank=args.priority_rank,
+        status=status_val,
+        source=source_val,
+        review_state=review_state_val,
+    )
+
+    if updated is None:
+        raise ToolCallRejected(
+            {
+                "error": f"Orientation item {args.item_id} update failed",
+                "is_error": True,
+            }
+        )
+
+    result = UpdateOrientationItemOutput(
+        id=updated.id,
+        kind=updated.kind,
+        status=updated.status,
+        review_state=updated.review_state,
+        label=updated.label,
+    )
+    await _log_tool_call(ctx, "update_orientation_item", args, started, result)
+    return result
+
+
+async def review_orientation_item(
+    ctx: TurnContext, args: ReviewOrientationItemInput
+) -> ReviewOrientationItemOutput:
+    """Record a review verdict on a pending orientation item.
+
+    Fetches the item first to verify ownership, then enforces write-scope.
+    The verdict determines the new status (accepted→active, rejected→rejected,
+    etc.).  Creates an audit row and transitions the item.
+    """
+    from app.services.user_orientation import UserOrientationStore  # noqa: PLC0415
+
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+
+    store = UserOrientationStore(ctx.pool)
+
+    # Fetch and verify ownership before mutation.
+    item_current = await store.get_item(user_id=ctx.user.id, item_id=args.item_id)
+    if item_current is None:
+        raise ToolCallRejected(
+            {
+                "error": f"Orientation item {args.item_id} not found "
+                f"or not owned by user {ctx.user.id}",
+                "is_error": True,
+            }
+        )
+
+    # Cross-topic enforcement.
+    if (
+        item_current.topic_id is not None
+        and ctx.primary_topic_id is not None
+        and item_current.topic_id != ctx.primary_topic_id
+    ):
+        require_reason_for_cross_topic(
+            ["__cross_topic__"], ctx.primary_topic_slug, args.reason
+        )
+
+    started = _start()
+    reviewed = await store.review_item(
+        user_id=ctx.user.id,
+        item_id=args.item_id,
+        verdict=args.verdict.value,
+        note=args.note,
+        reviewed_by_turn_id=ctx.turn_id,
+    )
+
+    if reviewed is None:
+        raise ToolCallRejected(
+            {
+                "error": f"Orientation item {args.item_id} review failed",
+                "is_error": True,
+            }
+        )
+
+    result = ReviewOrientationItemOutput(
+        id=reviewed.id,
+        verdict=args.verdict.value,
+        status=reviewed.status,
+        review_state=reviewed.review_state,
+    )
+    await _log_tool_call(ctx, "review_orientation_item", args, started, result)
+    return result
+
+
+async def close_orientation_item(
+    ctx: TurnContext, args: CloseOrientationItemInput
+) -> CloseOrientationItemOutput:
+    """Close an active orientation item (complete, retire, supersede).
+
+    Fetches the item first to verify ownership, then enforces write-scope.
+    Does NOT mutate any commitment/event adherence rows.
+    """
+    from app.services.user_orientation import UserOrientationStore  # noqa: PLC0415
+
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+
+    store = UserOrientationStore(ctx.pool)
+
+    # Fetch and verify ownership before mutation.
+    item_current = await store.get_item(user_id=ctx.user.id, item_id=args.item_id)
+    if item_current is None:
+        raise ToolCallRejected(
+            {
+                "error": f"Orientation item {args.item_id} not found "
+                f"or not owned by user {ctx.user.id}",
+                "is_error": True,
+            }
+        )
+
+    # Cross-topic enforcement.
+    if (
+        item_current.topic_id is not None
+        and ctx.primary_topic_id is not None
+        and item_current.topic_id != ctx.primary_topic_id
+    ):
+        require_reason_for_cross_topic(
+            ["__cross_topic__"], ctx.primary_topic_slug, args.reason
+        )
+
+    started = _start()
+    closed = await store.close_item(
+        user_id=ctx.user.id,
+        item_id=args.item_id,
+        new_status=args.new_status,
+        closed_reason=args.closed_reason,
+        outcome_note=args.outcome_note,
+        completed_at=args.completed_at,
+    )
+
+    if closed is None:
+        raise ToolCallRejected(
+            {
+                "error": f"Orientation item {args.item_id} close failed",
+                "is_error": True,
+            }
+        )
+
+    result = CloseOrientationItemOutput(
+        id=closed.id,
+        status=closed.status,
+        closed_reason=closed.closed_reason,
+        outcome_note=closed.outcome_note,
+        completed_at=closed.completed_at,
+    )
+    await _log_tool_call(ctx, "close_orientation_item", args, started, result)
+    return result
+
+
+async def link_orientation_evidence(
+    ctx: TurnContext, args: LinkOrientationEvidenceInput
+) -> LinkOrientationEvidenceOutput:
+    """Link an orientation item to a commitment or event as evidence/progress.
+
+    Fetches the item first to verify ownership, then resolves topic slugs
+    (if provided) and enforces cross-topic reason checks.  Does NOT mutate
+    the linked commitment/event lifecycle state.
+    """
+    from app.services.user_orientation import UserOrientationStore  # noqa: PLC0415
+
+    _err = check_write_scope(ctx)
+    if _err is not None:
+        raise ToolCallRejected({"error": _err})
+
+    store = UserOrientationStore(ctx.pool)
+
+    # Fetch and verify ownership before mutation.
+    item_current = await store.get_item(user_id=ctx.user.id, item_id=args.item_id)
+    if item_current is None:
+        raise ToolCallRejected(
+            {
+                "error": f"Orientation item {args.item_id} not found "
+                f"or not owned by user {ctx.user.id}",
+                "is_error": True,
+            }
+        )
+
+    # Resolve topic slugs if provided; otherwise inherit from item.
+    if args.topic_slugs is not None:
+        topic_slugs = resolve_write_topic_slugs(ctx, args.topic_slugs)
+        require_reason_for_cross_topic(
+            topic_slugs, ctx.primary_topic_slug, args.reason
+        )
+        topic_id_map = await resolve_topic_ids(ctx.pool, topic_slugs)
+        # Inherit topic_id from item — the link inherits the item's topic
+    else:
+        # Cross-topic enforcement: if the item lives on a different topic, require reason.
+        if (
+            item_current.topic_id is not None
+            and ctx.primary_topic_id is not None
+            and item_current.topic_id != ctx.primary_topic_id
+        ):
+            require_reason_for_cross_topic(
+                ["__cross_topic__"], ctx.primary_topic_slug, args.reason
+            )
+
+    started = _start()
+    link = await store.link_evidence(
+        user_id=ctx.user.id,
+        item_id=args.item_id,
+        target_table=args.target_table.value,
+        target_id=args.target_id,
+        relation=args.relation.value,
+        topic_id=item_current.topic_id,  # Inherit from the item
+        note=args.note,
+    )
+
+    result = LinkOrientationEvidenceOutput(
+        id=link.id,
+        item_id=link.item_id,
+        target_table=link.target_table,
+        target_id=link.target_id,
+        relation=link.relation,
+        created_at=link.created_at,
+    )
+    await _log_tool_call(ctx, "link_orientation_evidence", args, started, result)
     return result
 
 

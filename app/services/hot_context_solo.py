@@ -27,7 +27,6 @@ from app.services.hot_context import peek_other_topics
 from app.services.open_asks import _get_bot_asks, render_open_asks
 from app.services.partner_sharing import (
     get_partner_share,
-    has_dyad_partner,
     resolve_dyad_partner,
 )
 from app.services.topic_filter import join_artifact_topics
@@ -57,6 +56,7 @@ class HotContextSolo:
     partner_pregnancy_state: str | None = None
     fitness_block: str | None = None
     upcoming_items: list[dict[str, Any]] = field(default_factory=list)
+    compass_snapshot: Any | None = None  # CompassSnapshot | None, imported lazily
     bot_id: str = "coach"
 
 
@@ -381,6 +381,9 @@ async def build_hot_context_solo(
     primary_topic_id: UUID,
     bot_id: str,
     allow_cross_topic_peek: bool = False,
+    compass_enabled: bool = False,
+    allowed_compass_topic_slugs: frozenset[str] = frozenset(),
+    primary_topic_slug: str | None = None,
 ) -> HotContextSolo:
     """Build hot context for a solo bot turn.
 
@@ -940,6 +943,52 @@ async def build_hot_context_solo(
             # result in None (no fitness block)
             pass
 
+    # ── Compass orientation snapshot ──────────────────────────────────
+    compass_snapshot = None
+    if compass_enabled:
+        from app.services.compass import build_compass_snapshot as _build_compass
+        from app.services.tools.scope_guard import resolve_topic_ids as _resolve_ids
+        from app.services.user_orientation import UserOrientationStore
+
+        # Resolve allowed topic slugs from read scopes + primary binding.
+        # "own" → primary_topic_slug; "all" is rejected.
+        resolved_slugs: set[str] = set()
+        for slug in allowed_compass_topic_slugs:
+            if slug == "all":
+                raise ValueError(
+                    "compass_enabled: 'all' sentinel is not allowed in "
+                    "allowed_compass_topic_slugs"
+                )
+            if slug == "own":
+                if primary_topic_slug is None:
+                    raise ValueError(
+                        "compass_enabled: 'own' sentinel requires primary_topic_slug"
+                    )
+                resolved_slugs.add(primary_topic_slug)
+            else:
+                resolved_slugs.add(slug)
+
+        # Always bind the primary topic.
+        if primary_topic_slug is not None:
+            resolved_slugs.add(primary_topic_slug)
+
+        if not resolved_slugs:
+            raise ValueError(
+                "compass_enabled: no topic slugs resolved from "
+                "allowed_compass_topic_slugs + primary_topic_slug"
+            )
+
+        slug_list: list[str] = sorted(resolved_slugs)
+        topic_id_map = await _resolve_ids(pool, slug_list)
+        compass_topic_ids: frozenset[UUID] = frozenset(topic_id_map.values())
+
+        store = UserOrientationStore(pool)
+        compass_snapshot = await _build_compass(
+            store,
+            user_id=user.id,
+            topic_ids=compass_topic_ids,
+        )
+
     return HotContextSolo(
         current_user=current_user,
         partner_user=partner_user,
@@ -961,6 +1010,7 @@ async def build_hot_context_solo(
         partner_pregnancy_state=partner_pregnancy_state,
         fitness_block=fitness_block,
         upcoming_items=upcoming_items,
+        compass_snapshot=compass_snapshot,
         bot_id=bot_id,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
@@ -1145,6 +1195,7 @@ def _render_solo_with_counts(
     )
     if open_asks:
         lines += ["", open_asks]
+
     # ── Partner identity block (S1) ────────────────────────────────────
     # Identity-only by invariant 1: name, id, timezone, plus the
     # recipient-side per-bot partner_share. No memories, themes,
@@ -1198,6 +1249,14 @@ def _render_solo_with_counts(
         if body_text:
             lines.append(f"- body: {_clip(body_text, clip_limit)}")
         lines.append(f"- last_updated_at: {_clip(ts_iso, clip_limit)}")
+
+    # ── Compass (user orientation) ────────────────────────────────────
+    if hc.compass_snapshot is not None:
+        from app.services.compass import CompassRenderer
+
+        compass_md = CompassRenderer().render(hc.compass_snapshot)
+        if compass_md:
+            lines += ["", compass_md]
 
     if hc.upcoming_items:
         lines += ["", "## Upcoming reminders"]
@@ -1396,6 +1455,47 @@ def _estimated_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _trim_compass_snapshot(snapshot: Any) -> Any | None:
+    """Remove one CompassItem from *snapshot*, dropping from the least
+    important category first (completed_goals → active_goals →
+    anti_patterns → priorities → principles).  Returns a new
+    CompassSnapshot with one fewer item, or None when no items remain.
+    """
+    if snapshot is None:
+        return None
+
+    from app.services.compass import CompassSnapshot as CS
+
+    # Categories in drop order (least important first).
+    categories: list[tuple[str, str]] = [
+        ("completed_goals", "completed_goals"),
+        ("active_goals", "active_goals"),
+        ("anti_patterns", "anti_patterns"),
+        ("priorities", "priorities"),
+        ("principles", "principles"),
+    ]
+    kwargs: dict[str, Any] = {
+        "user_id": snapshot.user_id,
+        "topic_ids": snapshot.topic_ids,
+    }
+    dropped = False
+    for attr, kwarg in categories:
+        tup: tuple = getattr(snapshot, attr, ())
+        if tup and not dropped:
+            # Drop the last item from this category.
+            new_tup = tup[:-1]
+            dropped = True
+        else:
+            new_tup = tup
+        kwargs[kwarg] = new_tup
+    if not dropped:
+        return None  # Should not happen if is_empty was checked first
+    # If all categories are now empty, return None so rendering skips Compass.
+    if all(len(kwargs[k]) == 0 for _, k in categories):
+        return None
+    return CS(**kwargs)
+
+
 def render_hot_context_solo(hc: HotContextSolo) -> str:
     """Render a solo HotContextSolo as a string, respecting the token budget.
 
@@ -1424,6 +1524,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         partner_pregnancy_state=hc.partner_pregnancy_state,
         fitness_block=hc.fitness_block,
         upcoming_items=hc.upcoming_items,
+        compass_snapshot=hc.compass_snapshot,
         bot_id=hc.bot_id,
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
@@ -1431,13 +1532,29 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
     truncations = {
         "distillations": 0,
         "observations": 0,
+        "compass": 0,
         "memories": 0,
         "recent_messages": 0,
         "conversation_load": 0,
     }
     clip_limit = 240
     text = _render_solo_with_counts(working, truncations, clip_limit)
-    for name in ("distillations", "observations", "memories", "recent_messages"):
+    for name in ("distillations", "observations"):
+        items = getattr(working, name)
+        while _estimated_tokens(text) > budget and items:
+            items.pop()
+            truncations[name] += 1
+            text = _render_solo_with_counts(working, truncations, clip_limit)
+    # ── Compass truncation (after observations, before memories) ─────
+    while (
+        _estimated_tokens(text) > budget
+        and working.compass_snapshot is not None
+        and not working.compass_snapshot.is_empty
+    ):
+        working.compass_snapshot = _trim_compass_snapshot(working.compass_snapshot)
+        truncations["compass"] += 1
+        text = _render_solo_with_counts(working, truncations, clip_limit)
+    for name in ("memories", "recent_messages"):
         items = getattr(working, name)
         while _estimated_tokens(text) > budget and items:
             items.pop()
