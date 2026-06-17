@@ -24,9 +24,11 @@ def render_open_asks(asks: Sequence[OpenAsk], state: Mapping[str, Any]) -> str:
     lines = [
         "## Open asks",
         (
-            "Things you don't know yet that you need to find out from the user. "
-            "Work one in when there's a place to. One per turn. "
-            "If they deflect or change subject, drop it for this turn."
+            "The user's profile still has some empty headings. If it feels "
+            "natural in the conversation, briefly note what's missing and "
+            "invite the user to share. Do not turn this into a questionnaire, "
+            "do not force a question, and do not re-ask a heading the user "
+            "has skipped or deflected."
         ),
         "",
     ]
