@@ -231,6 +231,36 @@ async def test_respond_cap_no_prior_output_emergency_hop_fails_raises_respond_ca
     assert FAILURE_REASON_TO_CLASS["respond_cap_no_output"] == "retryable_pre_send"
 
 
+async def test_respond_rejected_tool_then_empty_text_raises_respond_cap_no_output(
+    app_env, monkeypatch
+):
+    """Invalid respond tools must not let the turn finalize as silent."""
+    ctx = _ctx(step="respond")
+    client = _ScriptedClient([_tool_use("create_orientation_item"), _text("")])
+
+    async def reject_tool(name, args, ctx):  # noqa: ARG001
+        return {
+            "error": f"step: tool {name} is not allowed in respond step",
+            "is_error": True,
+        }
+
+    monkeypatch.setattr(agentic, "call_tool", reject_tool)
+
+    with pytest.raises(RespondCapNoOutput) as excinfo:
+        await run_step(
+            client,
+            ctx,
+            "system",
+            "context",
+            {"send_message_part", "update_turn_plan"},
+            [{"role": "user", "content": "respond"}],
+            max_tool_iterations=4,
+        )
+
+    assert excinfo.value.failure_reason == "respond_cap_no_output"
+    assert ctx.extras["respond_had_rejected_tool"] is True
+
+
 # ── record / schedule caps ──────────────────────────────────────────────────
 
 @pytest.mark.parametrize("step", ["record", "schedule"])

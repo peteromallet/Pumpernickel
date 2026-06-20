@@ -809,6 +809,15 @@ def _step_allowed(ctx: TurnContext) -> set[str]:
     return allowed
 
 
+def allowed_tools_for_context(ctx: TurnContext) -> set[str]:
+    """Return the authoritative tool set for the current turn step.
+
+    This is the model-visible companion to ``call_tool``'s dispatch guard; keep
+    them aligned so providers are not shown tools the runner will later reject.
+    """
+    return _step_allowed(ctx)
+
+
 def _inject_consult_defaults(
     name: str, raw_args: dict[str, Any], ctx: TurnContext
 ) -> dict[str, Any]:

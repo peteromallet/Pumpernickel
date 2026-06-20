@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import os
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
 from app.bots.ids import SUPERPOM_BOT_ID
+from app.models.user import User
+from app.services.turn_context import TurnContext
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -36,6 +39,39 @@ def _clear_staging_bots() -> None:
     for bid in list(reg.BOT_SPECS):
         if bid != "mediator":
             del reg.BOT_SPECS[bid]
+
+
+def test_superpom_respond_model_tools_match_dispatch_policy() -> None:
+    """SuperPOM quick replies must not expose record-only or mediator tools."""
+    from app.bots.superpom import build_superpom_spec
+    from app.services.agentic import _allowed_tools_for_step
+
+    user_id = uuid4()
+    ctx = TurnContext(
+        turn_id=uuid4(),
+        pool=None,
+        user=User(
+            id=user_id,
+            name="TestUser",
+            phone="discord:123",
+            timezone="UTC",
+            onboarding_state="completed",
+        ),
+        partner=None,
+        triggering_message_ids=[],
+        bot_id=SUPERPOM_BOT_ID,
+        user_id=user_id,
+        bot_spec=build_superpom_spec(),
+        current_step="respond",
+        incremental_sending_enabled=True,
+    )
+
+    allowed = _allowed_tools_for_step(ctx)
+
+    assert "send_message_part" in allowed
+    assert "create_orientation_item" not in allowed
+    assert "create_conversation_plan" not in allowed
+    assert "update_conversation_plan" not in allowed
 
 
 # ── Staging registration (STAGING=1) ────────────────────────────────────

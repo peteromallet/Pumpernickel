@@ -51,7 +51,7 @@ from app.services.crypto import encrypt_value
 from app.services.scope import InboundScope
 from app.services.text_safety import clean_user_facing_text
 from app.services.tools.registry import (
-    STEP_ALLOWED_TOOLS,
+    allowed_tools_for_context,
     call_tool,
     _tool_error,
     to_anthropic_tools,
@@ -981,6 +981,7 @@ async def run_step(
     tool_call_count = 0
     tool_iteration_count = 0
     consecutive_recoverable_errors = 0
+    respond_had_rejected_tool = False
     # Active chain shrinks to (effective_provider,) once a fallback has occurred
     # so subsequent iterations of THIS run_step don't mix provider-native shapes.
     active_chain: tuple[str, ...] | None = (
@@ -1017,6 +1018,14 @@ async def run_step(
                 for block in content_blocks
                 if block.get("type") == "text" and str(block.get("text", "")).strip()
             )
+            if (
+                ctx.current_step == "respond"
+                and not final_text
+                and not ctx.sent_message_parts
+                and respond_had_rejected_tool
+            ):
+                ctx.extras["respond_had_rejected_tool"] = True
+                raise RespondCapNoOutput()
             return final_text, messages, tool_call_count
 
         tool_iteration_count += 1
@@ -1146,6 +1155,16 @@ async def run_step(
                 tool_call_count += 1
             result = await call_tool(tool_use["name"], tool_use.get("input") or {}, ctx)
             is_error = bool(result.get("is_error") or result.get("error"))
+            if (
+                ctx.current_step == "respond"
+                and is_error
+                and (
+                    str(result.get("error") or "").startswith("step: tool ")
+                    or str(result.get("error") or "").startswith("unknown tool:")
+                )
+            ):
+                respond_had_rejected_tool = True
+                ctx.extras["respond_had_rejected_tool"] = True
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -1758,9 +1777,7 @@ STEP_ITERATION_CAPS = {
 
 
 def _allowed_tools_for_step(ctx: TurnContext) -> set[str]:
-    allowed = set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | {
-        "update_turn_plan"
-    }
+    allowed = allowed_tools_for_context(ctx)
     if ctx.current_step == "respond" and not ctx.incremental_sending_enabled:
         allowed.discard("send_message_part")
     return allowed
@@ -2161,6 +2178,12 @@ async def _run_agentic(
                     assistant_text = ""
                 elif assistant_text:
                     assistant_text = clean_user_facing_text(assistant_text)
+                    if (
+                        not assistant_text
+                        and not responded_to_user
+                        and ctx.extras.get("respond_had_rejected_tool")
+                    ):
+                        raise RespondCapNoOutput()
                     reaction_emoji, assistant_text = _extract_reaction_directive(
                         assistant_text
                     )
