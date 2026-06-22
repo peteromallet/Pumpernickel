@@ -35,6 +35,7 @@ def _make_orientation_item(
     review_state: str = "reviewed",
     label: str = "Test item",
     detail: str | None = None,
+    target_date: dt_date | None = None,
     priority_rank: int | None = None,
 ) -> uo.OrientationItem:
     """Create a minimal OrientationItem for testing."""
@@ -53,7 +54,7 @@ def _make_orientation_item(
         detail=detail,
         started_at=None,
         effective_at=None,
-        target_date=None,
+        target_date=target_date,
         completed_at=None,
         closed_reason=None,
         outcome_note=None,
@@ -362,10 +363,14 @@ class TestBuildCompassSnapshot:
         assert completed_labels == {"Completed goal", "Retired goal"}
 
     async def test_all_kinds_are_grouped(self, user_id, topic_ids):
-        """All four kinds are correctly grouped."""
+        """All five kinds are correctly grouped."""
         principle = _make_orientation_item(
             user_id=user_id, topic_id=list(topic_ids)[0],
             kind="principle", label="P1",
+        )
+        manifestation = _make_orientation_item(
+            user_id=user_id, topic_id=list(topic_ids)[0],
+            kind="manifestation", label="M1", target_date=dt_date(2026, 8, 1),
         )
         goal = _make_orientation_item(
             user_id=user_id, topic_id=list(topic_ids)[0],
@@ -382,7 +387,7 @@ class TestBuildCompassSnapshot:
 
         store = MagicMock()
         store.list_items = AsyncMock(
-            return_value=[principle, goal, priority, anti]
+            return_value=[principle, manifestation, goal, priority, anti]
         )
         store.get_links = AsyncMock(return_value=[])
 
@@ -392,6 +397,8 @@ class TestBuildCompassSnapshot:
 
         assert len(snap.principles) == 1
         assert snap.principles[0].label == "P1"
+        assert len(snap.manifestations) == 1
+        assert snap.manifestations[0].label == "M1"
         assert len(snap.active_goals) == 1
         assert snap.active_goals[0].label == "G1"
         assert len(snap.priorities) == 1
@@ -571,6 +578,26 @@ class TestCompassRenderer:
         assert "### Priorities" in result
         assert "1. **Health first** (priority 1)" in result
 
+    def test_single_manifestation_with_date(self):
+        item = _make_orientation_item(
+            kind="manifestation",
+            label="Standing on the launch stage",
+            detail="The product is live and the room can feel it.",
+            target_date=dt_date(2026, 9, 30),
+        )
+        ci = CompassItem(item=item, links=())
+        snap = CompassSnapshot(
+            user_id=item.user_id,
+            topic_ids=frozenset([item.topic_id]),
+            manifestations=(ci,),
+        )
+        renderer = CompassRenderer()
+        result = renderer.render(snap)
+        assert "### Manifestations" in result
+        assert "- **Standing on the launch stage**" in result
+        assert "  - Detail: The product is live and the room can feel it." in result
+        assert "  - Manifest by: 2026-09-30" in result
+
     def test_priority_without_rank(self):
         item = _make_orientation_item(
             kind="priority", label="General priority", priority_rank=None,
@@ -729,6 +756,9 @@ class TestCompassRenderer:
     def test_all_sections_rendered_in_order(self):
         """Verify sections appear in the correct order."""
         p = _make_orientation_item(kind="principle", label="P")
+        m = _make_orientation_item(
+            kind="manifestation", label="M", target_date=dt_date(2026, 6, 1)
+        )
         pr = _make_orientation_item(kind="priority", label="Pr", priority_rank=1)
         ap = _make_orientation_item(kind="anti_pattern", label="AP")
         g = _make_orientation_item(kind="goal", status="active", label="G")
@@ -736,18 +766,20 @@ class TestCompassRenderer:
             user_id=p.user_id,
             topic_ids=frozenset([p.topic_id]),
             principles=(CompassItem(item=p, links=()),),
+            manifestations=(CompassItem(item=m, links=()),),
             priorities=(CompassItem(item=pr, links=()),),
             anti_patterns=(CompassItem(item=ap, links=()),),
             active_goals=(CompassItem(item=g, links=()),),
         )
         renderer = CompassRenderer()
         result = renderer.render(snap)
-        # Check ordering: Principles → Priorities → Anti-patterns → Active Goals.
+        # Check ordering: Principles → Manifestations → Priorities → Anti-patterns → Active Goals.
         pos_p = result.index("### Principles")
+        pos_m = result.index("### Manifestations")
         pos_pr = result.index("### Priorities")
         pos_ap = result.index("### Anti-patterns")
         pos_g = result.index("### Active Goals")
-        assert pos_p < pos_pr < pos_ap < pos_g
+        assert pos_p < pos_m < pos_pr < pos_ap < pos_g
 
     def test_empty_sections_are_omitted(self):
         """Sections with no items should not appear."""
@@ -760,6 +792,7 @@ class TestCompassRenderer:
         renderer = CompassRenderer()
         result = renderer.render(snap)
         assert "### Principles" in result
+        assert "### Manifestations" not in result
         assert "### Priorities" not in result
         assert "### Anti-patterns" not in result
         assert "### Active Goals" not in result

@@ -197,6 +197,7 @@ class PerspectiveTemplate(str, Enum):
 
 class OrientationKind(str, Enum):
     principle = "principle"
+    manifestation = "manifestation"
     goal = "goal"
     priority = "priority"
     anti_pattern = "anti_pattern"
@@ -2507,8 +2508,8 @@ class GetAdherenceOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Orientation tools — user-stated/reviewed principles, goals, priorities,
-# and anti-patterns.  Orientation is durable directional data distinct from
+# Orientation tools — user-stated/reviewed principles, manifestations, goals,
+# priorities, and anti-patterns. Orientation is durable directional data distinct from
 # memories (factual recall), observations (behaviour patterns),
 # distillations (tentative synthesis), commitments/events (execution
 # tracking), and OOB (boundary protection).
@@ -2616,7 +2617,7 @@ class CreateOrientationItemInput(BaseModel):
         description="Topic slugs for write scope resolution. The handler resolves exactly one topic_id.",
     )
     kind: OrientationKind = Field(
-        description="Kind of orientation: principle, goal, priority, or anti_pattern."
+        description="Kind of orientation: principle, manifestation, goal, priority, or anti_pattern."
     )
     label: str = Field(
         min_length=1,
@@ -2640,7 +2641,7 @@ class CreateOrientationItemInput(BaseModel):
     )
     target_date: dt_date | None = Field(
         default=None,
-        description="Target completion date for goals. For goals only.",
+        description="Target completion date for goals or manifest-by date for manifestations.",
     )
     supersedes_item_id: UUID | None = Field(
         default=None,
@@ -2660,6 +2661,8 @@ class CreateOrientationItemInput(BaseModel):
     def validate_kind_constraints(self) -> "CreateOrientationItemInput":
         if self.kind == OrientationKind.priority and self.priority_rank is None:
             raise ValueError("priority items require a priority_rank")
+        if self.kind == OrientationKind.manifestation and self.target_date is None:
+            raise ValueError("manifestation items require target_date")
         if (
             self.kind in (OrientationKind.principle, OrientationKind.anti_pattern)
             and self.priority_rank is not None

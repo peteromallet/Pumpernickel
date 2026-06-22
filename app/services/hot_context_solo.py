@@ -1492,7 +1492,7 @@ def _estimated_tokens(text: str) -> int:
 def _trim_compass_snapshot(snapshot: Any) -> Any | None:
     """Remove one CompassItem from *snapshot*, dropping from the least
     important category first (completed_goals → active_goals →
-    anti_patterns → priorities → principles).  Returns a new
+    anti_patterns → priorities → manifestations → principles). Returns a new
     CompassSnapshot with one fewer item, or None when no items remain.
     """
     if snapshot is None:
@@ -1506,6 +1506,7 @@ def _trim_compass_snapshot(snapshot: Any) -> Any | None:
         ("active_goals", "active_goals"),
         ("anti_patterns", "anti_patterns"),
         ("priorities", "priorities"),
+        ("manifestations", "manifestations"),
         ("principles", "principles"),
     ]
     kwargs: dict[str, Any] = {

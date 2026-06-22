@@ -23,8 +23,12 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 MIGRATION_NUMBER = "0060"
 UP_PATH = MIGRATIONS_DIR / f"{MIGRATION_NUMBER}_user_orientation.sql"
 DOWN_PATH = MIGRATIONS_DIR / f"{MIGRATION_NUMBER}_user_orientation.down.sql"
+MANIFESTATIONS_UP_PATH = MIGRATIONS_DIR / "0062_orientation_manifestations.sql"
+MANIFESTATIONS_DOWN_PATH = MIGRATIONS_DIR / "0062_orientation_manifestations.down.sql"
 UP_SQL = UP_PATH.read_text()
 DOWN_SQL = DOWN_PATH.read_text()
+MANIFESTATIONS_UP_SQL = MANIFESTATIONS_UP_PATH.read_text()
+MANIFESTATIONS_DOWN_SQL = MANIFESTATIONS_DOWN_PATH.read_text()
 
 
 def _compact(sql: str) -> str:
@@ -256,6 +260,30 @@ def test_0060_items_check_literals() -> None:
     assert (
         "check (supersedes_item_id is null or supersedes_item_id <> id)" in body
     )
+
+
+def test_0062_manifestations_widens_orientation_kind_check() -> None:
+    ddl = _ddl_only(MANIFESTATIONS_UP_SQL)
+    assert "drop constraint if exists user_orientation_items_kind_check" in ddl
+    assert (
+        "check (kind in ('principle', 'manifestation', 'goal', 'priority', 'anti_pattern'))"
+        in ddl
+    )
+    assert (
+        "add constraint user_orientation_items_manifestation_target_date_check"
+        in ddl
+    )
+    assert "check (kind <> 'manifestation' or target_date is not null)" in ddl
+
+
+def test_0062_down_restores_prior_orientation_kind_check() -> None:
+    ddl = _ddl_only(MANIFESTATIONS_DOWN_SQL)
+    assert (
+        "drop constraint if exists user_orientation_items_manifestation_target_date_check"
+        in ddl
+    )
+    assert "drop constraint if exists user_orientation_items_kind_check" in ddl
+    assert "check (kind in ('principle', 'goal', 'priority', 'anti_pattern'))" in ddl
 
 
 def test_0060_links_check_literals() -> None:

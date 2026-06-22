@@ -103,6 +103,13 @@ def test_prompt_has_exactly_seven_calibration_prefixes():
     assert count == 7, f"Expected 7 calibration prefixes, found {count}"
 
 
+def test_prompt_contains_manifestation_prefix_and_date_rule():
+    rendered = _rendered()
+    assert "SuperPOM - Manifestation:" in rendered
+    assert "manifestation" in rendered
+    assert "target_date" in rendered
+
+
 # ── Avoidance assertions (no ideal-self, shame, moral scoring, perfectionist) ──
 
 # Phrases that must NEVER appear in the prompt in any context.

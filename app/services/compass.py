@@ -2,7 +2,8 @@
 
 Compass is the product/service read layer for user orientation state. It
 provides a deterministic snapshot of a user's reviewed orientation items
-(principles, goals, priorities, anti-patterns) scoped to explicit topics.
+(principles, manifestations, goals, priorities, anti-patterns) scoped to
+explicit topics.
 
 This module owns Compass-specific snapshot/render logic while storage
 validation remains in ``UserOrientationStore``. No durable ``compass_*``
@@ -88,6 +89,7 @@ class CompassSnapshot:
 
     Items are grouped by kind for straightforward rendering:
       * ``principles``
+      * ``manifestations`` (date-bearing hoped-for moments)
       * ``priorities`` (sorted by priority_rank, then created_at)
       * ``anti_patterns``
       * ``active_goals`` (status == 'active')
@@ -100,6 +102,7 @@ class CompassSnapshot:
     user_id: UUID
     topic_ids: frozenset[UUID]
     principles: tuple[CompassItem, ...] = field(default_factory=tuple)
+    manifestations: tuple[CompassItem, ...] = field(default_factory=tuple)
     priorities: tuple[CompassItem, ...] = field(default_factory=tuple)
     anti_patterns: tuple[CompassItem, ...] = field(default_factory=tuple)
     active_goals: tuple[CompassItem, ...] = field(default_factory=tuple)
@@ -111,6 +114,7 @@ class CompassSnapshot:
         return not any(
             (
                 self.principles,
+                self.manifestations,
                 self.priorities,
                 self.anti_patterns,
                 self.active_goals,
@@ -123,6 +127,7 @@ class CompassSnapshot:
         """Total number of compass-visible items (for stats/logging)."""
         return (
             len(self.principles)
+            + len(self.manifestations)
             + len(self.priorities)
             + len(self.anti_patterns)
             + len(self.active_goals)
@@ -194,6 +199,7 @@ async def build_compass_snapshot(
 
     # ── Group by kind ────────────────────────────────────────────────
     principles: list[CompassItem] = []
+    manifestations: list[CompassItem] = []
     goals_active: list[CompassItem] = []
     goals_completed: list[CompassItem] = []
     priorities: list[CompassItem] = []
@@ -203,6 +209,8 @@ async def build_compass_snapshot(
         kind = ci.kind
         if kind == "principle":
             principles.append(ci)
+        elif kind == "manifestation":
+            manifestations.append(ci)
         elif kind == "goal":
             if ci.status == "active":
                 goals_active.append(ci)
@@ -224,6 +232,14 @@ async def build_compass_snapshot(
         )
     )
 
+    # Sort manifestations by target date first so near-horizon moments stay hot.
+    manifestations.sort(
+        key=lambda ci: (
+            ci.target_date or dt_date.max,
+            ci.item.created_at,
+        )
+    )
+
     # Sort goals by created_at for deterministic ordering.
     goals_active.sort(key=lambda ci: ci.item.created_at)
     goals_completed.sort(key=lambda ci: ci.item.created_at)
@@ -236,6 +252,7 @@ async def build_compass_snapshot(
         user_id=user_id,
         topic_ids=frozenset(topic_ids),
         principles=tuple(principles),
+        manifestations=tuple(manifestations),
         priorities=tuple(priorities),
         anti_patterns=tuple(anti_patterns),
         active_goals=tuple(goals_active),
@@ -289,6 +306,10 @@ class CompassRenderer:
         self._render_section(
             lines, "Principles", snapshot.principles,
             _renderer=self._render_generic_item,
+        )
+        self._render_section(
+            lines, "Manifestations", snapshot.manifestations,
+            _renderer=self._render_manifestation_item,
         )
         self._render_section(
             lines, "Priorities", snapshot.priorities,
@@ -355,6 +376,16 @@ class CompassRenderer:
         if rank is not None:
             return [f"1. **{label}** (priority {rank})"]
         return [f"1. **{label}**"]
+
+    @staticmethod
+    def _render_manifestation_item(item: CompassItem) -> list[str]:
+        """Render a date-bearing hoped-for moment."""
+        result: list[str] = [f"- **{item.label}**"]
+        if item.detail:
+            result.append(f"  - Detail: {item.detail}")
+        if item.target_date is not None:
+            result.append(f"  - Manifest by: {item.target_date.isoformat()}")
+        return result
 
     @staticmethod
     def _render_goal_item(item: CompassItem) -> list[str]:

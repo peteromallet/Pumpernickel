@@ -10,7 +10,7 @@ so assertions exercise handler logic without requiring a real database.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date as dt_date, datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -340,6 +340,24 @@ class TestOrientationEnumRejection:
         from tool_schemas import CreateOrientationItemInput
         with pytest.raises(ValidationError, match="priority items require a priority_rank"):
             CreateOrientationItemInput(kind="priority", label="Prio without rank")
+
+    def test_manifestation_without_target_date_rejected(self) -> None:
+        from tool_schemas import CreateOrientationItemInput
+        with pytest.raises(ValidationError, match="manifestation items require target_date"):
+            CreateOrientationItemInput(
+                kind="manifestation",
+                label="SuperPOM - Manifestation: launch day",
+            )
+
+    def test_manifestation_with_target_date_accepted(self) -> None:
+        from tool_schemas import CreateOrientationItemInput
+        args = CreateOrientationItemInput(
+            kind="manifestation",
+            label="SuperPOM - Manifestation: launch day",
+            target_date=dt_date(2026, 9, 30),
+        )
+        assert args.kind.value == "manifestation"
+        assert args.target_date == dt_date(2026, 9, 30)
 
     def test_principle_with_priority_rank_rejected(self) -> None:
         from tool_schemas import CreateOrientationItemInput

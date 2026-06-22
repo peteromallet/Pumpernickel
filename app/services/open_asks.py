@@ -211,9 +211,9 @@ _PREFIX_TO_KEY: dict[str, str] = {
 def _derive_superpom_calibration_state(compass_snapshot: Any | None) -> dict[str, bool]:
     """Derive SuperPOM calibration *_filled booleans from a CompassSnapshot.
 
-    Scans all Compass-visible items (principles, priorities, anti_patterns,
-    active_goals, completed_goals) for labels starting with the seven agreed
-    ``SuperPOM - ...:`` prefixes.  A slot is filled when at least one
+    Scans all Compass-visible items (principles, manifestations, priorities,
+    anti_patterns, active_goals, completed_goals) for labels starting with the
+    seven agreed ``SuperPOM - ...:`` prefixes. A slot is filled when at least one
     Compass-visible item carries the matching label prefix.
 
     Treats ``compass_snapshot=None`` as an empty snapshot (all False).
@@ -227,6 +227,7 @@ def _derive_superpom_calibration_state(compass_snapshot: Any | None) -> dict[str
     all_items: list[Any] = []
     for attr in (
         "principles",
+        "manifestations",
         "priorities",
         "anti_patterns",
         "active_goals",
@@ -257,4 +258,3 @@ def _first_missing_superpom_calibration_ask(
         if ask.open_if(state):
             return ask
     return None
-

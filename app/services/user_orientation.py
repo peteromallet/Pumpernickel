@@ -1,8 +1,8 @@
 """User Orientation store and validation contract.
 
 Implements the shared service layer consumed by tool handlers and Compass for
-reviewed user orientation state — principles, goals, priorities, and
-anti-patterns a participant has stated or confirmed.
+reviewed user orientation state — principles, manifestations, goals,
+priorities, and anti-patterns a participant has stated or confirmed.
 
 Storage contract (see migration 0060):
   * Three ``mediator.user_orientation_*`` tables.
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # ── Registries ───────────────────────────────────────────────────────────
 
 VALID_KINDS: frozenset[str] = frozenset(
-    {"principle", "goal", "priority", "anti_pattern"}
+    {"principle", "manifestation", "goal", "priority", "anti_pattern"}
 )
 
 VALID_STATUSES: frozenset[str] = frozenset(
@@ -90,15 +90,15 @@ _VERDICT_TO_STATUS: dict[str, str] = {
 
 # ── Kind-specific validation hooks ───────────────────────────────────────
 
-KindName = Literal["principle", "goal", "priority", "anti_pattern"]
+KindName = Literal["principle", "manifestation", "goal", "priority", "anti_pattern"]
 
 
 def _validate_kind_specific_fields(kind: str, kwargs: dict[str, Any]) -> None:
     """Enforce kind-specific constraints before SQL.
 
-    Principles and anti-patterns have no date/lifecycle semantics.  Goals track
-    started_at, target_date, completed_at, and outcome_note.  Priorities may
-    carry a priority_rank.
+    Principles and anti-patterns have no date/lifecycle semantics. Goals and
+    manifestations track target_date; goals also track started_at,
+    completed_at, and outcome_note. Priorities may carry a priority_rank.
     """
     if kind == "priority":
         rank = kwargs.get("priority_rank")
@@ -106,6 +106,8 @@ def _validate_kind_specific_fields(kind: str, kwargs: dict[str, Any]) -> None:
             raise ValueError(
                 f"priority_rank must be a positive integer or None, got {rank!r}"
             )
+    if kind == "manifestation" and kwargs.get("target_date") is None:
+        raise ValueError("manifestation items require target_date")
     if kind in ("principle", "anti_pattern"):
         # These kinds should not carry goal-specific lifecycle fields.
         # We warn but don't hard-reject — the CHECK constraints in the DB
@@ -220,6 +222,7 @@ def validate_create_params(
     label: str,
     status: str = "pending",
     review_state: str = "unreviewed",
+    target_date: dt_date | None = None,
 ) -> None:
     """Validate parameters for create_item before SQL.
 
@@ -265,7 +268,7 @@ def validate_create_params(
             "use close_item instead"
         )
 
-    _validate_kind_specific_fields(kind, {})
+    _validate_kind_specific_fields(kind, {"target_date": target_date})
 
 
 def validate_update_params(
@@ -805,11 +808,12 @@ class UserOrientationStore:
             label=label,
             status=status,
             review_state=review_state,
+            target_date=target_date,
         )
 
         _validate_kind_specific_fields(
             kind,
-            {"priority_rank": priority_rank},
+            {"priority_rank": priority_rank, "target_date": target_date},
         )
 
         now = datetime.now(timezone.utc)

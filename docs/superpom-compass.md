@@ -1,8 +1,9 @@
 # SuperPOM Compass runbook
 
 SuperPOM is a solo review-and-alignment bot. It helps the user surface what
-matters right now, compare it against existing goals and commitments, and pick
-one concrete next move. Compass is the read model: `app.services.compass`
+matters right now, compare it against existing manifestations, goals, and
+commitments, and pick one concrete next move. Compass is the read model:
+`app.services.compass`
 aggregates `mediator.user_orientation_items` into a prioritized, reviewable
 view that SuperPOM consumes instead of inventing its own state.
 
@@ -21,6 +22,8 @@ app.services.user_orientation  ──►  app.services.compass
 - **Orientation storage** (`migrations/0060_user_orientation.sql`): one row per
   orientation item. Fields include `label`, `detail`, `kind`, `source`,
   `status`, `review_state`, `owner_user_id`, `bot_id`, and timestamps.
+  Migration `0062_orientation_manifestations.sql` widens `kind` with
+  `manifestation`, which uses `target_date` as its manifest-by date.
 - **Compass read model** (`app/services/compass.py`): builds a snapshot for a
   user/bot scope, grouping items by status and priority so the bot sees a
   curated summary rather than raw rows.
@@ -37,18 +40,21 @@ app.services.user_orientation  ──►  app.services.compass
    understand the current state before proposing anything.
 3. **One concrete next move.** End useful turns with a single actionable step,
    not a multi-step plan or generic coaching essay.
-4. **Review and correction.** When the user corrects an item, use
+4. **Manifestations are dated moments.** When the user names a specific
+   hoped-for future moment, create an orientation item with
+   `kind='manifestation'` and `target_date`.
+5. **Review and correction.** When the user corrects an item, use
    `review_orientation_item` to update `review_state` rather than silently
    editing storage.
-5. **Provisional `bot_proposed` state.** Items suggested by the bot are created
+6. **Provisional `bot_proposed` state.** Items suggested by the bot are created
    with `status='bot_proposed'` and require explicit user acceptance before
    becoming `active`.
-6. **Completed-goal rendering.** Finished items are surfaced in summaries so the
+7. **Completed-goal rendering.** Finished items are surfaced in summaries so the
    user sees progress without the bot congratulating itself.
-7. **Shame / perfectionism guardrails.** Avoid moral scoring, ideal-self
+8. **Shame / perfectionism guardrails.** Avoid moral scoring, ideal-self
    impersonation, or sprawling advice. Name the pattern, then ask what the user
    wants to do next.
-8. **Generic-advice avoidance.** SuperPOM differs from Coach: it does not hand
+9. **Generic-advice avoidance.** SuperPOM differs from Coach: it does not hand
    out domain playbooks; it orients the user around their own Compass state.
 
 ## Privacy and safety rules
