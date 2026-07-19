@@ -15,10 +15,10 @@ def _client() -> TestClient:
 # ── OAuth callback HEAD ──────────────────────────────────────────────
 
 
-def test_oauth_callback_head_returns_204() -> None:
+def test_oauth_callback_head_returns_200() -> None:
     """Withings probes this URL before showing it to the user."""
     response = _client().head("/api/health/devices/withings/oauth/callback")
-    assert response.status_code == 204
+    assert response.status_code == 200
 
 
 # ── OAuth callback GET (fail-closed, no secret reflection) ───────────
@@ -65,10 +65,10 @@ def test_oauth_callback_get_ignores_error_params() -> None:
 # ── Notifications HEAD ───────────────────────────────────────────────
 
 
-def test_notifications_head_returns_204() -> None:
+def test_notifications_head_returns_200() -> None:
     """Withings validates URL reachability."""
     response = _client().head("/api/health/devices/withings/notifications")
-    assert response.status_code == 204
+    assert response.status_code == 200
 
 
 # ── Notifications POST (fail-closed, no body reflection) ─────────────

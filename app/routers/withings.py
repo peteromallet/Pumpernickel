@@ -29,7 +29,7 @@ _NOT_IMPLEMENTED_BODY = {
 @router.head("/api/health/devices/withings/oauth/callback")
 async def oauth_callback_head() -> Response:
     """URL validation — Withings checks reachability before first use."""
-    return Response(status_code=204)
+    return Response(status_code=200)
 
 
 @router.get("/api/health/devices/withings/oauth/callback")
@@ -47,7 +47,7 @@ async def oauth_callback_get() -> JSONResponse:
 @router.head("/api/health/devices/withings/notifications")
 async def notifications_head() -> Response:
     """URL validation — Withings checks reachability before first use."""
-    return Response(status_code=204)
+    return Response(status_code=200)
 
 
 @router.post("/api/health/devices/withings/notifications")
