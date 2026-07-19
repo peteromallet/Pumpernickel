@@ -22,7 +22,14 @@ from app.config import Settings, get_settings
 from app.bots.ids import MEDIATOR_BOT_ID
 from app.db import db_lifespan
 from app.models.user import User
-from app.routers import admin, auth_magic_link, health, live_voice, whatsapp as whatsapp_router
+from app.routers import (
+    admin,
+    auth_magic_link,
+    health,
+    live_voice,
+    whatsapp as whatsapp_router,
+    withings,
+)
 from app.services import agentic, discord, hooks, whatsapp
 from app.services.agentic import run_agentic_turn, run_agentic_turn_with_metadata
 from app.services.coalescer_registry import CoalescerRegistry
@@ -530,6 +537,7 @@ app.include_router(admin.router)
 app.include_router(whatsapp_router.router)
 app.include_router(live_voice.router)
 app.include_router(auth_magic_link.router)
+app.include_router(withings.router)
 
 
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)

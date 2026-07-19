@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     openai_api_key: SecretStr
     groq_api_key: SecretStr
+    withings_client_id: SecretStr | None = None
+    withings_client_secret: SecretStr | None = None
+    withings_callback_url: str = ""
+    withings_api_endpoint: str = "https://wbsapi.withings.net"
+    withings_access_token: SecretStr | None = None
+    withings_refresh_token: SecretStr | None = None
     whatsapp_token: SecretStr = SecretStr("")
     whatsapp_bearer_token: SecretStr | None = None
     whatsapp_phone_number_id: str = ""
