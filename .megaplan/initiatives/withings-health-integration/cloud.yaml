@@ -1,0 +1,32 @@
+provider: ssh
+repo:
+  url: https://github.com/peteromallet/Pumpernickel.git
+  branch: main
+  workspace: /workspace/withings-health-integration/Pumpernickel
+agents:
+  default: codex
+codex:
+  model: gpt-5.4
+  reasoning: high
+mode: idle
+chain:
+  spec: /workspace/withings-health-integration/Pumpernickel/.megaplan/initiatives/withings-health-integration/chain.yaml
+megaplan:
+  ref: editible-install
+  codex_auth: chatgpt
+  repo: https://github.com/peteromallet/Arnold.git
+  src_path: /workspace/arnold
+resources:
+  volume: agent-volume
+  port: 8080
+ssh:
+  host: 159.69.51.216
+  user: root
+  port: 22
+  remote_dir: /opt/megaplan-cloud/deploy
+  workspace_dir: /opt/megaplan-cloud/workspace
+  container: megaplan-cloud-agent
+chain_session: withings-health-integration
+# Credentials are managed on the shared worker. Listing names here would upload
+# local values during deploy and could overwrite the worker's durable settings.
+secrets: []

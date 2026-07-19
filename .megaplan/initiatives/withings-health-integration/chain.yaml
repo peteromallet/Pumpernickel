@@ -1,0 +1,52 @@
+base_branch: main
+anchors:
+  north_star: NORTHSTAR.md
+milestones:
+- label: m1
+  idea: .megaplan/initiatives/withings-health-integration/briefs/m1.md
+  branch: epic/withings-health/m1
+  profile: partnered-5
+  vendor: codex
+  robustness: full
+  depth: medium
+  with_prep: true
+  prep_direction: Verify the existing security, migration, worker, webhook, and auth seams; resolve exact Withings contract details from the copied decision document and official schemas, but keep execution credential-free.
+  notes: 'Overall plan difficulty: 5/5; selected profile: partnered-5; because OAuth state, encrypted rotating tokens, RLS health schemas, webhook ingestion, and transaction-safe cursors create security and data failures that happy-path tests could miss.'
+- label: m2
+  idea: .megaplan/initiatives/withings-health-integration/briefs/m2.md
+  branch: epic/withings-health/m2
+  profile: partnered-5
+  vendor: codex
+  robustness: full
+  depth: medium
+  with_prep: true
+  prep_direction: Focus on Withings measurement exponent decoding, grouped readings, sleep summary revision/completed semantics, timezone/DST handling, and existing Hector read-model limitations.
+  notes: 'Overall plan difficulty: 5/5; selected profile: partnered-5; because mutable measurements and sleep sessions cross revision, deletion, capability, timezone/DST, prompt-budget, and privacy boundaries, so a locally passing plan could silently corrupt trends or expose health data.'
+- label: m3
+  idea: .megaplan/initiatives/withings-health-integration/briefs/m3.md
+  branch: epic/withings-health/m3
+  profile: partnered-5
+  vendor: codex
+  robustness: full
+  depth: medium
+  notes: 'Overall plan difficulty: 5/5; selected profile: partnered-5; because projection into canonical adherence and events must remain exact-once, reversible, type-safe, and non-destructive to manual testimony under retries and ambiguity.'
+- label: m4
+  idea: .megaplan/initiatives/withings-health-integration/briefs/m4.md
+  branch: epic/withings-health/m4
+  profile: partnered-5
+  vendor: codex
+  robustness: full
+  depth: medium
+  notes: 'Overall plan difficulty: 5/5; selected profile: partnered-5; because deletion/export completeness, privacy-safe observability, rollback order, synthetic proof, and staged release gates can appear green while leaving orphaned health data or an unsafe production path.'
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+merge_policy: auto
+driver:
+  robustness: full
+  phase_timeout: 10800
+  auto_approve: true
+  on_escalate: abort
+  max_iterations: 60
+  poll_sleep: 8.0
