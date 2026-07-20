@@ -1,9 +1,9 @@
 # Retrieval Evaluation Report
 
 - **Adapter:** IlikeBaselineRetriever
-- **Corpus:** /Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/corpus.yaml
-- **Golden Set:** /Users/peteromalley/Documents/Pumpernickel-superpom-run/eval/retrieval/golden_set.yaml
-- **Generated:** 2026-06-15T14:55:46.310426+00:00
+- **Corpus:** /workspace/withings-health-sync-20260719/Pumpernickel/eval/retrieval/corpus.yaml
+- **Golden Set:** /workspace/withings-health-sync-20260719/Pumpernickel/eval/retrieval/golden_set.yaml
+- **Generated:** 2026-07-20T17:47:57.742312+00:00
 - **Cases:** 80
 
 ## Overall Metrics
