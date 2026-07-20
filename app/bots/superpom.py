@@ -50,12 +50,18 @@ SUPERPOM_READ_INSTRUCTION = (
     "this topic before reading anything else. The Compass is your primary "
     "orientation source and must be consulted first every turn. After the "
     "Compass, gather only the context needed for this SuperPOM turn from "
-    "memory, observations, and the hot context. For durable routine "
+    "memory, observations, distillations, and the hot context. For durable routine "
     "constraints, timing, recurring blockers, or tactics that might need "
     "recording later, read existing `get_memories` and/or `get_observations` "
-    "first. Do not repeat a read tool that already returned enough context "
-    "or an empty result; move on to the response instead. Do not write "
-    "durable state or send user-facing text from this step."
+    "first. Reflection evidence is available via `list_reflections`, "
+    "`get_reflection`, and `search_reflections` — treat reflections as "
+    "historical evidence, distinct from memories, observations, and "
+    "distillations. Retrieve reflection history on demand when the user "
+    "asks about past reflective content or when a recent reflection digest "
+    "in the hot context needs more detail. Do not repeat a read tool that "
+    "already returned enough context or an empty result; move on to the "
+    "response instead. Do not write durable state or send user-facing text "
+    "from this step."
 )
 
 SUPERPOM_CONSULT_INSTRUCTION = (
@@ -94,16 +100,22 @@ SUPERPOM_RECORD_INSTRUCTION = (
     "durable writes, prefer updating or reinforcing an existing row over "
     "creating a duplicate, and skip writes when there is no useful future "
     "context to preserve. Do not send user-facing text from this step. "
-    "Do not use reflection tools (list_reflections, get_reflection, "
-    "finalize_reflection, correct_reflection) — reflection capture runs "
-    "automatically outside the turn and should not be duplicated here."
+    "Do not use reflection write tools (finalize_reflection, "
+    "correct_reflection) — reflection capture and corrections run through "
+    "existing automated services and should not be duplicated here. "
+    "Reflection read tools (list_reflections, get_reflection, "
+    "search_reflections) are available in the Read step for evidence "
+    "retrieval."
 )
 
 SUPERPOM_SCHEDULE_INSTRUCTION = (
     "Schedule step: create a follow-up or scheduled check-in only when it "
     "would clearly help the user's reflection practice survive the week. "
     "Read existing tasks or check-ins first when duplication is plausible. "
-    "Do not send user-facing text from this step."
+    "Do not schedule follow-ups or create tasks from open loops found in "
+    "reflection evidence — open loops are informational markers, not "
+    "actionable items. Reflection capture and closure run automatically "
+    "outside the turn. Do not send user-facing text from this step."
 )
 
 SUPERPOM_DONE_INSTRUCTION = (
@@ -139,6 +151,12 @@ SUPERPOM_STEP_INSTRUCTIONS = {
 # create_orientation_item, update_orientation_item, review_orientation_item,
 # close_orientation_item, link_orientation_evidence) are KEPT — they are
 # SuperPOM's core tool surface.
+#
+# Reflection read/search tools (list_reflections, get_reflection,
+# search_reflections) are KEPT — they provide evidence retrieval for
+# past reflective content. Reflection write tools (finalize_reflection,
+# correct_reflection) are EXCLUDED — capture and corrections run through
+# existing automated services.
 
 _SUPERPOM_EXCLUSIONS = frozenset({
     # dyad / bridge / partner nudges (SuperPOM is solo)
@@ -171,9 +189,7 @@ _SUPERPOM_EXCLUSIONS = frozenset({
     "update_conversation_plan",
     # coach-only
     "set_topic_status",
-    # reflection tools (capture runs automatically; internals stay hidden)
-    "list_reflections",
-    "get_reflection",
+    # reflection write tools (capture + corrections run through existing services)
     "finalize_reflection",
     "correct_reflection",
 })
@@ -187,6 +203,9 @@ def build_superpom_spec() -> BotSpec:
     full dispatch table minus tools that belong to other bot domains (dyad,
     pregnancy, commitment/event, live-plan, coach topic-status).
     Orientation tools are kept — they are SuperPOM's core surface.
+    Reflection read/search tools (list_reflections, get_reflection,
+    search_reflections) are kept for evidence retrieval; reflection write
+    tools (finalize_reflection, correct_reflection) are excluded.
     """
     from app.services.tools.registry import TOOL_DISPATCH  # noqa: PLC0415
 

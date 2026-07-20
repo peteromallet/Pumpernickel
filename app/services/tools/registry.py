@@ -172,9 +172,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "list_conversation_plans": "List the user's recent planned live-voice conversations (status prepping / preparing / ready). Use to orient before proposing a new plan or looking up an existing one.",
     "create_conversation_plan": "Propose a numbered agenda for an upcoming live-voice conversation. The numbered bullets you propose become the agenda; only call create after the user has explicitly confirmed the list. Returns a display_text rendering for spoken confirmation.",
     "update_conversation_plan": "Replace the agenda items for an existing planned live-voice conversation. The numbered bullets you propose become the new agenda; only call update after the user has explicitly confirmed the revised list. Preserves the conversation's mode unless you also supply a new prep_summary.",
-    # reflection tools (M2)
+    # reflection tools (M2/M3)
     "list_reflections": "List reflection entries for the current user, optionally filtered by bot, topic, or session. Returns compact summaries by default — full detail (including source messages and internal classification metadata) is only returned when the user explicitly asks for it via include_internals=true. Use this before calling get_reflection or correct_reflection to find the entry you need.",
     "get_reflection": "Fetch a single reflection entry by its UUID. Always returns source message IDs. Internal classification metadata and structured payload fields are only returned when include_internals=true (set only when the user explicitly asks for internal detail). Use this to inspect a specific reflection before correcting it.",
+    "search_reflections": "Search your reflection history using keyword and semantic retrieval. Returns compact, provenance-oriented hits — entry metadata and source message IDs — by default. Full internal detail (plaintext, classification metadata) is only returned when include_internals=true. Deferred and rejected reflection candidates are excluded from search; they only appear through explicit list_reflections. Use this to find relevant past reflections by topic, phase, or content before drilling into one with get_reflection.",
     "finalize_reflection": "Explicitly finalize a collecting reflection session. The session must be owned by the calling user and in 'collecting' status. Finalization transitions it to 'finalizing' so it can be claimed and processed by the normalization worker. Use this when the user explicitly says they are done reflecting on a topic.",
     "correct_reflection": "Create an append-only correction to an existing reflection entry. The original entry is NEVER mutated — a new revision row is created that supersedes the prior one. Only the entry owner can correct. The canonical raw evidence (source_message_ids) of the original entry remains unchanged. Use this when the user says a reflection was wrong or needs updating.",
 }
@@ -273,9 +274,10 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "list_conversation_plans": read_tools.list_conversation_plans,
     "create_conversation_plan": write_tools.create_conversation_plan,
     "update_conversation_plan": write_tools.update_conversation_plan,
-    # reflection tools (M2)
+    # reflection tools (M2/M3)
     "list_reflections": reflection_tools.list_reflections,
     "get_reflection": reflection_tools.get_reflection,
+    "search_reflections": reflection_tools.search_reflections,
     "finalize_reflection": reflection_tools.finalize_reflection,
     "correct_reflection": reflection_tools.correct_reflection,
 }
@@ -413,9 +415,10 @@ READ_PHASE_TOOLS = {
     # orientation read tools
     "list_orientation_items",
     "get_orientation_item",
-    # reflection read tools (M2)
+    # reflection read tools (M2/M3)
     "list_reflections",
     "get_reflection",
+    "search_reflections",
 } | PLAN_READ_TOOLS
 
 WRITE_PHASE_TOOLS = {

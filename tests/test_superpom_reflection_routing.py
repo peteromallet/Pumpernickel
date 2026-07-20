@@ -1,8 +1,8 @@
 """T17 — SuperPOM reflection routing and prompt integration tests.
 
 Verifies:
-- Reflection tools excluded from SuperPOM allowlist
-- Prompt profile hides internals, avoids proactive invitations
+- Reflection write tools excluded from SuperPOM allowlist; read/search tools allowed
+- Prompt profile includes reflection read tools as evidence, avoids proactive invitations
 - pick_default_skeleton routes likely reflections to "standard" skeleton
 - Non-reflection SuperPOM messages keep original skeleton selection
 - Other bots are unaffected by reflection routing
@@ -20,20 +20,33 @@ from app.services.turn_plan import pick_default_skeleton
 # ── Tool allowlist tests ──────────────────────────────────────────────────
 
 
-def test_superpom_spec_excludes_reflection_tools():
-    """Reflection tools must not be in SuperPOM's allowlist."""
+def test_superpom_spec_excludes_reflection_write_tools():
+    """Reflection write tools must not be in SuperPOM's allowlist."""
     spec = build_superpom_spec()
     assert spec.tool_allowlist is not None
-    excluded = {
-        "list_reflections",
-        "get_reflection",
+    excluded_write = {
         "finalize_reflection",
         "correct_reflection",
     }
-    for tool_name in excluded:
+    for tool_name in excluded_write:
         assert tool_name not in spec.tool_allowlist, (
-            f"Reflection tool {tool_name!r} should be excluded from "
+            f"Reflection write tool {tool_name!r} should be excluded from "
             f"SuperPOM allowlist but was found"
+        )
+
+
+def test_superpom_spec_includes_reflection_read_tools():
+    """Reflection read/search tools must be in SuperPOM's allowlist."""
+    spec = build_superpom_spec()
+    assert spec.tool_allowlist is not None
+    included_read = {
+        "list_reflections",
+        "get_reflection",
+        "search_reflections",
+    }
+    for tool_name in included_read:
+        assert tool_name in spec.tool_allowlist, (
+            f"Reflection read tool {tool_name!r} must be in SuperPOM allowlist"
         )
 
 
@@ -80,19 +93,33 @@ def _rendered_prompt(assistant_name: str = "SuperPOM", user_name: str = "TestUse
     return render_profile(PROFILE, assistant_name=assistant_name, user_name=user_name)
 
 
-def test_prompt_does_not_mention_reflection_tools():
-    """The prompt must not mention reflection tool names — internals stay hidden."""
+def test_prompt_does_not_mention_reflection_write_tools():
+    """The prompt must not mention reflection write tool names — internals stay hidden.
+
+    Read tools (list_reflections, get_reflection, search_reflections) are now
+    exposed as evidence retrieval tools and may appear in the prompt.
+    """
     rendered = _rendered_prompt()
-    forbidden = [
-        "list_reflections",
-        "get_reflection",
+    forbidden_write = [
         "finalize_reflection",
         "correct_reflection",
     ]
-    for tool in forbidden:
+    for tool in forbidden_write:
         assert tool not in rendered, (
-            f"Reflection tool {tool!r} must not appear in the SuperPOM prompt"
+            f"Reflection write tool {tool!r} must not appear in the SuperPOM prompt"
         )
+
+
+def test_prompt_mentions_reflection_read_tools():
+    """The prompt should mention reflection read tools as evidence retrieval."""
+    rendered = _rendered_prompt()
+    # At least one of the read tools should be mentioned
+    read_tools = ["list_reflections", "get_reflection", "search_reflections"]
+    found = [t for t in read_tools if t in rendered]
+    assert len(found) > 0, (
+        f"Expected at least one reflection read tool in prompt, "
+        f"found none of {read_tools}"
+    )
 
 
 def test_prompt_does_not_proactively_invite_reflections():
@@ -130,13 +157,13 @@ def _check_not_proactive(rendered: str, phrase: str) -> None:
     )
 
 
-def test_prompt_mentions_reflection_capture_is_automatic():
-    """The prompt should note that reflection capture is automatic and silent."""
+def test_prompt_mentions_reflection_evidence_is_available():
+    """The prompt should note that reflection evidence is retrievable but automatic."""
     rendered = _rendered_prompt()
-    assert "Reflection capture is automatic" in rendered, (
-        "Prompt should state that reflection capture is automatic"
+    assert "Reflection evidence is available" in rendered, (
+        "Prompt should state that reflection evidence is available"
     )
-    assert "do not need to trigger" in rendered.lower() or (
+    assert "automatically captures" in rendered.lower() or (
         "Do not invite" in rendered
     )
 
@@ -336,23 +363,26 @@ def test_no_bot_id_no_reflection_routing():
 # ── RECORD step instruction tests ─────────────────────────────────────────
 
 
-def test_record_step_instruction_warns_against_reflection_tools():
-    """The RECORD step instruction tells the bot not to use reflection tools."""
+def test_record_step_instruction_warns_against_reflection_write_tools():
+    """The RECORD step instruction tells the bot not to use reflection write tools.
+
+    Read tools (list_reflections, get_reflection, search_reflections) are
+    now allowed in the Read step.
+    """
     from app.bots.superpom import SUPERPOM_RECORD_INSTRUCTION
 
-    assert "Do not use reflection tools" in SUPERPOM_RECORD_INSTRUCTION
-    assert "list_reflections" in SUPERPOM_RECORD_INSTRUCTION
-    assert "capture runs automatically" in SUPERPOM_RECORD_INSTRUCTION
-    assert "should not be duplicated" in SUPERPOM_RECORD_INSTRUCTION
+    assert "Do not use reflection write tools" in SUPERPOM_RECORD_INSTRUCTION
+    assert "finalize_reflection" in SUPERPOM_RECORD_INSTRUCTION
+    assert "correct_reflection" in SUPERPOM_RECORD_INSTRUCTION
+    assert "capture and corrections run" in SUPERPOM_RECORD_INSTRUCTION.lower()
+    assert "read tools" in SUPERPOM_RECORD_INSTRUCTION.lower()
 
 
 def test_respond_step_unchanged():
     """The RESPOND step instruction remains unchanged — no internals leaked."""
     from app.bots.superpom import SUPERPOM_RESPOND_INSTRUCTION
 
-    # Must not mention reflection tools or internals
-    assert "list_reflections" not in SUPERPOM_RESPOND_INSTRUCTION
-    assert "get_reflection" not in SUPERPOM_RESPOND_INSTRUCTION
+    # Must not mention reflection write tools or internals
     assert "finalize_reflection" not in SUPERPOM_RESPOND_INSTRUCTION
     assert "correct_reflection" not in SUPERPOM_RESPOND_INSTRUCTION
     assert "classification" not in SUPERPOM_RESPOND_INSTRUCTION.lower()
@@ -386,3 +416,194 @@ def test_schedule_step_unchanged():
     assert "schedule a reflection" not in lowered
     assert "set up a reflection" not in lowered
     assert "start a reflection" not in lowered
+
+
+# ── Natural correction behavior tests ─────────────────────────────────────
+
+
+def test_prompt_states_corrections_run_through_automated_services():
+    """Prompt must state that reflection corrections run through automated services, not SuperPOM."""
+    rendered = _rendered_prompt()
+    # Account for possible line-wrapping in the rendered output
+    assert "corrections run through" in rendered, (
+        "Prompt must state corrections run through automated services"
+    )
+    assert "existing automated" in rendered, (
+        "Prompt must reference existing automated services for corrections"
+    )
+    assert "not through your turn" in rendered, (
+        "Prompt must forbid SuperPOM from running corrections in its turn"
+    )
+
+
+def test_record_step_states_corrections_run_automatically():
+    """RECORD step must state reflection capture and corrections run automatically."""
+    from app.bots.superpom import SUPERPOM_RECORD_INSTRUCTION
+
+    assert "corrections run through" in SUPERPOM_RECORD_INSTRUCTION, (
+        "RECORD step must mention corrections run through automated path"
+    )
+    assert "existing automated services" in SUPERPOM_RECORD_INSTRUCTION, (
+        "RECORD step must reference existing automated services for corrections"
+    )
+
+
+def test_prompt_does_not_instruct_superpom_to_correct_reflections():
+    """Prompt must never tell SuperPOM to use correct_reflection itself."""
+    rendered = _rendered_prompt()
+    assert "correct_reflection" not in rendered, (
+        "SuperPOM prompt must not mention correct_reflection — corrections are automated"
+    )
+
+
+# ── Memory / observation separation tests ────────────────────────────────
+
+
+def test_prompt_separates_reflections_from_memories():
+    """Prompt must explicitly separate reflections from memories."""
+    rendered = _rendered_prompt()
+    assert "distinct from memories" in rendered, (
+        "Prompt must state reflections are distinct from memories"
+    )
+
+
+def test_prompt_separates_reflections_from_observations():
+    """Prompt must explicitly separate reflections from observations."""
+    rendered = _rendered_prompt()
+    assert "distinct from memories" in rendered  # same phrase covers both
+    # The operating principles should explicitly call out observations
+    op_principles_section = rendered.split("# Operating Principles")[1] if "# Operating Principles" in rendered else rendered
+    # Knowledge primitives section also covers this
+    assert "NOT memories" in rendered or "NOT memory facts" in rendered or "distinct from memories" in rendered, (
+        "Prompt must make clear reflections are NOT memories"
+    )
+
+
+def test_knowledge_primitives_distinguishes_reflections():
+    """Knowledge Primitives section must list reflections as a separate category."""
+    rendered = _rendered_prompt()
+    lowered = rendered.lower()
+    # The Knowledge Primitives section must include reflections as distinct
+    assert "reflections" in lowered
+    # Must explicitly state reflections are not memories
+    assert "not memories" in lowered, (
+        "Knowledge Primitives section must state reflections are NOT memories"
+    )
+    # Must mention reflections as a knowledge category alongside other primitives
+    assert "**reflections**" in lowered, (
+        "Knowledge Primitives must list Reflections as a distinct bold category"
+    )
+
+
+def test_operating_principle_seven_separates_reflections():
+    """Operating principle 7 must separate reflections from memories/observations/distillations."""
+    rendered = _rendered_prompt()
+    assert "distinct from memories" in rendered, (
+        "Operating principle 7 must explicitly separate reflections from memories"
+    )
+    assert "observations" in rendered, (
+        "Operating principle 7 must mention observations in separation context"
+    )
+    assert "distillations" in rendered, (
+        "Operating principle 7 must mention distillations in separation context"
+    )
+
+
+# ── Refusal to schedule / create tasks from open loops ────────────────────
+
+
+def test_schedule_step_rejects_open_loops_from_reflection_evidence():
+    """SCHEDULE step must explicitly prohibit scheduling follow-ups or tasks from reflection open loops."""
+    from app.bots.superpom import SUPERPOM_SCHEDULE_INSTRUCTION
+
+    assert "Do not schedule follow-ups or create tasks from open loops" in SUPERPOM_SCHEDULE_INSTRUCTION, (
+        "SCHEDULE step must forbid scheduling from reflection open loops"
+    )
+    assert "open loops are informational markers, not actionable items" in SUPERPOM_SCHEDULE_INSTRUCTION.lower(), (
+        "SCHEDULE step must explain open loops are informational, not actionable"
+    )
+    assert "reflection evidence" in SUPERPOM_SCHEDULE_INSTRUCTION.lower(), (
+        "SCHEDULE step must reference reflection evidence context"
+    )
+
+
+def test_schedule_step_states_closure_runs_automatically():
+    """SCHEDULE step must state reflection capture and closure run automatically outside the turn."""
+    from app.bots.superpom import SUPERPOM_SCHEDULE_INSTRUCTION
+
+    assert "capture and closure run automatically" in SUPERPOM_SCHEDULE_INSTRUCTION.lower(), (
+        "SCHEDULE step must state reflection capture and closure run automatically"
+    )
+    assert "outside the turn" in SUPERPOM_SCHEDULE_INSTRUCTION.lower(), (
+        "SCHEDULE step must clarify these run outside the turn"
+    )
+
+
+def test_prompt_rejects_scheduling_from_open_loops():
+    """Prompt must not suggest scheduling anything from reflection open loops."""
+    rendered = _rendered_prompt().lower()
+    # The prompt should never suggest scheduling follow-ups from reflections
+    assert "schedule" not in rendered or "schedule" in rendered, (
+        "Prompt must not have contradictory scheduling language"
+    )
+    # Check that open loops are not presented as actionable
+    if "open loop" in rendered:
+        nearby_idx = rendered.find("open loop")
+        nearby = rendered[max(0, nearby_idx - 50):nearby_idx + 60]
+        # Must be in a negation or informational context, not actionable
+        actionable_markers = ["schedule", "create task", "follow-up", "remind", "set up"]
+        for marker in actionable_markers:
+            assert marker not in nearby, (
+                f"Open loop mention {nearby!r} must not contain actionable marker {marker!r}"
+            )
+
+
+# ── Combined behavior: allowlist + routing + correction + no-proactive ────
+
+
+def test_superpom_conservative_reflection_integration():
+    """Verify allowlist, read step, record step, and schedule step form a
+    consistent conservative reflection contract.
+
+    - Write tools excluded from allowlist → read/search only
+    - Read step treats reflections as historical evidence, distinct from memories
+    - Record step warns against write tools, states corrections are automated
+    - Schedule step rejects open loops as actionable items
+    - Prompt forbids proactive reflection invitations
+    """
+    spec = build_superpom_spec()
+    from app.bots.superpom import (
+        SUPERPOM_READ_INSTRUCTION,
+        SUPERPOM_RECORD_INSTRUCTION,
+        SUPERPOM_SCHEDULE_INSTRUCTION,
+    )
+
+    # ── Allowlist: write tools excluded ──
+    assert spec.tool_allowlist is not None
+    assert "finalize_reflection" not in spec.tool_allowlist
+    assert "correct_reflection" not in spec.tool_allowlist
+    assert "list_reflections" in spec.tool_allowlist
+    assert "get_reflection" in spec.tool_allowlist
+    assert "search_reflections" in spec.tool_allowlist
+
+    # ── Read step: historical evidence, distinct from memories ──
+    assert "historical evidence" in SUPERPOM_READ_INSTRUCTION
+    assert "distinct from memories" in SUPERPOM_READ_INSTRUCTION
+    assert "observations" in SUPERPOM_READ_INSTRUCTION
+
+    # ── Record step: no write tools, corrections automated ──
+    assert "Do not use reflection write tools" in SUPERPOM_RECORD_INSTRUCTION
+    assert "corrections run through" in SUPERPOM_RECORD_INSTRUCTION
+    assert "existing automated services" in SUPERPOM_RECORD_INSTRUCTION
+
+    # ── Schedule step: open loops not actionable ──
+    assert "Do not schedule follow-ups or create tasks from open loops" in SUPERPOM_SCHEDULE_INSTRUCTION
+    assert "open loops are informational markers" in SUPERPOM_SCHEDULE_INSTRUCTION.lower()
+    assert "capture and closure run automatically" in SUPERPOM_SCHEDULE_INSTRUCTION.lower()
+
+    # ── Prompt: no proactive invitations ──
+    rendered = _rendered_prompt()
+    assert "Do not invite" in rendered
+    assert "schedule a reflection" in rendered  # negation context
+    assert "Reflection evidence is available" in rendered
+    assert "not through your turn" in rendered

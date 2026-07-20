@@ -1694,3 +1694,816 @@ async def test_hybrid_semantic_ann_runs_against_pgvector_when_available():
             await admin_conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
         finally:
             await admin_conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Reflection retrieval tests (T7)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── Positive match tests ─────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_keyword_positive_match_in_exact_mode():
+    """A reflection with matching searchable text appears in keyword results."""
+    viewer_id = uuid4()
+    reflection_id = uuid4()
+    sent_at = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+    pool = RecordingPool(
+        [
+            # fetch 1: keyword rows
+            [
+                {
+                    "source_type": "reflection",
+                    "source_id": reflection_id,
+                    "message_id": None,
+                    "sent_at": sent_at,
+                    "keyword_score": 0.75,
+                    "keyword_rank": 1,
+                }
+            ],
+            # fetch 2: hydration rows (one per reflection row)
+            [
+                {
+                    "id": reflection_id,
+                    "evidence": {
+                        "session_id": str(uuid4()),
+                        "template_key": "weekly_review",
+                        "temporal_scope": "week",
+                        "phase": "closing",
+                        "revision_number": 1,
+                        "schema_version": 1,
+                        "supersedes_entry_id": None,
+                    },
+                    "source_message_ids": [],
+                }
+            ],
+        ]
+    )
+
+    results = await hybrid_search(
+        pool,
+        _query(mode="exact", viewer_user_id=viewer_id, query="week in review"),
+    )
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.source_type == "reflection"
+    assert r.source_id == reflection_id
+    assert r.message_id is None
+    assert r.match_type == "exact"
+    assert r.keyword_score == pytest.approx(0.75)
+    assert r.keyword_rank == 1
+    assert r.semantic_rank is None
+    assert r.semantic_degraded is False
+    assert r.evidence_metadata is not None
+    assert r.evidence_metadata["template_key"] == "weekly_review"
+    assert r.evidence_metadata["phase"] == "closing"
+    # Empty source_message_ids becomes None due to falsy-or fallthrough in
+    # _source_message_ids_from_row ([] is falsy in Python).
+    assert r.source_message_ids is None
+
+
+@pytest.mark.anyio
+async def test_reflection_semantic_positive_match_in_hybrid_mode():
+    """A reflection appears in semantic (vector) results in hybrid mode."""
+    reflection_id = uuid4()
+    sent_at = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+    pool = RecordingPool(
+        [
+            # fetch 1: keyword rows (empty — no keyword hit)
+            [],
+            # fetch 2: semantic rows
+            [
+                {
+                    "source_type": "reflection",
+                    "source_id": reflection_id,
+                    "message_id": None,
+                    "sent_at": sent_at,
+                    "cosine_distance": 0.15,
+                    "semantic_rank": 1,
+                }
+            ],
+            # fetch 3: hydration rows
+            [
+                {
+                    "id": reflection_id,
+                    "evidence": {
+                        "session_id": str(uuid4()),
+                        "template_key": "daily_checkin",
+                        "temporal_scope": "day",
+                        "phase": "opening",
+                        "revision_number": 1,
+                        "schema_version": 1,
+                        "supersedes_entry_id": None,
+                    },
+                    "source_message_ids": [],
+                }
+            ],
+        ]
+    )
+
+    results = await hybrid_search(
+        pool,
+        _query(mode="hybrid"),
+        embedder=RecordingEmbedder(),
+        settings=_settings(),
+    )
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.source_type == "reflection"
+    assert r.source_id == reflection_id
+    assert r.match_type == "semantic"
+    assert r.semantic_rank == 1
+    assert r.keyword_rank is None
+    assert r.evidence_metadata is not None
+    assert r.evidence_metadata["template_key"] == "daily_checkin"
+
+
+@pytest.mark.anyio
+async def test_reflection_hybrid_fusion_with_keyword_and_semantic_both_hits():
+    """Reflection matched by both keyword and semantic fuses as 'both' with RRF."""
+    reflection_id = uuid4()
+    sent_at = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+    pool = RecordingPool(
+        [
+            # fetch 1: keyword rows
+            [
+                {
+                    "source_type": "reflection",
+                    "source_id": reflection_id,
+                    "message_id": None,
+                    "sent_at": sent_at,
+                    "keyword_score": 0.8,
+                    "keyword_rank": 1,
+                }
+            ],
+            # fetch 2: semantic rows
+            [
+                {
+                    "source_type": "reflection",
+                    "source_id": reflection_id,
+                    "message_id": None,
+                    "sent_at": sent_at,
+                    "cosine_distance": 0.1,
+                    "semantic_rank": 2,
+                }
+            ],
+            # fetch 3: hydration rows
+            [
+                {
+                    "id": reflection_id,
+                    "evidence": {
+                        "session_id": str(uuid4()),
+                        "template_key": "monthly_retrospective",
+                        "temporal_scope": "month",
+                        "phase": "retrospective",
+                        "revision_number": 1,
+                        "schema_version": 1,
+                        "supersedes_entry_id": None,
+                    },
+                    "source_message_ids": [],
+                }
+            ],
+        ]
+    )
+
+    results = await hybrid_search(
+        pool,
+        _query(mode="hybrid", limit=3),
+        embedder=RecordingEmbedder(),
+        settings=_settings(),
+    )
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.source_type == "reflection"
+    assert r.source_id == reflection_id
+    assert r.match_type == "both"
+    assert r.keyword_rank == 1
+    assert r.semantic_rank == 2
+    assert r.rrf_score is not None
+    assert r.rrf_score == pytest.approx((1 / 61) + (1 / 62))
+
+
+# ── Cross-user rejection ─────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_cross_user_rejection_visibility_contract():
+    """A reflection owned by user A is not visible when user B queries alone."""
+    user_a = UUID("00000000-0000-4000-8000-0000000000a0")
+    user_b = UUID("00000000-0000-4000-8000-0000000000b0")
+    topic_id = UUID("00000000-0000-4000-8000-000000000010")
+
+    # Reflection owned by user_a
+    reflection_row = {
+        "source_type": "reflection",
+        "bot_id": "mediator",
+        "topic_id": topic_id,
+        "dyad_id": None,
+        "thread_owner_user_id": user_a,
+        "thread_owner_partner_share": None,
+        "sender_id": user_a,
+        "recipient_id": None,
+        "deleted_at": None,
+        "search_suppressed_at": None,
+        "active_oob_severity": None,
+    }
+
+    # user_a (owner) can see their own reflection
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_a,
+        partner_id=user_b,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_a,  # dyad_id is not NULL in the query, but reflection has NULL → non-message OK
+    ) is True
+
+    # user_b (non-owner, as viewer) cannot see user_a's reflection
+    # because thread_owner_user_id=user_a ≠ user_b, and partner_share is NULL
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_b,
+        partner_id=user_a,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_a,
+    ) is False
+
+
+# ── Bot isolation ────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_bot_isolation_wrong_bot_excluded():
+    """Reflection with bot_id='coach' is not returned when querying bot_id='mediator'."""
+    user_id = uuid4()
+    topic_id = uuid4()
+    reflection_row = {
+        "source_type": "reflection",
+        "bot_id": "coach",
+        "topic_id": topic_id,
+        "dyad_id": None,
+        "thread_owner_user_id": user_id,
+        "thread_owner_partner_share": None,
+        "sender_id": user_id,
+        "recipient_id": None,
+        "deleted_at": None,
+        "search_suppressed_at": None,
+        "active_oob_severity": None,
+    }
+
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="mediator",  # different bot
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is False
+
+    # With correct bot it's visible
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="coach",  # matching bot
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is True
+
+
+# ── Topic isolation ──────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_topic_isolation_wrong_topic_excluded():
+    """Reflection with topic X is not returned when querying topic Y."""
+    user_id = uuid4()
+    topic_x = uuid4()
+    topic_y = uuid4()
+    reflection_row = {
+        "source_type": "reflection",
+        "bot_id": "mediator",
+        "topic_id": topic_x,
+        "dyad_id": None,
+        "thread_owner_user_id": user_id,
+        "thread_owner_partner_share": None,
+        "sender_id": user_id,
+        "recipient_id": None,
+        "deleted_at": None,
+        "search_suppressed_at": None,
+        "active_oob_severity": None,
+    }
+
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="mediator",
+        topic_id=topic_y,  # wrong topic
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is False
+
+    # With correct topic it's visible
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="mediator",
+        topic_id=topic_x,  # matching topic
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is True
+
+
+# ── OOB isolation ────────────────────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_oob_isolation_firm_and_hard_blocked():
+    """Reflection is excluded when active OOB with firm or hard severity exists."""
+    user_id = uuid4()
+    topic_id = uuid4()
+    base_row = {
+        "source_type": "reflection",
+        "bot_id": "mediator",
+        "topic_id": topic_id,
+        "dyad_id": None,
+        "thread_owner_user_id": user_id,
+        "thread_owner_partner_share": None,
+        "sender_id": user_id,
+        "recipient_id": None,
+        "deleted_at": None,
+        "search_suppressed_at": None,
+    }
+
+    # No OOB → visible
+    assert _visibility_contract_row_visible(
+        {**base_row, "active_oob_severity": None},
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is True
+
+    # Soft OOB → still visible
+    assert _visibility_contract_row_visible(
+        {**base_row, "active_oob_severity": "soft"},
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is True
+
+    # Firm OOB → blocked
+    assert _visibility_contract_row_visible(
+        {**base_row, "active_oob_severity": "firm"},
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is False
+
+    # Hard OOB → blocked
+    assert _visibility_contract_row_visible(
+        {**base_row, "active_oob_severity": "hard"},
+        viewer_id=user_id,
+        partner_id=None,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_id,
+    ) is False
+
+
+# ── Partner / privacy filtering ──────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_partner_privacy_partner_cannot_see_owner_reflection():
+    """Partner cannot see reflection unless they are the thread owner (reflections
+    have NULL thread_owner_partner_share, so only the owner can see them)."""
+    user_a = UUID("00000000-0000-4000-8000-100000000001")
+    user_b = UUID("00000000-0000-4000-8000-100000000002")
+    topic_id = uuid4()
+    reflection_row = {
+        "source_type": "reflection",
+        "bot_id": "mediator",
+        "topic_id": topic_id,
+        "dyad_id": None,
+        "thread_owner_user_id": user_a,
+        "thread_owner_partner_share": None,
+        "sender_id": user_a,
+        "recipient_id": None,
+        "deleted_at": None,
+        "search_suppressed_at": None,
+        "active_oob_severity": None,
+    }
+
+    # Owner (viewer=user_a) can see
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_a,
+        partner_id=user_b,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_a,
+    ) is True
+
+    # Partner (viewer=user_b) cannot see because partner_share is NULL
+    # and thread_owner_user_id != viewer_id
+    assert _visibility_contract_row_visible(
+        reflection_row,
+        viewer_id=user_b,
+        partner_id=user_a,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_a,
+    ) is False
+
+    # Partner as viewer with owner as partner: still blocked
+    # thread_owner_user_id == user_a, which is partner (in participants),
+    # but thread_owner_user_id != viewer → requires opt_in partner_share
+    assert _visibility_contract_row_visible(
+        {**reflection_row, "thread_owner_partner_share": "opt_in"},
+        viewer_id=user_b,
+        partner_id=user_a,
+        bot_id="mediator",
+        topic_id=topic_id,
+        thread_owner_user_id=None,
+        dyad_id=user_a,
+    ) is True
+
+
+# ── Corrected reflection behavior ────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_evidence_metadata_excludes_superseded_marker_when_current():
+    """When a reflection is the current revision (not superseded), evidence_metadata
+    shows supersedes_entry_id as None."""
+    reflection_id = uuid4()
+    sent_at = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+    pool = RecordingPool(
+        [
+            # fetch 1: keyword row
+            [
+                {
+                    "source_type": "reflection",
+                    "source_id": reflection_id,
+                    "message_id": None,
+                    "sent_at": sent_at,
+                    "keyword_score": 0.9,
+                    "keyword_rank": 1,
+                }
+            ],
+            # fetch 2: hydration row
+            [
+                {
+                    "id": reflection_id,
+                    "evidence": {
+                        "session_id": str(uuid4()),
+                        "template_key": "weekly_review",
+                        "temporal_scope": "week",
+                        "phase": "closing",
+                        "revision_number": 1,
+                        "schema_version": 1,
+                        "supersedes_entry_id": None,
+                    },
+                    "source_message_ids": [],
+                }
+            ],
+        ]
+    )
+
+    results = await hybrid_search(pool, _query(mode="exact"))
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.evidence_metadata is not None
+    assert r.evidence_metadata["supersedes_entry_id"] is None
+    assert r.evidence_metadata["revision_number"] == 1
+
+
+# ── Source-message provenance hydration ──────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_reflection_source_message_ids_hydrated_without_raw_payload():
+    """source_message_ids are hydrated from reflection_entries without exposing
+    payload_encrypted or summary_encrypted in the compact result."""
+    reflection_id = uuid4()
+    msg_1 = uuid4()
+    msg_2 = uuid4()
+    sent_at = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+    pool = RecordingPool(
+        [
+            # fetch 1: keyword row
+            [
+                {
+                    "source_type": "reflection",
+                    "source_id": reflection_id,
+                    "message_id": None,
+                    "sent_at": sent_at,
+                    "keyword_score": 0.85,
+                    "keyword_rank": 1,
+                }
+            ],
+            # fetch 2: hydration row
+            [
+                {
+                    "id": reflection_id,
+                    "evidence": {
+                        "session_id": str(uuid4()),
+                        "template_key": "monthly_retrospective",
+                        "temporal_scope": "month",
+                        "phase": "retrospective",
+                        "revision_number": 1,
+                        "schema_version": 1,
+                        "supersedes_entry_id": None,
+                    },
+                    "source_message_ids": [msg_1, msg_2],
+                }
+            ],
+        ]
+    )
+
+    results = await hybrid_search(pool, _query(mode="exact"))
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.source_message_ids is not None
+    assert len(r.source_message_ids) == 2
+    assert msg_1 in r.source_message_ids
+    assert msg_2 in r.source_message_ids
+
+    # Prove raw payload is NOT exposed: the retrieval result should not
+    # contain payload_encrypted, summary_encrypted, or plaintext_searchable
+    # as raw fields.
+    result_dict = {
+        "source_type": r.source_type,
+        "source_id": r.source_id,
+        "message_id": r.message_id,
+        "match_type": r.match_type,
+        "rrf_score": r.rrf_score,
+        "keyword_rank": r.keyword_rank,
+        "semantic_rank": r.semantic_rank,
+        "semantic_degraded": r.semantic_degraded,
+        "keyword_score": r.keyword_score,
+        "sent_at": r.sent_at,
+        "evidence_metadata": r.evidence_metadata,
+        "source_message_ids": r.source_message_ids,
+    }
+    for key in result_dict:
+        assert "payload" not in str(key).lower(), f"raw payload field {key!r} leaked"
+    assert "summary_encrypted" not in str(result_dict).lower()
+    assert "payload_encrypted" not in str(result_dict).lower()
+
+
+# ── Evidence metadata shape ──────────────────────────────────────────────
+
+
+def test_reflection_evidence_metadata_keys_are_non_empty_and_typed():
+    """Evidence metadata for reflections contains expected keys with proper types."""
+    from app.services.retrieval import _reflection_evidence_from_row
+
+    reflection_id = uuid4()
+    session_id = uuid4()
+    evidence = {
+        "session_id": str(session_id),
+        "template_key": "weekly_review",
+        "temporal_scope": "week",
+        "phase": "closing",
+        "revision_number": 2,
+        "schema_version": 1,
+        "supersedes_entry_id": str(uuid4()),
+    }
+
+    row = {
+        "_reflection_evidence": evidence,
+        "source_type": "reflection",
+    }
+
+    result = _reflection_evidence_from_row("reflection", row)
+    assert result is not None
+    assert result["session_id"] == str(session_id)
+    assert result["template_key"] == "weekly_review"
+    assert result["temporal_scope"] == "week"
+    assert result["phase"] == "closing"
+    assert result["revision_number"] == 2
+    assert result["schema_version"] == 1
+    assert result["supersedes_entry_id"] == evidence["supersedes_entry_id"]
+
+
+def test_reflection_evidence_metadata_returns_none_for_non_reflection():
+    """Evidence metadata is None for non-reflection source types."""
+    from app.services.retrieval import _reflection_evidence_from_row
+
+    assert _reflection_evidence_from_row("message", {}) is None
+    assert _reflection_evidence_from_row("memory", {}) is None
+    assert _reflection_evidence_from_row("observation", {}) is None
+    assert _reflection_evidence_from_row("distillation", {}) is None
+    assert _reflection_evidence_from_row("artifact", {}) is None
+
+
+def test_source_message_ids_returns_none_for_non_reflection():
+    """source_message_ids is None for non-reflection source types when unset."""
+    from app.services.retrieval import _source_message_ids_from_row
+
+    # Non-reflection row without source_message_ids
+    assert _source_message_ids_from_row({"source_type": "message"}) is None
+
+
+# ── Retrieval SQL includes reflection source type ────────────────────────
+
+
+@pytest.mark.anyio
+async def test_exact_mode_sql_includes_reflection_source_type():
+    """Keyword retrieval SQL includes 'reflection' in the source_type IN clause."""
+    pool = RecordingPool()
+    await hybrid_search(pool, _query(mode="exact"))
+
+    assert pool.sql is not None
+    compact = " ".join(pool.sql.split())
+    assert "'reflection'" in compact
+    assert "sc.source_type IN (" in compact
+
+
+@pytest.mark.anyio
+async def test_semantic_sql_includes_reflection_source_type():
+    """Semantic retrieval SQL includes 'reflection' in the source_type IN clause."""
+    pool = RecordingPool()
+    await hybrid_search(
+        pool,
+        _query(mode="hybrid"),
+        embedder=RecordingEmbedder(),
+        settings=_settings(),
+    )
+
+    # Find the semantic SQL (second fetch)
+    assert len(pool.fetch_sqls) >= 1
+    # The semantic SQL is the one with content_embeddings
+    semantic_sqls = [s for s in pool.fetch_sqls if "content_embeddings" in s]
+    assert len(semantic_sqls) >= 1
+    compact = " ".join(semantic_sqls[0].split())
+    assert "'reflection'" in compact
+    assert "sc.source_type IN (" in compact
+
+
+# ── Non-reflection rows skip hydration ───────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_non_reflection_rows_do_not_trigger_hydration_fetch():
+    """When no rows have source_type='reflection', no hydration query is issued."""
+    message_id = uuid4()
+    sent_at = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+    pool = RecordingPool(
+        [
+            {
+                "source_type": "message",
+                "source_id": message_id,
+                "message_id": message_id,
+                "sent_at": sent_at,
+                "keyword_score": 0.5,
+                "keyword_rank": 1,
+            }
+        ]
+    )
+
+    results = await hybrid_search(pool, _query(mode="exact"))
+
+    assert len(results) == 1
+    assert results[0].source_type == "message"
+    assert results[0].evidence_metadata is None
+    assert results[0].source_message_ids is None
+    # Only one fetch: the keyword query, no hydration query
+    assert pool.fetch_calls == 1
+
+
+# ── Reflection visibility filter SQL coverage ───────────────────────────
+
+
+@pytest.mark.parametrize("mode", ["exact", "hybrid"])
+@pytest.mark.anyio
+async def test_retrieval_visibility_includes_reflection_scenarios(mode: str):
+    """Visibility SQL contract is exercised with reflection-specific rows."""
+    viewer_id = UUID("00000000-0000-4000-8000-000000000020")
+    partner_id = UUID("00000000-0000-4000-8000-000000000021")
+    topic_id = UUID("00000000-0000-4000-8000-000000000010")
+    dyad_id = UUID("00000000-0000-4000-8000-000000000012")
+
+    base_row = {
+        "bot_id": "mediator",
+        "source_type": "reflection",
+        "topic_id": topic_id,
+        "dyad_id": None,
+        "thread_owner_user_id": viewer_id,
+        "thread_owner_partner_share": None,
+        "sender_id": viewer_id,
+        "recipient_id": None,
+        "deleted_at": None,
+        "search_suppressed_at": None,
+    }
+
+    # Positive: own reflection, no OOB
+    reflection_scenarios = [
+        ("allowed own reflection", {**base_row, "active_oob_severity": None}, True),
+        (
+            "blocked wrong bot",
+            {**base_row, "bot_id": "coach"},
+            False,
+        ),
+        (
+            "blocked wrong topic",
+            {**base_row, "topic_id": uuid4()},
+            False,
+        ),
+        (
+            "blocked cross-user (partner is viewer, owner is partner)",
+            {
+                **base_row,
+                "thread_owner_user_id": partner_id,
+                "sender_id": partner_id,
+            },
+            # partner as thread_owner: thread_owner=partner_id, viewer=viewer_id
+            # partner_share is NULL → blocked because thread_owner != viewer
+            False,
+        ),
+        (
+            "blocked OOB firm",
+            {**base_row, "active_oob_severity": "firm"},
+            False,
+        ),
+        (
+            "blocked OOB hard",
+            {**base_row, "active_oob_severity": "hard"},
+            False,
+        ),
+        (
+            "allowed OOB soft",
+            {**base_row, "active_oob_severity": "soft"},
+            True,
+        ),
+        (
+            "blocked deleted",
+            {**base_row, "deleted_at": datetime(2025, 6, 1, tzinfo=UTC)},
+            False,
+        ),
+        (
+            "blocked suppressed",
+            {
+                **base_row,
+                "search_suppressed_at": datetime(2025, 6, 1, tzinfo=UTC),
+            },
+            False,
+        ),
+    ]
+
+    for label, row, expected in reflection_scenarios:
+        actual = _visibility_contract_row_visible(
+            row,
+            viewer_id=viewer_id,
+            partner_id=partner_id,
+            bot_id="mediator",
+            topic_id=topic_id,
+            thread_owner_user_id=None,
+            dyad_id=dyad_id,
+        )
+        assert actual is expected, f"scenario {label!r}: expected {expected}, got {actual}"
+
+    # Also verify the SQL filters include all required predicates
+    pool = RecordingPool()
+    await hybrid_search(
+        pool,
+        _query(
+            mode=mode,
+            viewer_user_id=viewer_id,
+            partner_user_id=partner_id,
+            topic_id=topic_id,
+            dyad_id=dyad_id,
+        ),
+        embedder=RecordingEmbedder(),
+        settings=_settings(),
+    )
+
+    for sql in pool.fetch_sqls:
+        _assert_retrieval_visibility_sql(sql)

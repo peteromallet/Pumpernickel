@@ -30,6 +30,7 @@ from app.services.reflections import (
     SessionNotFoundError,
     SessionNotCollectingError,
 )
+from app.services.retrieval import RetrievalQuery, hybrid_search
 from app.services.turn_context import TurnContext
 from tool_schemas import (
     CorrectReflectionInput,
@@ -42,6 +43,9 @@ from tool_schemas import (
     ListReflectionsOutput,
     ReflectionEntryDetail,
     ReflectionEntrySummary,
+    ReflectionSearchHit,
+    SearchReflectionsInput,
+    SearchReflectionsOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -249,6 +253,156 @@ async def get_reflection(
     )
 
     return GetReflectionOutput(entry=detail)
+
+
+# ── search_reflections ───────────────────────────────────────────────────────
+
+
+async def search_reflections(
+    ctx: TurnContext, args: SearchReflectionsInput
+) -> SearchReflectionsOutput:
+    """Search the caller's reflection entries using keyword/semantic retrieval.
+
+    Searches across processed (finalized + normalized) reflection entries
+    owned by the calling user.  Returns compact, provenance-oriented hits
+    by default.  Full internal detail is only returned when
+    ``include_internals`` is explicitly True.
+
+    Deferred and rejected reflection candidates are excluded from active
+    search — they only appear through explicit ``list_reflections`` with
+    ``include_internals`` set.
+    """
+    store = _store(ctx)
+    bot_id = args.bot_id or _caller_bot_id(ctx)
+
+    if not args.query.strip():
+        return SearchReflectionsOutput(
+            hits=[], include_internals=args.include_internals, total_matched=0
+        )
+
+    logger.info(
+        "search_reflections user=%s bot=%s topic=%s query=%s mode=%s internals=%s",
+        ctx.user_id,
+        bot_id,
+        args.topic_id,
+        args.query,
+        args.mode,
+        args.include_internals,
+    )
+
+    retrieval_mode = "hybrid" if args.mode == "hybrid" else "exact"
+
+    try:
+        ranked = await hybrid_search(
+            ctx.pool,
+            RetrievalQuery(
+                query=args.query,
+                viewer_user_id=ctx.user_id or ctx.user.id,
+                partner_user_id=ctx.partner.id if ctx.partner is not None else None,
+                bot_id=bot_id,
+                topic_id=args.topic_id,
+                thread_owner_user_id=ctx.user_id or ctx.user.id,
+                dyad_id=ctx.dyad_id,
+                mode=retrieval_mode,
+                limit=args.limit * 3,  # Over-fetch so we have enough after filtering
+            ),
+        )
+    except Exception:
+        logger.exception("search_reflections retrieval failed")
+        return SearchReflectionsOutput(
+            is_error=True,
+            error="Retrieval search failed.  Try a different query or use list_reflections.",
+            include_internals=args.include_internals,
+        )
+
+    # Filter to reflection-only results
+    reflection_hits = [r for r in ranked if r.source_type == "reflection"]
+
+    # For include_internals, batch-fetch full entry details
+    entry_map: dict[UUID, Any] = {}
+    session_map: dict[UUID, Any] = {}
+    if args.include_internals and reflection_hits:
+        entry_ids = [
+            r.source_id
+            for r in reflection_hits
+            if r.source_id is not None
+        ]
+        for eid in entry_ids:
+            entry = await store.get_entry(
+                user_id=ctx.user_id or ctx.user.id, entry_id=eid
+            )
+            if entry is not None:
+                entry_map[eid] = entry
+                if entry.session_id not in session_map:
+                    sess = await store.get_session(
+                        user_id=ctx.user_id or ctx.user.id,
+                        session_id=entry.session_id,
+                    )
+                    if sess is not None:
+                        session_map[entry.session_id] = sess
+
+    # Build compact hits
+    hits: list[ReflectionSearchHit] = []
+    for result in reflection_hits[: args.limit]:
+        evidence = result.evidence_metadata or {}
+        source_msgs = list(result.source_message_ids or [])
+
+        period_start = None
+        period_end = None
+        created_at_val = None
+
+        if args.include_internals and result.source_id in entry_map:
+            entry = entry_map[result.source_id]
+            period_start = entry.period_start
+            period_end = entry.period_end
+            created_at_val = entry.created_at
+            # Use the full entry's plaintext_searchable rather than the
+            # truncated canonical_text from the searchable view
+            plaintext = entry.plaintext_searchable
+            topic_id = entry.topic_id
+            revision_number = entry.revision_number
+            template_key = entry.template_key
+            temporal_scope = entry.temporal_scope
+            phase = entry.phase
+            session_id = entry.session_id
+            bot_id_from_entry = entry.bot_id
+        else:
+            plaintext = None  # Compact results don't expose full plaintext
+            topic_id = args.topic_id
+            revision_number = evidence.get("revision_number", 1)
+            template_key = evidence.get("template_key", "unknown")
+            temporal_scope = evidence.get("temporal_scope", "unknown")
+            phase = evidence.get("phase", "unknown")
+            session_id = evidence.get("session_id", result.source_id or UUID(int=0))
+            bot_id_from_entry = bot_id
+
+        hits.append(
+            ReflectionSearchHit(
+                entry_id=result.source_id or UUID(int=0),
+                session_id=session_id,
+                template_key=template_key,
+                temporal_scope=temporal_scope,
+                phase=phase,
+                period_start=period_start,
+                period_end=period_end,
+                plaintext_searchable=plaintext,
+                bot_id=bot_id_from_entry,
+                topic_id=topic_id,
+                match_type=result.match_type,
+                rrf_score=result.rrf_score,
+                keyword_score=result.keyword_score,
+                source_message_ids=source_msgs,
+                evidence_metadata=evidence if not args.include_internals else None,
+                revision_number=revision_number,
+                created_at=created_at_val or getattr(result, "sent_at", None),
+            )
+        )
+
+    return SearchReflectionsOutput(
+        hits=hits,
+        include_internals=args.include_internals,
+        total_matched=len(reflection_hits),
+    )
 
 
 # ── finalize_reflection ──────────────────────────────────────────────────────

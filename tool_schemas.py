@@ -3199,6 +3199,84 @@ class CorrectReflectionOutput(BaseModel):
     created_at: datetime | None = None
 
 
+# ── search_reflections (M3 — retrieval-backed reflection search) ─────────
+
+
+class ReflectionSearchHit(BaseModel):
+    """Compact, provenance-oriented reflection search result.
+
+    Returned by ``search_reflections`` by default.  Includes enough metadata
+    to identify the reflection and trace its source messages without exposing
+    internal classification details or encrypted payloads.
+    """
+
+    entry_id: UUID = Field(description="UUID of the reflection entry.")
+    session_id: UUID = Field(description="UUID of the owning reflection session.")
+    template_key: str = Field(description="Reflection template key (e.g. 'daily', 'weekly').")
+    temporal_scope: str = Field(description="Temporal scope of the reflection.")
+    phase: str = Field(description="Processing phase (e.g. 'morning', 'evening').")
+    period_start: datetime | None = Field(default=None, description="Start of the reflected period.")
+    period_end: datetime | None = Field(default=None, description="End of the reflected period.")
+    plaintext_searchable: str | None = Field(
+        default=None,
+        description="Canonical searchable plaintext — the minimal deterministic surface.",
+    )
+    bot_id: str = Field(description="Bot that owns this reflection.")
+    topic_id: UUID | None = Field(default=None, description="Topic this reflection is scoped to.")
+    match_type: str = Field(description="How this result matched: 'exact', 'semantic', or 'both'.")
+    rrf_score: float | None = Field(default=None, description="Fused RRF score when hybrid search was used.")
+    keyword_score: float | None = Field(default=None, description="Keyword/text-match score (0-1).")
+    source_message_ids: list[UUID] = Field(
+        default_factory=list,
+        description="Source message IDs — the provenance trail for this reflection.",
+    )
+    evidence_metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Compact evidence metadata: revision_number, schema_version, supersedes_entry_id.",
+    )
+    revision_number: int = Field(description="Current revision number of this entry.")
+    created_at: datetime | None = Field(default=None, description="When this reflection entry was created (from searchable content view).")
+
+
+class SearchReflectionsInput(BaseModel):
+    """Search reflection entries using keyword and/or semantic retrieval.
+
+    Searches across the caller's own reflection entries that have been
+    processed (finalized and normalized).  Returns compact,
+    provenance-oriented hits by default.  Full internal detail is only
+    returned when ``include_internals`` is explicitly True.
+    """
+
+    query: str = Field(
+        description="Search query — a phrase, keyword, or concept to find in your reflection history.",
+    )
+    bot_id: str | None = Field(
+        default=None,
+        description="Optional bot scope.  Defaults to the calling bot.",
+    )
+    topic_id: UUID | None = Field(
+        default=None,
+        description="Optional topic filter.  When omitted, searches across all topics.",
+    )
+    mode: Literal["exact", "hybrid"] = Field(
+        default="hybrid",
+        description="'exact' for keyword-only search, 'hybrid' for keyword + semantic.",
+    )
+    include_internals: bool = Field(
+        default=False,
+        description="Include internal classification metadata and full payload detail. Only set when the user explicitly asks for internal detail.",
+    )
+    limit: int = Field(default=10, ge=1, le=50, description="Maximum number of results to return.")
+
+
+class SearchReflectionsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    hits: list[ReflectionSearchHit] = Field(default_factory=list)
+    include_internals: bool = False
+    total_matched: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Single source of truth mapping tool name -> (input model, output model).
 # The orchestrator uses this to validate LLM-produced tool calls and to render
@@ -3318,9 +3396,10 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "list_conversation_plans": (ListConversationPlansInput, ListConversationPlansOutput),
     "create_conversation_plan": (CreateConversationPlanInput, CreateConversationPlanOutput),
     "update_conversation_plan": (UpdateConversationPlanInput, UpdateConversationPlanOutput),
-    # reflection tools (M2)
+    # reflection tools (M2/M3)
     "list_reflections": (ListReflectionsInput, ListReflectionsOutput),
     "get_reflection": (GetReflectionInput, GetReflectionOutput),
+    "search_reflections": (SearchReflectionsInput, SearchReflectionsOutput),
     "finalize_reflection": (FinalizeReflectionInput, FinalizeReflectionOutput),
     "correct_reflection": (CorrectReflectionInput, CorrectReflectionOutput),
 }

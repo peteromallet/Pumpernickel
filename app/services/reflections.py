@@ -1030,7 +1030,41 @@ class ReflectionStore:
             return None
 
         logger.info("mark_session_processed: session=%s processed", session_id)
-        return ReflectionSession.from_row(row)
+
+        session = ReflectionSession.from_row(row)
+
+        # ── Embedding lifecycle: enqueue for all current entries ──
+        try:
+            from app.services.message_embedding_lifecycle import (
+                enqueue_reflection_embed,
+            )
+
+            entries = await self._pool.fetch(
+                """
+                SELECT id, plaintext_searchable
+                FROM mediator.reflection_entries
+                WHERE session_id = $1
+                  AND supersedes_entry_id IS NULL
+                  AND plaintext_searchable IS NOT NULL
+                  AND btrim(plaintext_searchable) <> ''
+                """,
+                session_id,
+            )
+            for entry_row in entries:
+                await enqueue_reflection_embed(
+                    self._pool,
+                    entry_id=entry_row["id"],
+                    plaintext_searchable=entry_row["plaintext_searchable"],
+                )
+        except Exception:
+            logger.warning(
+                "mark_session_processed: failed to enqueue reflection embeds "
+                "for session=%s",
+                session_id,
+                exc_info=True,
+            )
+
+        return session
 
     # ── mark_session_failed ─────────────────────────────────────────────
 
@@ -1571,7 +1605,34 @@ class ReflectionStore:
             row["revision_number"],
             effective_template_key,
         )
-        return ReflectionEntry.from_row(row)
+
+        entry = ReflectionEntry.from_row(row)
+
+        # ── Embedding lifecycle: enqueue if session is already processed ──
+        if plaintext_searchable and plaintext_searchable.strip():
+            try:
+                session_status = await self._pool.fetchval(
+                    "SELECT status FROM mediator.reflection_sessions WHERE id = $1",
+                    session_id,
+                )
+                if session_status == "processed":
+                    from app.services.message_embedding_lifecycle import (
+                        enqueue_reflection_embed,
+                    )
+
+                    await enqueue_reflection_embed(
+                        self._pool,
+                        entry_id=entry.id,
+                        plaintext_searchable=plaintext_searchable,
+                    )
+            except Exception:
+                logger.warning(
+                    "create_entry: failed to enqueue reflection embed for entry=%s",
+                    entry.id,
+                    exc_info=True,
+                )
+
+        return entry
 
     # ── create_entry_for_claim ──────────────────────────────────────────
 
@@ -1907,7 +1968,39 @@ class ReflectionStore:
             session_id,
             row["revision_number"],
         )
-        return ReflectionEntry.from_row(row)
+
+        entry = ReflectionEntry.from_row(row)
+
+        # ── Embedding lifecycle: embed new + drop old ──
+        try:
+            from app.services.message_embedding_lifecycle import (
+                enqueue_reflection_drop,
+                enqueue_reflection_embed,
+            )
+
+            # Drop embedding for the superseded entry (no longer current).
+            await enqueue_reflection_drop(
+                self._pool,
+                entry_id=supersedes_entry_id,
+            )
+
+            # Enqueue embedding for the new current entry if it has searchable plaintext.
+            if plaintext_searchable and plaintext_searchable.strip():
+                await enqueue_reflection_embed(
+                    self._pool,
+                    entry_id=entry.id,
+                    plaintext_searchable=plaintext_searchable,
+                )
+        except Exception:
+            logger.warning(
+                "correct_entry: failed to enqueue reflection embed lifecycle "
+                "for new=%s old=%s",
+                entry.id,
+                supersedes_entry_id,
+                exc_info=True,
+            )
+
+        return entry
 
     # ── get_entry ───────────────────────────────────────────────────────
 
