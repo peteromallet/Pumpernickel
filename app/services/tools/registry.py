@@ -15,7 +15,7 @@ from evals.capture import record_tool_call
 from app.services.turn_audit import record_turn_event
 from app.services.turn_plan import TurnStep
 from app.services.turn_context import TurnContext
-from app.services.tools import read_tools, write_tools
+from app.services.tools import read_tools, write_tools, reflection_tools
 from app.services.tools.audit import log_tool_call as _log_tool_call_audit
 from app.services.tools.write_tools import ToolCallRejected
 from tool_schemas import (
@@ -172,6 +172,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "list_conversation_plans": "List the user's recent planned live-voice conversations (status prepping / preparing / ready). Use to orient before proposing a new plan or looking up an existing one.",
     "create_conversation_plan": "Propose a numbered agenda for an upcoming live-voice conversation. The numbered bullets you propose become the agenda; only call create after the user has explicitly confirmed the list. Returns a display_text rendering for spoken confirmation.",
     "update_conversation_plan": "Replace the agenda items for an existing planned live-voice conversation. The numbered bullets you propose become the new agenda; only call update after the user has explicitly confirmed the revised list. Preserves the conversation's mode unless you also supply a new prep_summary.",
+    # reflection tools (M2)
+    "list_reflections": "List reflection entries for the current user, optionally filtered by bot, topic, or session. Returns compact summaries by default — full detail (including source messages and internal classification metadata) is only returned when the user explicitly asks for it via include_internals=true. Use this before calling get_reflection or correct_reflection to find the entry you need.",
+    "get_reflection": "Fetch a single reflection entry by its UUID. Always returns source message IDs. Internal classification metadata and structured payload fields are only returned when include_internals=true (set only when the user explicitly asks for internal detail). Use this to inspect a specific reflection before correcting it.",
+    "finalize_reflection": "Explicitly finalize a collecting reflection session. The session must be owned by the calling user and in 'collecting' status. Finalization transitions it to 'finalizing' so it can be claimed and processed by the normalization worker. Use this when the user explicitly says they are done reflecting on a topic.",
+    "correct_reflection": "Create an append-only correction to an existing reflection entry. The original entry is NEVER mutated — a new revision row is created that supersedes the prior one. Only the entry owner can correct. The canonical raw evidence (source_message_ids) of the original entry remains unchanged. Use this when the user says a reflection was wrong or needs updating.",
 }
 
 
@@ -268,6 +273,11 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "list_conversation_plans": read_tools.list_conversation_plans,
     "create_conversation_plan": write_tools.create_conversation_plan,
     "update_conversation_plan": write_tools.update_conversation_plan,
+    # reflection tools (M2)
+    "list_reflections": reflection_tools.list_reflections,
+    "get_reflection": reflection_tools.get_reflection,
+    "finalize_reflection": reflection_tools.finalize_reflection,
+    "correct_reflection": reflection_tools.correct_reflection,
 }
 
 # ── Commitment/event tools (shared by Hector + Habits) ────────────────────
@@ -403,6 +413,9 @@ READ_PHASE_TOOLS = {
     # orientation read tools
     "list_orientation_items",
     "get_orientation_item",
+    # reflection read tools (M2)
+    "list_reflections",
+    "get_reflection",
 } | PLAN_READ_TOOLS
 
 WRITE_PHASE_TOOLS = {
@@ -448,6 +461,9 @@ WRITE_PHASE_TOOLS = {
     "review_orientation_item",
     "close_orientation_item",
     "link_orientation_evidence",
+    # reflection write tools (M2)
+    "finalize_reflection",
+    "correct_reflection",
 }
 
 CONSULT_PHASE_TOOLS = READ_PHASE_TOOLS - {"send_message_part", "consult_perspective"}
@@ -474,6 +490,9 @@ RECORD_WRITE_TOOLS = WRITE_PHASE_TOOLS - SCHEDULE_TOOLS | {
     "update_commitment",
     "close_commitment",
     "log_event",
+    # reflection write tools (M2)
+    "finalize_reflection",
+    "correct_reflection",
 }
 # Scheduling tools (schedule_checkin, schedule_task, etc.) are deliberately
 # excluded from RESPOND_TOOLS.  Check-in scheduling intent is detected by

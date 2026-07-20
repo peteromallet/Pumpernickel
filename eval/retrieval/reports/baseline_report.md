@@ -3,7 +3,7 @@
 - **Adapter:** IlikeBaselineRetriever
 - **Corpus:** /workspace/superpom-reflections-20260719/Pumpernickel/eval/retrieval/corpus.yaml
 - **Golden Set:** /workspace/superpom-reflections-20260719/Pumpernickel/eval/retrieval/golden_set.yaml
-- **Generated:** 2026-07-19T22:12:54.964416+00:00
+- **Generated:** 2026-07-20T07:34:14.096646+00:00
 - **Cases:** 80
 
 ## Overall Metrics

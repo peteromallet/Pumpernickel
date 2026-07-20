@@ -241,6 +241,16 @@ def pick_default_skeleton(
     if CHECKIN_CONFIRM_RE.search(text):
         return "standard"
 
+    # ── M2 reflection-aware routing (SuperPOM only) ──────────────────
+    # When the incoming message is classified as a likely reflection,
+    # force a "standard" skeleton so the turn always includes a "record"
+    # step.  This is a thin routing integration — the classification
+    # policy lives in ``app.reflections.classifier``.  Only applies to
+    # SuperPOM; other bots are unaffected.
+    if (hot_context_signals or {}).get("bot_id") == "superpom":
+        if _is_likely_reflection(text):
+            return "standard"
+
     if pacing.get("action") in {"react", "silence"} or _is_short_ack(text):
         return "silence_or_react"
     if AUDIT_REQUEST_RE.search(text):
@@ -260,6 +270,18 @@ def pick_default_skeleton(
     ):
         return "standard"
     return "quick_reply"
+
+
+def _is_likely_reflection(text: str) -> bool:
+    """Thin routing gate: ask the classifier if this text is a likely reflection.
+
+    Policy lives in ``app.reflections.classifier``; this function is a
+    single-line integration point that ``pick_default_skeleton`` calls
+    before committing to a skeleton that skips the record step.
+    """
+    from app.reflections.classifier import is_reflection_candidate
+
+    return is_reflection_candidate(text)
 
 
 def orient_summary(

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date as dt_date, datetime, time as dt_time
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -3019,9 +3019,191 @@ class UpdateConversationPlanOutput(BaseModel):
     display_text: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Reflection tool schemas (M2 — Capture, Processing, and Derivation)
+# ---------------------------------------------------------------------------
+#
+# Reflection sessions and entries are owned by (user_id, bot_id).  All tools
+# enforce authorization scope: the caller must be the session/entry owner.
+#
+# Internal classification metadata and structured payloads are hidden from the
+# default list/get output.  They are only revealed when the caller explicitly
+# sets ``include_internals=true``.
+#
+# Corrections are append-only: ``correct_reflection`` creates a new revision
+# row that supersedes the prior entry.  The canonical raw evidence
+# (``source_message_ids``) in the original entry is NEVER mutated.
+
+
+class ReflectionSessionScope(str, Enum):
+    own = "own"
+
+
+class ReflectionEntrySummary(BaseModel):
+    """Stable, non-internal reflection entry visible in list output."""
+    id: UUID
+    session_id: UUID
+    template_key: str
+    temporal_scope: str
+    phase: str
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    revision_number: int
+    created_at: datetime
+
+
+class ListReflectionsInput(BaseModel):
+    """List reflection entries for the current user.
+
+    Filters by bot, topic, session, and temporal recency.  Returns a compact
+    summary row per entry; internal classification metadata and full structured
+    payloads are NOT included unless ``include_internals`` is explicitly set.
+    """
+    scope: ReflectionSessionScope = ReflectionSessionScope.own
+    bot_id: str | None = Field(
+        default=None,
+        description="Optional bot scope.  Defaults to the calling bot.",
+    )
+    topic_id: UUID | None = Field(
+        default=None,
+        description="Optional topic filter.",
+    )
+    session_id: UUID | None = Field(
+        default=None,
+        description="Optional single-session filter.",
+    )
+    current_only: bool = Field(
+        default=True,
+        description="Only return current (un-superseded) revisions.",
+    )
+    include_internals: bool = Field(
+        default=False,
+        description="Include internal classification metadata and structured payload fields in the result.  Only set when the user explicitly asks for internal detail.",
+    )
+    limit: int = Field(default=25, ge=1, le=200)
+
+
+class ReflectionEntryDetail(ReflectionEntrySummary):
+    """Full reflection entry detail, with optional internals."""
+    bot_id: str
+    user_id: UUID | None = None  # Only shown to the owner
+    topic_id: UUID | None = None
+    source_message_ids: list[UUID] = Field(default_factory=list)
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    timezone: str | None = None
+    plaintext_searchable: str | None = None
+    summary_encrypted: bytes | None = None
+    schema_version: int = 1
+    processor_version: str | None = None
+    supersedes_entry_id: UUID | None = None
+    created_by_turn_id: UUID | None = None
+    created_at: datetime
+    # Internal fields — only populated when include_internals is explicitly requested
+    classification_metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Only populated when include_internals=true. Contains classification source, confidence, and internal metadata.",
+    )
+    payload_fields: dict[str, Any] | None = Field(
+        default=None,
+        description="Only populated when include_internals=true. Contains the normalized structured payload (decrypted, non-sensitive fields only).",
+    )
+    fields_unsupported: list[str] | None = Field(
+        default=None,
+        description="Only populated when include_internals=true. Template fields without supporting evidence.",
+    )
+
+
+class ListReflectionsOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    entries: list[ReflectionEntryDetail | ReflectionEntrySummary] = Field(default_factory=list)
+    include_internals: bool = False
+
+
+class GetReflectionInput(BaseModel):
+    """Fetch a single reflection entry by ID.
+
+    Returns the full entry including source_message_ids.  Internal classification
+    metadata and structured payloads are only returned when ``include_internals``
+    is explicitly set.
+    """
+    entry_id: UUID = Field(description="UUID of the reflection entry to fetch.")
+    include_internals: bool = Field(
+        default=False,
+        description="Include internal classification metadata and structured payload fields.  Only set when the user explicitly asks for internal detail.",
+    )
+
+
+class GetReflectionOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    entry: ReflectionEntryDetail | None = None
+
+
+class FinalizeReflectionInput(BaseModel):
+    """Explicitly finalize a collecting reflection session.
+
+    The session must be in ``collecting`` status and owned by the caller.
+    Finalization transitions the session to ``finalizing`` so it can be claimed
+    and processed.
+    """
+    session_id: UUID = Field(description="UUID of the collecting session to finalize.")
+
+
+class FinalizeReflectionOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    session_id: UUID | None = None
+    status: str | None = None
+    finalized_at: datetime | None = None
+    source_message_ids: list[UUID] = Field(default_factory=list)
+
+
+class CorrectReflectionInput(BaseModel):
+    """Create a correction — a new revision that supersedes an existing entry.
+
+    Corrections are **append-only**: the original entry is never mutated.
+    A new row is created with ``supersedes_entry_id`` pointing to the prior
+    entry, and the canonical raw evidence (``source_message_ids``) of the
+    original entry remains unchanged.
+
+    Only the session/entry owner can create a correction.  The new revision
+    inherits the session's ``temporal_scope``, ``phase``, period boundaries,
+    and timezone from the superseded entry.
+    """
+    supersedes_entry_id: UUID = Field(
+        description="UUID of the entry to supersede.  Must be owned by the caller."
+    )
+    plaintext_searchable: str | None = Field(
+        default=None,
+        description="Updated plaintext summary describing the correction.",
+    )
+    summary: str | None = Field(
+        default=None,
+        description="Updated human-readable summary of the reflection.",
+    )
+    correction_note: str | None = Field(
+        default=None,
+        description="Short note explaining what was corrected and why.",
+    )
+
+
+class CorrectReflectionOutput(BaseModel):
+    is_error: bool = False
+    error: str | None = None
+    entry_id: UUID | None = None
+    session_id: UUID | None = None
+    supersedes_entry_id: UUID | None = None
+    revision_number: int | None = None
+    created_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
 # Single source of truth mapping tool name -> (input model, output model).
 # The orchestrator uses this to validate LLM-produced tool calls and to render
 # the JSON schema list passed to the Anthropic API.
+# ---------------------------------------------------------------------------
 
 TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "update_turn_plan": (UpdateTurnPlanInput, UpdateTurnPlanOutput),
@@ -3136,4 +3318,9 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "list_conversation_plans": (ListConversationPlansInput, ListConversationPlansOutput),
     "create_conversation_plan": (CreateConversationPlanInput, CreateConversationPlanOutput),
     "update_conversation_plan": (UpdateConversationPlanInput, UpdateConversationPlanOutput),
+    # reflection tools (M2)
+    "list_reflections": (ListReflectionsInput, ListReflectionsOutput),
+    "get_reflection": (GetReflectionInput, GetReflectionOutput),
+    "finalize_reflection": (FinalizeReflectionInput, FinalizeReflectionOutput),
+    "correct_reflection": (CorrectReflectionInput, CorrectReflectionOutput),
 }

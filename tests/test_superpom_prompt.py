@@ -73,9 +73,10 @@ def test_prompt_mentions_user_stated_immediate():
 
 def test_prompt_contains_decision_flow_numbered_steps():
     rendered = _rendered()
-    # Should have numbered steps 1-7 in the operating principles
+    # Should have numbered steps 1-8 in the operating principles
+    # (step 7 was added for reflection capture, old 7 renumbered to 8)
     assert "1." in rendered
-    assert "7." in rendered
+    assert "8." in rendered
 
 
 # ── Calibration label prefix assertions ──────────────────────────────────

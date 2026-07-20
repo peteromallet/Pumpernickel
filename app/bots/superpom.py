@@ -93,7 +93,10 @@ SUPERPOM_RECORD_INSTRUCTION = (
     "with `review_state='accepted'` to make it Compass-visible. Read before "
     "durable writes, prefer updating or reinforcing an existing row over "
     "creating a duplicate, and skip writes when there is no useful future "
-    "context to preserve. Do not send user-facing text from this step."
+    "context to preserve. Do not send user-facing text from this step. "
+    "Do not use reflection tools (list_reflections, get_reflection, "
+    "finalize_reflection, correct_reflection) — reflection capture runs "
+    "automatically outside the turn and should not be duplicated here."
 )
 
 SUPERPOM_SCHEDULE_INSTRUCTION = (
@@ -168,6 +171,11 @@ _SUPERPOM_EXCLUSIONS = frozenset({
     "update_conversation_plan",
     # coach-only
     "set_topic_status",
+    # reflection tools (capture runs automatically; internals stay hidden)
+    "list_reflections",
+    "get_reflection",
+    "finalize_reflection",
+    "correct_reflection",
 })
 
 
