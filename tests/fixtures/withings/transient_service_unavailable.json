@@ -1,0 +1,25 @@
+{
+  "scenario_id": "transient_service_unavailable",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/v2/measure",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getworkouts",
+      "lastupdate": 1784486400
+    }
+  },
+  "response": {
+    "status_code": 503,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 503,
+      "error": "temporary_maintenance"
+    }
+  }
+}

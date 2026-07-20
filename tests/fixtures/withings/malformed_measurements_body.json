@@ -1,0 +1,25 @@
+{
+  "scenario_id": "malformed_measurements_body",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/measure",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getmeas",
+      "lastupdate": 1784505600
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body_text": "{\"status\":0,\"body\":{\"measuregrps\":[{\"grpid\":9001999}]",
+    "notes": [
+      "Intentionally truncated JSON to exercise malformed-response handling."
+    ]
+  }
+}

@@ -26,6 +26,7 @@ from app.routers import (
     admin,
     auth_magic_link,
     health,
+    health_devices,
     live_voice,
     whatsapp as whatsapp_router,
     withings,
@@ -41,6 +42,7 @@ from app.services.scheduled_job_handlers import ScheduledJobHandlers, seed_weekl
 from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
 from app.services.scope import InboundScope
 from app.services.embed_worker import EmbedJobWorker
+from app.services.health_sync.worker import HealthSyncWorker, health_sync_resource_types
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +486,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             embedding_worker_task = asyncio.create_task(embedding_worker.run_forever())
             app.state.embedding_worker = embedding_worker
             app.state.background_tasks.add(embedding_worker_task)
+        if settings.health_sync_enabled and health_sync_resource_types(settings):
+            provider = getattr(app.state, "health_withings_provider", None)
+            health_sync_worker = HealthSyncWorker(
+                pool,
+                settings=settings,
+                provider=provider,
+            )
+            health_sync_worker_task = asyncio.create_task(health_sync_worker.run_forever())
+            app.state.health_sync_worker = health_sync_worker
+            app.state.background_tasks.add(health_sync_worker_task)
         if settings.scheduler_enabled:
             await seed_heartbeat(pool, settings=settings)
             await seed_weekly_reflections(pool)
@@ -533,6 +545,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(health_devices.router)
 app.include_router(admin.router)
 app.include_router(whatsapp_router.router)
 app.include_router(live_voice.router)

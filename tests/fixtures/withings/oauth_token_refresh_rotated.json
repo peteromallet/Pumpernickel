@@ -1,0 +1,33 @@
+{
+  "scenario_id": "oauth_token_refresh_rotated",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/v2/oauth2",
+    "content_type": "application/x-www-form-urlencoded",
+    "form": {
+      "action": "requesttoken",
+      "grant_type": "refresh_token",
+      "client_id": "synthetic-client-id",
+      "refresh_token": "synthetic-refresh-token-v1"
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 0,
+      "body": {
+        "userid": 420001,
+        "access_token": "synthetic-access-token-v2",
+        "refresh_token": "synthetic-refresh-token-v2",
+        "expires_in": 10800,
+        "scope": "user.info,user.metrics,user.activity",
+        "csrf_token": "synthetic-csrf-token-v2",
+        "token_type": "Bearer"
+      }
+    }
+  }
+}

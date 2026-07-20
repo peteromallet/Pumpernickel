@@ -1,0 +1,53 @@
+{
+  "scenario_id": "workouts_page_1",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/v2/measure",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getworkouts",
+      "lastupdate": 1784486400,
+      "data_fields": "calories,distance,steps,elevation,hr_average,hr_max,hr_min,pause_duration"
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 0,
+      "body": {
+        "series": [
+          {
+            "id": 9102001,
+            "category": 2,
+            "timezone": "America/New_York",
+            "model": 93,
+            "attrib": 7,
+            "startdate": 1784490000,
+            "enddate": 1784492460,
+            "date": "2026-07-19",
+            "modified": 1784492520,
+            "deviceid": "synthetic-watch-device-01",
+            "data": {
+              "calories": 346,
+              "distance": 6210,
+              "steps": 8120,
+              "elevation": 84,
+              "hr_average": 146,
+              "hr_max": 172,
+              "hr_min": 109,
+              "pause_duration": 75
+            }
+          }
+        ],
+        "more": false,
+        "offset": 0
+      }
+    }
+  }
+}

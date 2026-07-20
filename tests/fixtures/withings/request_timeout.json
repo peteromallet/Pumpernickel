@@ -1,0 +1,20 @@
+{
+  "scenario_id": "request_timeout",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/v2/sleep",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getsummary",
+      "lastupdate": 1784419200
+    }
+  },
+  "transport_error": {
+    "kind": "timeout",
+    "timeout_seconds": 15,
+    "message": "synthetic timeout while waiting for Withings response"
+  }
+}

@@ -3,11 +3,13 @@
 import os
 import re
 from functools import cached_property, lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_SEED_BOT = "mediator"
+_EXPECTED_WITHINGS_CALLBACK_PATH = "/api/health/devices/withings/oauth/callback"
 _KNOWN_EMBEDDING_DIMENSIONS: dict[tuple[str, str], int] = {
     ("openai", "text-embedding-3-small"): 1536,
     ("local", "bge-small"): 384,
@@ -46,6 +48,16 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     openai_api_key: SecretStr
     groq_api_key: SecretStr
+    health_sync_enabled: bool = False
+    health_sync_measurements_enabled: bool = False
+    health_sync_workouts_enabled: bool = False
+    health_sync_sleep_enabled: bool = False
+    health_sync_poll_interval_s: float = Field(default=30.0, gt=0.0, le=3600.0)
+    health_sync_batch_size: int = Field(default=25, ge=1, le=500)
+    health_sync_request_timeout_s: float = Field(default=10.0, gt=0.0, le=60.0)
+    health_sync_max_attempts: int = Field(default=3, ge=1, le=10)
+    health_sync_retry_after_cap_seconds: int = Field(default=30, ge=0, le=300)
+    health_sync_reconciliation_interval_s: float = Field(default=900.0, gt=0.0, le=86400.0)
     withings_client_id: SecretStr | None = None
     withings_client_secret: SecretStr | None = None
     withings_callback_url: str = ""
@@ -378,6 +390,52 @@ class Settings(BaseSettings):
                 "or use OpenAI text-embedding-3-small / local bge-small"
             )
         return self
+
+    @model_validator(mode="after")
+    def validate_health_sync_config(self) -> "Settings":
+        if not self.health_sync_enabled:
+            return self
+
+        missing: list[str] = []
+        if not _secret_has_value(self.data_encryption_key):
+            missing.append("DATA_ENCRYPTION_KEY")
+        if not _secret_has_value(self.withings_client_id):
+            missing.append("WITHINGS_CLIENT_ID")
+        if not _secret_has_value(self.withings_client_secret):
+            missing.append("WITHINGS_CLIENT_SECRET")
+
+        callback_url = self.withings_callback_url.strip()
+        self.withings_callback_url = callback_url
+        if not callback_url:
+            missing.append("WITHINGS_CALLBACK_URL")
+        elif not _is_exact_withings_callback_url(callback_url):
+            raise ValueError(
+                "WITHINGS_CALLBACK_URL must be an absolute URL with exact path "
+                f"{_EXPECTED_WITHINGS_CALLBACK_PATH} and no query or fragment"
+            )
+
+        if missing:
+            raise ValueError(
+                "HEALTH_SYNC_ENABLED requires " + ", ".join(missing)
+            )
+        return self
+
+
+def _secret_has_value(value: SecretStr | None) -> bool:
+    return value is not None and bool(value.get_secret_value().strip())
+
+
+def _is_exact_withings_callback_url(url: str) -> bool:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not parsed.netloc:
+        return False
+    if parsed.path != _EXPECTED_WITHINGS_CALLBACK_PATH:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    return True
 
 
 @lru_cache

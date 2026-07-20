@@ -1,0 +1,118 @@
+{
+  "provider": "withings",
+  "fixture_version": 1,
+  "frozen_on": "2026-07-20",
+  "data_classification": "synthetic",
+  "contains_live_credentials": false,
+  "notes": [
+    "All fixtures in this catalog are synthetic and sanitized.",
+    "Callback URLs use example.test and tokens use synthetic prefixes.",
+    "These files are the offline replay source for later fake-provider and adapter tests."
+  ],
+  "scenarios": [
+    {
+      "id": "oauth_token_exchange_success",
+      "kind": "oauth",
+      "resource_types": [],
+      "tags": ["happy_path", "oauth"],
+      "file": "oauth_token_exchange_success.json",
+      "description": "Authorization-code exchange with metadata-only token payload."
+    },
+    {
+      "id": "oauth_token_refresh_rotated",
+      "kind": "oauth",
+      "resource_types": [],
+      "tags": ["token_rotation", "oauth"],
+      "file": "oauth_token_refresh_rotated.json",
+      "description": "Refresh-token exchange that returns a new access token and a rotated refresh token."
+    },
+    {
+      "id": "measurements_page_1",
+      "kind": "fetch",
+      "resource_types": ["measurement"],
+      "tags": ["happy_path", "pagination"],
+      "file": "measurements_page_1.json",
+      "description": "First page of paginated body-measurement results with more=1 and offset cursor."
+    },
+    {
+      "id": "measurements_page_2",
+      "kind": "fetch",
+      "resource_types": ["measurement"],
+      "tags": ["happy_path", "pagination"],
+      "file": "measurements_page_2.json",
+      "description": "Final page of paginated body-measurement results with more=0."
+    },
+    {
+      "id": "measurements_revision",
+      "kind": "fetch",
+      "resource_types": ["measurement"],
+      "tags": ["revision"],
+      "file": "measurements_revision.json",
+      "description": "Later replay showing a higher modified timestamp for an existing measurement group."
+    },
+    {
+      "id": "measurements_tombstones",
+      "kind": "tombstone",
+      "resource_types": ["measurement"],
+      "tags": ["tombstone"],
+      "file": "measurements_tombstones.json",
+      "description": "Synthetic tombstone envelope used by offline provider tests to model deletions."
+    },
+    {
+      "id": "workouts_page_1",
+      "kind": "fetch",
+      "resource_types": ["workout"],
+      "tags": ["happy_path"],
+      "file": "workouts_page_1.json",
+      "description": "Workout summary payload with activity metrics and modified timestamp."
+    },
+    {
+      "id": "sleep_summary_page_1",
+      "kind": "fetch",
+      "resource_types": ["sleep"],
+      "tags": ["happy_path", "sleep_summary"],
+      "file": "sleep_summary_page_1.json",
+      "description": "Sleep summary payload with nightly aggregates and revision metadata."
+    },
+    {
+      "id": "sleep_detail_page_1",
+      "kind": "fetch",
+      "resource_types": ["sleep"],
+      "tags": ["happy_path", "sleep_detail"],
+      "file": "sleep_detail_page_1.json",
+      "description": "High-frequency sleep detail payload with timestamp-keyed series."
+    },
+    {
+      "id": "rate_limit_retry_after",
+      "kind": "error",
+      "resource_types": ["measurement", "workout", "sleep"],
+      "tags": ["rate_limit"],
+      "file": "rate_limit_retry_after.json",
+      "description": "HTTP 429 transport response with Retry-After and Withings status family 601."
+    },
+    {
+      "id": "malformed_measurements_body",
+      "kind": "error",
+      "resource_types": ["measurement"],
+      "tags": ["malformed_response"],
+      "file": "malformed_measurements_body.json",
+      "description": "Malformed JSON body to verify parser hard-fail and sanitized error handling."
+    },
+    {
+      "id": "transient_service_unavailable",
+      "kind": "error",
+      "resource_types": ["measurement", "workout", "sleep"],
+      "tags": ["transient_error"],
+      "file": "transient_service_unavailable.json",
+      "description": "Retryable upstream outage represented as HTTP 503."
+    },
+    {
+      "id": "request_timeout",
+      "kind": "error",
+      "resource_types": ["measurement", "workout", "sleep"],
+      "tags": ["timeout"],
+      "file": "request_timeout.json",
+      "description": "Synthetic transport timeout with no provider payload."
+    }
+  ]
+}
