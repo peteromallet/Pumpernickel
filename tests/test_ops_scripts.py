@@ -27,7 +27,7 @@ def test_sha256_file_matches_known_content(tmp_path: Path) -> None:
     assert sha256_file(path) == "bdc1a887db21bbb0f413ef3d6ed2056e4689cb09cb652fb00cdee3b50a4dd25e"
 
 
-def test_backfill_embeddings_requires_session_mode_url() -> None:
+def test_backfill_embeddings_requires_direct_non_pooler_url() -> None:
     assert (
         direct_database_url_from_env(
             {"DIRECT_DATABASE_URL": "postgresql://user:pass@db.example.com:5432/postgres"}
