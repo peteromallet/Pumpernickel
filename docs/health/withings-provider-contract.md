@@ -163,8 +163,8 @@ Confirmed request fields:
   `data_fields`
 - sleep summary fetch accepts `startdateymd`, `enddateymd`, `lastupdate`,
   `data_fields`
-- sleep detail fetch accepts `startdate`, `enddate`, `data_fields`,
-  `meastypes`
+- sleep detail fetch uses `startdate`, `enddate`, and optional `data_fields`;
+  legacy sleep-state `meastypes=1,2,3` are not valid measure filters
 
 Normalization boundaries:
 

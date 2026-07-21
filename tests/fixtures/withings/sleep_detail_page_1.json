@@ -11,8 +11,7 @@
       "action": "get",
       "startdate": 1784469600,
       "enddate": 1784494800,
-      "data_fields": "hr,rr,snoring",
-      "meastypes": "1,2,3"
+      "data_fields": "hr,rr,snoring"
     }
   },
   "response": {

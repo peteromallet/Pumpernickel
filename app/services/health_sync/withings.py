@@ -21,7 +21,6 @@ from app.services.health_sync.models import (
     HealthSyncCursor,
     HealthSyncError,
     HealthSyncErrorKind,
-    HealthTombstone,
     WITHINGS_PROVIDER_CAPABILITIES,
     resolve_external_id,
 )
@@ -40,7 +39,7 @@ _SLEEP_SUMMARY_DATA_FIELDS = (
     "deepsleepduration,wakeupcount,sleep_score"
 )
 _SLEEP_DETAIL_DATA_FIELDS = "hr,rr,snoring"
-_SLEEP_DETAIL_MEASTYPES = "1,2,3"
+_DEFAULT_SLEEP_BACKFILL_WINDOW = timedelta(days=30)
 _HTTP_TIMEOUT_STATUS = 522
 
 
@@ -363,7 +362,7 @@ class WithingsProvider:
                     form=self._sleep_detail_form(summary_record),
                     access_token=access_token,
                 )
-                detail_records.append(self._sleep_detail_record(detail_body["series"]))
+                detail_records.extend(self._sleep_detail_records(detail_body["series"]))
 
             records = tuple(summary_records + detail_records)
             return HealthFetchResult(
@@ -588,6 +587,16 @@ class WithingsProvider:
             "action": "getsummary",
             "data_fields": _SLEEP_SUMMARY_DATA_FIELDS,
         }
+        # Unlike measurements and workouts, Withings requires sleep summary
+        # requests to include either ``lastupdate`` or a YMD date range.  Dirty
+        # category syncs can legitimately reach the adapter before a cursor has
+        # been persisted, so give that first request the same bounded window as
+        # reconciliation instead of sending an invalid selector-less request.
+        if cursor is None:
+            form["lastupdate"] = int(
+                (self._clock() - _DEFAULT_SLEEP_BACKFILL_WINDOW).timestamp()
+            )
+            return form
         self._apply_cursor_fields(form, cursor)
         return form
 
@@ -603,7 +612,6 @@ class WithingsProvider:
             "startdate": int(summary_record.starts_at.timestamp()),
             "enddate": int(summary_record.ends_at.timestamp()),
             "data_fields": _SLEEP_DETAIL_DATA_FIELDS,
-            "meastypes": _SLEEP_DETAIL_MEASTYPES,
         }
 
     def _apply_cursor_fields(self, form: dict[str, Any], cursor: HealthSyncCursor | None) -> None:
@@ -743,6 +751,20 @@ class WithingsProvider:
             attribution={"adapter": "withings", "sleep_payload": "summary"},
         )
 
+    def _sleep_detail_records(self, series: Any) -> tuple[HealthSourceRecord, ...]:
+        """Normalize both legacy aggregate and live segmented detail shapes.
+
+        Older fixtures and some Withings responses expose ``body.series`` as a
+        single object.  The live API currently returns a list of sleep-state
+        segments.  Each segment has its own stable start/end/state identity, so
+        persist it as its own idempotent source record.
+        """
+        if isinstance(series, Mapping):
+            return (self._sleep_detail_record(series),)
+        if isinstance(series, list):
+            return tuple(self._sleep_detail_record(entry) for entry in series)
+        raise TypeError("sleep detail series must be an object or list")
+
     def _sleep_detail_record(self, series_entry: Any) -> HealthSourceRecord:
         payload = _require_mapping(series_entry, context="sleep detail")
         metric_maps = {
@@ -808,6 +830,15 @@ class WithingsProvider:
                 kind=HealthSyncErrorKind.AUTHENTICATION,
                 code="authentication_failed",
                 detail=f"{label} failed Withings authentication",
+                provider_status_code=provider_status_code,
+            )
+        # Withings uses JSON status 503 for invalid parameters even when the
+        # HTTP transport succeeded.  A real HTTP 5xx remains transient below.
+        if provider_status_code == 503 and response_status_code < 500:
+            return self._adapter_error(
+                kind=HealthSyncErrorKind.PERMANENT,
+                code="invalid_request",
+                detail=f"{label} rejected invalid request parameters",
                 provider_status_code=provider_status_code,
             )
         if response_status_code >= 500 or provider_status_code in {503, _HTTP_TIMEOUT_STATUS}:

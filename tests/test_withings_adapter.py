@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 from typing import Any
@@ -293,6 +293,95 @@ async def test_workout_and_sleep_normalization_match_fake_provider() -> None:
     assert _result_snapshot(workout_result) == _result_snapshot(fake_workout_result)
     assert _result_snapshot(sleep_result) == _result_snapshot(fake_sleep_result)
     assert [request.form["action"] for request in transport.requests] == ["getworkouts", "getsummary", "get"]
+    sleep_detail_request = transport.requests[-1]
+    assert sleep_detail_request.form["data_fields"] == "hr,rr,snoring"
+    assert "meastypes" not in sleep_detail_request.form
+
+
+def test_sleep_forms_bound_cursorless_backfill_and_omit_invalid_detail_meastypes() -> None:
+    fixture_lastupdate = _fixture_lastupdate("sleep_summary_page_1")
+    provider = WithingsProvider(
+        client_id="synthetic-client-id",
+        client_secret="synthetic-client-secret",
+        transport=FixtureTransport("sleep_summary_page_1"),
+        clock=lambda: fixture_lastupdate + timedelta(days=30),
+    )
+
+    summary_form = provider._sleep_summary_form(None)
+    assert summary_form["lastupdate"] == int(fixture_lastupdate.timestamp())
+
+    summary_record = HealthSourceRecord(
+        provider="withings",
+        resource_type="sleep",
+        external_id="sleep_summary:test",
+        starts_at=datetime(2026, 7, 19, 2, 0, tzinfo=UTC),
+        ends_at=datetime(2026, 7, 19, 9, 0, tzinfo=UTC),
+    )
+    detail_form = provider._sleep_detail_form(summary_record)
+    assert detail_form["data_fields"] == "hr,rr,snoring"
+    assert "meastypes" not in detail_form
+
+
+def test_sleep_detail_accepts_live_segmented_series_shape() -> None:
+    provider = WithingsProvider(
+        client_id="synthetic-client-id",
+        client_secret="synthetic-client-secret",
+        transport=FixtureTransport("sleep_summary_page_1"),
+    )
+    segments = [
+        {
+            "startdate": 1784469600,
+            "enddate": 1784473200,
+            "state": 1,
+            "model": "Sleep Sensor",
+            "model_id": 63,
+            "hr": {"1784470000": 58},
+        },
+        {
+            "startdate": 1784473200,
+            "enddate": 1784476800,
+            "state": 2,
+            "model": "Sleep Sensor",
+            "model_id": 63,
+            "hr": {"1784473600": 54},
+        },
+    ]
+
+    records = provider._sleep_detail_records(segments)
+
+    assert len(records) == 2
+    assert records[0].external_id != records[1].external_id
+    assert [record.source_metadata["state"] for record in records] == [1, 2]
+    assert all(record.source_metadata["metrics"].get("hr") for record in records)
+
+
+def test_withings_invalid_params_status_503_is_permanent_and_sanitized() -> None:
+    provider = WithingsProvider(
+        client_id="synthetic-client-id",
+        client_secret="synthetic-client-secret",
+        transport=FixtureTransport("sleep_summary_page_1"),
+    )
+
+    exc = provider._classify_error(
+        operation="sleep_detail",
+        response_status_code=200,
+        payload={"status": 503, "error": "Invalid Params: incorrect meastypes [1,2,3]"},
+        headers={},
+    )
+
+    assert exc.error.kind is HealthSyncErrorKind.PERMANENT
+    assert exc.error.code == "invalid_request"
+    assert exc.retryable is False
+    assert "meastypes" not in exc.error.detail
+
+    transport_exc = provider._classify_error(
+        operation="sleep_detail",
+        response_status_code=503,
+        payload={"status": 503, "error": "temporary_maintenance"},
+        headers={},
+    )
+    assert transport_exc.error.kind is HealthSyncErrorKind.TRANSIENT
+    assert transport_exc.retryable is True
 
 
 async def test_rate_limit_and_timeout_failures_are_retryable_and_sanitized() -> None:
