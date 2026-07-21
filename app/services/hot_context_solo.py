@@ -7,10 +7,12 @@ no partner content, no bridge candidates.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone as fixed_timezone
 from typing import Any
 from uuid import UUID
 import logging
+from statistics import median
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.config import get_settings
 from app.models.user import User
@@ -1198,8 +1200,7 @@ async def _build_health_summary_block(
     from app.services.health_sync.read_models import (
         get_connection_freshness,
         get_measurements_in_range,
-        get_nightly_sleep,
-        get_sleep_rolling_7d,
+        get_sleep_summary_range,
     )
 
     # Find the user's active Withings connection.
@@ -1233,7 +1234,8 @@ async def _build_health_summary_block(
     today = now_local.date()
     yesterday = today - timedelta(days=1)
     trend_start = today - timedelta(days=6)
-    range_start = datetime.combine(trend_start, datetime.min.time(), tzinfo=tz)
+    long_term_start = yesterday - timedelta(days=89)
+    range_start = datetime.combine(long_term_start, datetime.min.time(), tzinfo=tz)
     range_end = now_utc.astimezone(tz)
 
     measurements = await get_measurements_in_range(
@@ -1242,26 +1244,30 @@ async def _build_health_summary_block(
         started_at=range_start.astimezone(UTC),
         ended_at=range_end.astimezone(UTC),
     )
-    today_sleep = await get_nightly_sleep(
-        user_id=user_id, local_sleep_date=today, pool=pool
-    )
-    yesterday_sleep = await get_nightly_sleep(
-        user_id=user_id, local_sleep_date=yesterday, pool=pool
-    )
-    sleep = await get_sleep_rolling_7d(
-        user_id=user_id, pool=pool, reference_date=today
+    sleep = await get_sleep_summary_range(
+        user_id=user_id,
+        pool=pool,
+        # Provider-local dates can differ from the current user timezone.
+        # Pad, then enforce exact actual wake-date windows in memory.
+        date_from=long_term_start - timedelta(days=1),
+        date_to=today + timedelta(days=1),
     )
 
+    all_sleep_sessions = [
+        session for summary in sleep.summaries for session in summary.sessions
+    ]
     recent_sleep_sessions = [
         session
-        for session in [*today_sleep.sessions, *yesterday_sleep.sessions]
+        for session in all_sleep_sessions
         if now_utc - timedelta(hours=24) <= session.ended_at <= now_utc
     ]
     last_night_sessions = _select_recent_overnight_group(recent_sleep_sessions, tz)
     latest_sleep_date = (
-        max(session.ended_at for session in last_night_sessions)
-        .astimezone(tz)
-        .date()
+        _historical_local(
+            max(last_night_sessions, key=lambda session: session.ended_at).ended_at,
+            max(last_night_sessions, key=lambda session: session.ended_at),
+            tz,
+        ).date()
         if last_night_sessions
         else None
     )
@@ -1330,14 +1336,16 @@ async def _build_health_summary_block(
     else:
         weight_trend = "no_data"
 
-    sleep_by_date = {summary.local_sleep_date: summary for summary in sleep.summaries}
+    raw_sleep_by_date = _sleep_groups_by_actual_wake_date(all_sleep_sessions, tz)
     overnight_by_date = {
-        day: _qualifying_overnight_sessions(summary.sessions, tz)
-        for day, summary in sleep_by_date.items()
+        wake_date: qualifying
+        for wake_date, sessions in raw_sleep_by_date.items()
+        if (qualifying := _qualifying_overnight_sessions(sessions, tz))
     }
     sleep_durations = [
         _sleep_duration_seconds(sessions)
-        for sessions in overnight_by_date.values()
+        for day, sessions in overnight_by_date.items()
+        if trend_start <= day <= today
         if sessions and _sleep_duration_seconds(sessions) is not None
     ]
     sleep_avg = (
@@ -1354,21 +1362,29 @@ async def _build_health_summary_block(
     ]
     for day_offset in range(7):
         day = today - timedelta(days=day_offset)
-        summary = sleep_by_date.get(day)
+        overnight_sessions = overnight_by_date.get(day, [])
         day_label = " [today_partial]" if day == today else ""
-        if summary is None:
+        if day not in raw_sleep_by_date:
             lines.append(f"      - {day.isoformat()}{day_label}: no_data")
+        elif not overnight_sessions:
+            lines.append(
+                f"      - {day.isoformat()}{day_label}: no_overnight_sleep"
+            )
         else:
-            overnight_sessions = overnight_by_date[day]
-            if not overnight_sessions:
-                lines.append(
-                    f"      - {day.isoformat()}{day_label}: no_overnight_sleep"
-                )
-                continue
             lines.append(
                 f"      - {day.isoformat()}{day_label}: "
                 f"{_format_sleep_sessions(overnight_sessions, tz)}"
             )
+
+    lines += [
+        "  longer_term_at_a_glance (completed_local_dates; compact):",
+        f"    30d ({(yesterday - timedelta(days=29)).isoformat()}..{yesterday.isoformat()}): "
+        f"sleep[{_format_long_sleep_trend(overnight_by_date, end_date=yesterday, days=30, tz=tz)}] | "
+        f"weight[{_format_long_weight_trend(by_measurement_date, end_date=yesterday, days=30)}]",
+        f"    90d ({long_term_start.isoformat()}..{yesterday.isoformat()}): "
+        f"sleep[{_format_long_sleep_trend(overnight_by_date, end_date=yesterday, days=90, tz=tz, comparison_days=60)}] | "
+        f"weight[{_format_long_weight_trend(by_measurement_date, end_date=yesterday, days=90)}]",
+    ]
 
     return "\n".join(lines)
 
@@ -1404,7 +1420,7 @@ def _format_age(delta: timedelta) -> str:
 def _format_duration(seconds: int | None) -> str:
     if seconds is None:
         return "unknown"
-    minutes = max(0, round(seconds / 60))
+    minutes = max(0, int((seconds + 30) // 60))
     hours, remainder = divmod(minutes, 60)
     return f"{hours}h{remainder:02d}m"
 
@@ -1412,8 +1428,10 @@ def _format_duration(seconds: int | None) -> str:
 def _format_sleep_sessions(sessions: list[Any], tz: Any) -> str:
     if not sessions:
         return "no_data"
-    started_at = min(session.started_at for session in sessions).astimezone(tz)
-    ended_at = max(session.ended_at for session in sessions).astimezone(tz)
+    first = min(sessions, key=lambda session: session.started_at)
+    last = max(sessions, key=lambda session: session.ended_at)
+    started_at = _historical_local(first.started_at, first, tz)
+    ended_at = _historical_local(last.ended_at, last, tz)
     durations = [
         session.total_asleep_seconds
         for session in sessions
@@ -1445,13 +1463,31 @@ def _sleep_duration_seconds(sessions: list[Any]) -> int | None:
     )
 
 
+def _historical_local(value: datetime, record: Any, fallback_tz: Any) -> datetime:
+    timezone_name = getattr(record, "local_timezone", None)
+    if timezone_name:
+        try:
+            return value.astimezone(ZoneInfo(timezone_name))
+        except ZoneInfoNotFoundError:
+            pass
+    offset = getattr(record, "local_offset_seconds", None)
+    if offset is not None:
+        try:
+            return value.astimezone(
+                fixed_timezone(timedelta(seconds=int(offset)))
+            )
+        except (OverflowError, TypeError, ValueError):
+            pass
+    return value.astimezone(fallback_tz)
+
+
 def _qualifying_overnight_sessions(sessions: list[Any], tz: Any) -> list[Any]:
     candidates = []
     for session in sessions:
         if session.completeness_state not in {"complete", "revised"}:
             continue
-        started_local = session.started_at.astimezone(tz)
-        ended_local = session.ended_at.astimezone(tz)
+        started_local = _historical_local(session.started_at, session, tz)
+        ended_local = _historical_local(session.ended_at, session, tz)
         starts_at_night = started_local.hour >= 18 or started_local.hour < 6
         wakes_in_morning = ended_local.hour < 12 or (
             ended_local.hour == 12 and ended_local.minute == 0
@@ -1469,7 +1505,7 @@ def _qualifying_overnight_sessions(sessions: list[Any], tz: Any) -> list[Any]:
 def _select_recent_overnight_group(sessions: list[Any], tz: Any) -> list[Any]:
     by_wake_date: dict[date, list[Any]] = {}
     for session in sessions:
-        actual_wake_date = session.ended_at.astimezone(tz).date()
+        actual_wake_date = _historical_local(session.ended_at, session, tz).date()
         by_wake_date.setdefault(actual_wake_date, []).append(session)
     groups = [
         group
@@ -1484,6 +1520,231 @@ def _select_recent_overnight_group(sessions: list[Any], tz: Any) -> list[Any]:
     return max(
         groups,
         key=lambda group: max(session.ended_at for session in group),
+    )
+
+
+def _sleep_groups_by_actual_wake_date(
+    sessions: list[Any], tz: Any
+) -> dict[date, list[Any]]:
+    raw: dict[date, list[Any]] = {}
+    for session in sessions:
+        wake_date = _historical_local(session.ended_at, session, tz).date()
+        raw.setdefault(wake_date, []).append(session)
+    return raw
+
+
+def _median_clock(values: list[datetime], *, bedtime: bool) -> str:
+    if not values:
+        return "insufficient_data"
+    minutes = [value.hour * 60 + value.minute for value in values]
+    if bedtime:
+        minutes = [(value - 12 * 60) % (24 * 60) for value in minutes]
+        result = (round(median(minutes)) + 12 * 60) % (24 * 60)
+    else:
+        result = round(median(minutes)) % (24 * 60)
+    hour, minute = divmod(result, 60)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _mean_duration(groups: list[list[Any]]) -> int | None:
+    values = [
+        duration
+        for group in groups
+        if (duration := _sleep_duration_seconds(group)) is not None
+    ]
+    return round(sum(values) / len(values)) if values else None
+
+
+def _format_duration_delta(seconds: int) -> str:
+    sign = "+" if seconds >= 0 else "-"
+    return f"{sign}{_format_duration(abs(seconds))}"
+
+
+def _format_long_sleep_trend(
+    groups_by_date: dict[date, list[Any]],
+    *,
+    end_date: date,
+    days: int,
+    tz: Any,
+    comparison_days: int | None = None,
+) -> str:
+    start_date = end_date - timedelta(days=days - 1)
+    dated_groups = [
+        (wake_date, group)
+        for wake_date, group in sorted(groups_by_date.items())
+        if start_date <= wake_date <= end_date
+    ]
+    if not dated_groups:
+        comparison = (
+            f"; recent30_vs_prior{comparison_days}="
+            "insufficient_data(n=0/0)"
+            if comparison_days
+            else ""
+        )
+        return f"no_data; nights=0/{days}{comparison}"
+    groups = [group for _, group in dated_groups]
+    average = _mean_duration(groups)
+    clocks = "bed/wake=insufficient_data(n<3)"
+    if len(groups) >= 3:
+        bedtimes = [
+            _historical_local(
+                (first := min(group, key=lambda session: session.started_at)).started_at,
+                first,
+                tz,
+            )
+            for group in groups
+        ]
+        wakes = [
+            _historical_local(
+                (last := max(group, key=lambda session: session.ended_at)).ended_at,
+                last,
+                tz,
+            )
+            for group in groups
+        ]
+        clocks = (
+            f"median_bed={_median_clock(bedtimes, bedtime=True)}; "
+            f"median_wake={_median_clock(wakes, bedtime=False)}"
+        )
+    comparison = ""
+    if comparison_days:
+        recent_start = end_date - timedelta(days=29)
+        prior_start = recent_start - timedelta(days=comparison_days)
+        recent = [g for d, g in dated_groups if recent_start <= d <= end_date]
+        prior = [g for d, g in dated_groups if prior_start <= d < recent_start]
+        recent_avg = _mean_duration(recent)
+        prior_avg = _mean_duration(prior)
+        comparison = (
+            f"; recent30_vs_prior{comparison_days}="
+            + (
+                f"{_format_duration_delta(recent_avg - prior_avg)}"
+                f"(n={len(recent)}/{len(prior)})"
+                if recent_avg is not None
+                and prior_avg is not None
+                and len(recent) >= 3
+                and len(prior) >= 3
+                else f"insufficient_data(n={len(recent)}/{len(prior)})"
+            )
+        )
+    average_text = _format_duration(average) if average is not None else "unknown"
+    return (
+        f"nights={len(groups)}/{days}; avg={average_text}; {clocks}{comparison}"
+    )
+
+
+def _weight_rate(readings: list[tuple[date, Any]]) -> float | None:
+    if len(readings) < 2:
+        return None
+    elapsed = (readings[-1][0] - readings[0][0]).days
+    if elapsed <= 0:
+        return None
+    return (readings[-1][1].value_numeric - readings[0][1].value_numeric) * 30 / elapsed
+
+
+def _format_long_weight_trend(
+    measurements_by_date: dict[date, dict[str, Any]],
+    *,
+    end_date: date,
+    days: int,
+) -> str:
+    start_date = end_date - timedelta(days=days - 1)
+    readings = [
+        (day, metrics["weight"])
+        for day, metrics in sorted(measurements_by_date.items())
+        if start_date <= day <= end_date and "weight" in metrics
+    ]
+    if not readings:
+        return f"no_data; days=0/{days}"
+    first_day, first = readings[0]
+    last_day, last = readings[-1]
+    if len(readings) < 2:
+        change = "delta/rate=insufficient_data(n<2)"
+    else:
+        delta = last.value_numeric - first.value_numeric
+        rate = _weight_rate(readings)
+        change = (
+            f"delta={delta:+.1f} {last.canonical_unit}; "
+            f"rate30d={rate:+.1f} {last.canonical_unit}"
+            if rate is not None
+            else "delta/rate=insufficient_data"
+        )
+    return (
+        f"days={len(readings)}/{days}; first={first.value_numeric:.1f} "
+        f"{first.canonical_unit}@{first_day}; latest={last.value_numeric:.1f} "
+        f"{last.canonical_unit}@{last_day}; {change}"
+    )
+
+
+def _activity_weekly_rate(episode_count: int, days: int) -> float:
+    return episode_count * 7 / days
+
+
+def _format_long_activity_trend(
+    workouts: list[Any],
+    *,
+    end_date: date,
+    days: int,
+    comparison_days: int | None = None,
+) -> str:
+    start_date = end_date - timedelta(days=days - 1)
+    period = [
+        workout
+        for workout in workouts
+        if workout.local_date is not None
+        and start_date <= workout.local_date <= end_date
+    ]
+    if not period:
+        comparison = (
+            f"; recent30_vs_prior{comparison_days}_weekly="
+            "insufficient_data(n=0/0)"
+            if comparison_days
+            else ""
+        )
+        return f"no_data; active_days=0/{days}; episodes=0{comparison}"
+    active_days = len({workout.local_date for workout in period})
+    durations = [
+        workout.duration_seconds
+        for workout in period
+        if workout.duration_seconds is not None
+    ]
+    duration_by_type: dict[str, int] = {}
+    for workout in period:
+        if workout.duration_seconds is None:
+            continue
+        duration_by_type[workout.workout_type] = (
+            duration_by_type.get(workout.workout_type, 0) + workout.duration_seconds
+        )
+    top_types = sorted(
+        duration_by_type.items(), key=lambda item: (-item[1], item[0])
+    )[:3]
+    top_types_text = (
+        ",".join(f"{name}:{_format_duration(seconds)}" for name, seconds in top_types)
+        if top_types
+        else "insufficient_duration_data"
+    )
+    comparison = ""
+    if comparison_days:
+        recent_start = end_date - timedelta(days=29)
+        prior_start = recent_start - timedelta(days=comparison_days)
+        recent_count = sum(
+            1 for workout in period if recent_start <= workout.local_date <= end_date
+        )
+        prior_count = sum(
+            1 for workout in period if prior_start <= workout.local_date < recent_start
+        )
+        comparison = (
+            f"; recent30_vs_prior{comparison_days}_weekly="
+            f"{_activity_weekly_rate(recent_count, 30):.1f}/"
+            f"{_activity_weekly_rate(prior_count, comparison_days):.1f}"
+            f"(n={recent_count}/{prior_count})"
+        )
+    total_duration = _format_duration(sum(durations)) if durations else "unknown"
+    return (
+        f"active_days={active_days}/{days}; episodes={len(period)}; "
+        f"known_episode_duration_sum={total_duration} "
+        f"(episodes_with_duration={len(durations)}/{len(period)}); "
+        f"weekly={_activity_weekly_rate(len(period), days):.1f}; "
+        f"top_types_by_known_duration={top_types_text}{comparison}"
     )
 
 
@@ -1510,7 +1771,10 @@ async def _build_workout_summary_block(
     commitments, and does NOT allow Hector to infer missed or excused
     adherence.  Adherence is determined solely by explicit user events.
     """
-    from app.services.health_sync.read_models import get_weekly_workout_summary
+    from app.services.health_sync.read_models import (
+        get_weekly_workout_summary,
+        get_workout_activity_range,
+    )
 
     # Find the user's active Withings connection.
     conn_row = await pool.fetchrow(
@@ -1537,6 +1801,23 @@ async def _build_workout_summary_block(
         reference_date=today,
         timezone_name=timezone_name,
     )
+    long_term_start = today - timedelta(days=90)
+    long_start_utc = datetime.combine(
+        long_term_start - timedelta(days=1), datetime.min.time(), tzinfo=UTC
+    )
+    activity = await get_workout_activity_range(
+        user_id=user_id,
+        pool=pool,
+        started_at=long_start_utc,
+        ended_at=now_utc + timedelta(microseconds=1),
+        timezone_name=timezone_name,
+    )
+    completed_activity = [
+        workout
+        for workout in activity.workouts
+        if workout.started_at <= now_utc
+        and (workout.ended_at is None or workout.ended_at <= now_utc)
+    ]
     lines: list[str] = []
     trend_start = today - timedelta(days=6)
     lines.append("Recent workouts (7d):")
@@ -1546,15 +1827,14 @@ async def _build_workout_summary_block(
     )
     recent_24h = [
         workout
-        for day in result.summaries
-        for workout in day.workouts
+        for workout in completed_activity
         if now_utc - timedelta(hours=24) <= workout.started_at <= now_utc
     ]
     recent_24h.sort(key=lambda workout: workout.started_at, reverse=True)
     if recent_24h:
         recent_parts = []
         for workout in recent_24h:
-            started_local = workout.started_at.astimezone(tz)
+            started_local = _historical_local(workout.started_at, workout, tz)
             duration = _format_duration(workout.duration_seconds)
             recent_parts.append(
                 f"{workout.workout_type} {duration} @ "
@@ -1597,6 +1877,13 @@ async def _build_workout_summary_block(
             f"    - {local_day.isoformat()}{day_label}: count={day.workout_count}; "
             f"types={types_str}{dur_str}{projection_str}"
         )
+
+    yesterday = today - timedelta(days=1)
+    lines += [
+        "  longer_term_activity_at_a_glance (completed_local_dates; compact):",
+        f"    30d: {_format_long_activity_trend(completed_activity, end_date=yesterday, days=30)}",
+        f"    90d: {_format_long_activity_trend(completed_activity, end_date=yesterday, days=90, comparison_days=60)}",
+    ]
 
     return "\n".join(lines)
 

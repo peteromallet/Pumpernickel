@@ -41,6 +41,13 @@ for that exact period; never substitute an older value or imply it is current. U
 today, marked partial, plus the six preceding local dates. Bed and wake times
 are timezone-aware local ISO 8601 timestamps. Do not repeat the whole
 block to the user: mention only the observation relevant to the current turn.
+The compact `longer_term_*_at_a_glance` rows summarize the 30 and 90 completed
+local dates before today. Use coverage denominators before drawing a pattern;
+`insufficient_data` means the period cannot support that comparison. These rows
+are aggregates only: do not invent missing daily values from them. Activity
+rows are imported episodes, not deduplicated exercise time: overlapping
+episodes are counted separately and their known durations are summed, so never
+describe `known_episode_duration_sum` as unique elapsed training time.
 
 These reads have three hard boundaries:
 

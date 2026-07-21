@@ -10,10 +10,11 @@ and their ``is_deleted`` flag are never consulted directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 # ---------------------------------------------------------------------------
@@ -545,13 +546,30 @@ async def get_sleep_rolling_7d(
     no sleep data exists in the window.
     """
     ref_date = reference_date or _utc_now().date()
-    window_start = ref_date - timedelta(days=6)  # inclusive 7-day window
+    return await get_sleep_summary_range(
+        user_id=user_id,
+        pool=pool,
+        date_from=ref_date - timedelta(days=6),
+        date_to=ref_date,
+    )
+
+
+async def get_sleep_summary_range(
+    *,
+    user_id: UUID,
+    pool: Any,
+    date_from: date,
+    date_to: date,
+) -> SleepRollingResult:
+    """Return per-date sleep summaries for an inclusive bounded range."""
+    if date_from > date_to:
+        return SleepRollingResult()
 
     rows = await _executor(pool).fetch(
         _SELECT_SLEEP_ROLLING,
         user_id,
-        window_start,
-        ref_date,
+        date_from,
+        date_to,
     )
     sessions = [_row_to_sleep_session(r) for r in (rows or [])]
 
@@ -587,28 +605,56 @@ async def get_sleep_rolling_7d(
 def _row_to_workout_summary(
     row: Mapping[str, Any],
     projection_state: WorkoutProjectionState | None = None,
+    fallback_timezone_name: str | None = None,
+    prefer_fallback_timezone: bool = False,
 ) -> WorkoutSummary:
     """Convert a ``health_normalized_workouts`` row to a ``WorkoutSummary``."""
     started_at = _ensure_utc(row["started_at"])
     ended_at = _ensure_utc(row["ended_at"]) if row.get("ended_at") is not None else None
 
-    # Derive local_date from started_at + offset when available.
+    # Weekly coaching rows use the caller's current user timezone. Historical
+    # activity rows preserve recorded timezone/offset first. Keep this choice
+    # explicit: silently swapping precedence changes calendar membership.
     local_date: date | None = None
+    recorded_timezone = row.get("local_timezone") or None
+    if prefer_fallback_timezone and fallback_timezone_name:
+        try:
+            local_date = started_at.astimezone(
+                ZoneInfo(fallback_timezone_name)
+            ).date()
+        except ZoneInfoNotFoundError:
+            pass
+    if local_date is None and recorded_timezone:
+        try:
+            local_date = started_at.astimezone(ZoneInfo(recorded_timezone)).date()
+        except ZoneInfoNotFoundError:
+            pass
     offset = _nullable_int(row.get("local_offset_seconds"))
-    if offset is not None:
+    if local_date is None and offset is not None:
         try:
             local_dt = started_at + timedelta(seconds=offset)
             local_date = local_dt.date()
         except (OverflowError, ValueError):
-            local_date = started_at.date()
-    else:
+            pass
+    if (
+        local_date is None
+        and fallback_timezone_name
+        and not prefer_fallback_timezone
+    ):
+        try:
+            local_date = started_at.astimezone(
+                ZoneInfo(fallback_timezone_name)
+            ).date()
+        except ZoneInfoNotFoundError:
+            pass
+    if local_date is None:
         local_date = started_at.date()
 
     return WorkoutSummary(
         started_at=started_at,
         ended_at=ended_at,
         local_date=local_date,
-        local_timezone=row.get("local_timezone") or None,
+        local_timezone=recorded_timezone,
         local_offset_seconds=offset,
         workout_type=str(row.get("workout_type", "unknown")),
         duration_seconds=_nullable_int(row.get("duration_seconds")),
@@ -744,6 +790,35 @@ async def get_recent_workouts(
     return RecentWorkoutsResult(workouts=workouts)
 
 
+async def get_workout_activity_range(
+    *,
+    user_id: UUID,
+    pool: Any,
+    started_at: datetime,
+    ended_at: datetime,
+    timezone_name: str | None = None,
+) -> RecentWorkoutsResult:
+    """Return bounded activity episodes without projection-ledger joins.
+
+    ``ended_at`` is exclusive at the SQL boundary. Callers needing a closed
+    instant can pass the next representable instant and filter in memory.
+    """
+    rows = await _executor(pool).fetch(
+        _SELECT_WORKOUTS_IN_RANGE,
+        user_id,
+        started_at,
+        ended_at,
+    )
+    return RecentWorkoutsResult(
+        workouts=[
+            _row_to_workout_summary(
+                row, fallback_timezone_name=timezone_name
+            )
+            for row in (rows or [])
+        ]
+    )
+
+
 async def get_weekly_workout_summary(
     *,
     user_id: UUID,
@@ -761,14 +836,33 @@ async def get_weekly_workout_summary(
     when no workout data exists in the window.
     """
     ref_date = reference_date or _utc_now().date()
-    window_start = ref_date - timedelta(days=6)  # inclusive 7-day window
-    window_end = ref_date + timedelta(days=1)  # exclusive upper bound
+    return await get_workout_summary_range(
+        user_id=user_id,
+        pool=pool,
+        date_from=ref_date - timedelta(days=6),
+        date_to=ref_date,
+        timezone_name=timezone_name,
+    )
+
+
+async def get_workout_summary_range(
+    *,
+    user_id: UUID,
+    pool: Any,
+    date_from: date,
+    date_to: date,
+    timezone_name: str | None = None,
+) -> WeeklyWorkoutSummaryResult:
+    """Return per-date workout summaries for an inclusive bounded range."""
+    if date_from > date_to:
+        return WeeklyWorkoutSummaryResult()
+    window_end = date_to + timedelta(days=1)  # exclusive upper bound
 
     # Pad the UTC query by one day at each edge, then filter by the workout's
     # derived local date below.  A local calendar week is not equivalent to
     # UTC midnight boundaries (especially near UTC+/-14 and DST changes).
     window_start_dt = datetime.combine(
-        window_start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        date_from - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
     )
     window_end_dt = datetime.combine(
         window_end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
@@ -803,20 +897,13 @@ async def get_weekly_workout_summary(
         sid = UUID(str(row["source_record_id"]))
         proj_list = proj_by_source.get(sid, [])
         proj_state = _resolve_projection_state(proj_list)
-        workout = _row_to_workout_summary(row, proj_state)
-        if timezone_name:
-            try:
-                from zoneinfo import ZoneInfo
-
-                workout = replace(
-                    workout,
-                    local_date=workout.started_at.astimezone(
-                        ZoneInfo(timezone_name)
-                    ).date(),
-                )
-            except (KeyError, ValueError):
-                pass
-        if workout.local_date is not None and window_start <= workout.local_date <= ref_date:
+        workout = _row_to_workout_summary(
+            row,
+            proj_state,
+            fallback_timezone_name=timezone_name,
+            prefer_fallback_timezone=True,
+        )
+        if workout.local_date is not None and date_from <= workout.local_date <= date_to:
             summaries.append(workout)
 
     # Group by local_date.
@@ -878,7 +965,10 @@ __all__ = [
     "get_measurements_in_range",
     "get_nightly_sleep",
     "get_recent_workouts",
+    "get_workout_activity_range",
     "get_sleep_rolling_7d",
+    "get_sleep_summary_range",
     "get_weekly_workout_summary",
+    "get_workout_summary_range",
     "get_weight",
 ]
