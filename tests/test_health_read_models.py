@@ -1738,14 +1738,21 @@ async def test_t6_fake_provider_sleep_tombstones_offline() -> None:
 from app.services.health_sync.read_models import (
     ConnectionFreshness,
     NightlySleepResult,
+    RecentWorkoutsResult,
     SleepDaySummary,
     SleepRollingResult,
     SleepSession,
+    WeeklyWorkoutDaySummary,
+    WeeklyWorkoutSummaryResult,
     WeightReading,
     WeightResult,
+    WorkoutProjectionState,
+    WorkoutSummary,
     get_connection_freshness,
     get_nightly_sleep,
+    get_recent_workouts,
     get_sleep_rolling_7d,
+    get_weekly_workout_summary,
     get_weight,
 )
 
@@ -2385,3 +2392,790 @@ async def test_get_weight_no_data_deterministic() -> None:
     assert result.avg_30d is None
     assert result.min_7d is None
     assert result.max_7d is None
+
+
+# ---------------------------------------------------------------------------
+# Workout read model helpers
+# ---------------------------------------------------------------------------
+
+
+def _seed_workout(
+    pool: FakePool,
+    *,
+    user_id: UUID,
+    connection_id: UUID | None = None,
+    source_record_id: UUID | None = None,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
+    local_timezone: str | None = None,
+    local_offset_seconds: int | None = None,
+    workout_type: str = "running",
+    duration_seconds: int | None = None,
+    distance_meters: float | None = None,
+    steps: int | None = None,
+    energy_kcal: float | None = None,
+    elevation_gain_meters: float | None = None,
+    average_heart_rate_bpm: float | None = None,
+    max_heart_rate_bpm: float | None = None,
+    source_device_id: str | None = None,
+    source_device_model: str | None = None,
+) -> UUID:
+    """Seed a single normalized workout row and return its id."""
+    if connection_id is None:
+        connection_id = pool.seed_health_connection(user_id=user_id)
+    if source_record_id is None:
+        source_record_id = uuid4()
+    if started_at is None:
+        started_at = datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    row_id = uuid4()
+    pool.health_normalized_workouts[row_id] = {
+        "id": row_id,
+        "source_record_id": source_record_id,
+        "connection_id": connection_id,
+        "user_id": user_id,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "local_timezone": local_timezone,
+        "local_offset_seconds": local_offset_seconds,
+        "workout_type": workout_type,
+        "duration_seconds": duration_seconds,
+        "pause_duration_seconds": None,
+        "distance_meters": distance_meters,
+        "steps": steps,
+        "energy_kcal": energy_kcal,
+        "elevation_gain_meters": elevation_gain_meters,
+        "average_heart_rate_bpm": average_heart_rate_bpm,
+        "max_heart_rate_bpm": max_heart_rate_bpm,
+        "source_device_id": source_device_id,
+        "source_device_model": source_device_model,
+        "attribution": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+    return row_id
+
+
+def _seed_projection(
+    pool: FakePool,
+    *,
+    source_record_id: UUID,
+    connection_id: UUID,
+    user_id: UUID,
+    event_id: UUID | None = None,
+    commitment_id: UUID | None = None,
+    projection_version: int = 1,
+    projection_status: str = "projected",
+    decision_reason: str = "matched",
+    supersedes_projection_id: UUID | None = None,
+) -> UUID:
+    """Seed a projection ledger row and return its id."""
+    now = datetime.now(timezone.utc)
+    row_id = uuid4()
+    pool.health_source_to_event_projections[row_id] = {
+        "id": row_id,
+        "source_record_id": source_record_id,
+        "connection_id": connection_id,
+        "user_id": user_id,
+        "event_id": event_id,
+        "commitment_id": commitment_id,
+        "projection_version": projection_version,
+        "projection_status": projection_status,
+        "match_rule": None,
+        "note": None,
+        "decision_reason": decision_reason,
+        "matched_local_date": None,
+        "supersedes_projection_id": supersedes_projection_id,
+        "projected_at": now,
+        "removed_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    return row_id
+
+
+# ---------------------------------------------------------------------------
+# get_recent_workouts
+# ---------------------------------------------------------------------------
+
+
+class TestRecentWorkoutsEmpty:
+    """get_recent_workouts when the user has no workout data."""
+
+    async def test_no_workouts_returns_empty(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        pool.seed_health_connection(user_id=user_id)
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert isinstance(result, RecentWorkoutsResult)
+        assert result.workouts == []
+
+    async def test_no_workouts_limit_respected(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        pool.seed_health_connection(user_id=user_id)
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool, limit=5)
+        assert result.workouts == []
+
+
+class TestRecentWorkoutsBasic:
+    """get_recent_workouts with workout data but no projections."""
+
+    async def test_single_workout_no_projection(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+        _seed_workout(
+            pool,
+            user_id=user_id,
+            connection_id=conn_id,
+            workout_type="running",
+            duration_seconds=1800,
+            distance_meters=5000.0,
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert len(result.workouts) == 1
+        w = result.workouts[0]
+        assert w.workout_type == "running"
+        assert w.duration_seconds == 1800
+        assert w.distance_meters == pytest.approx(5000.0)
+        assert w.projection.status == "none"
+
+    async def test_multiple_workouts_ordered_desc(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        t1 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 7, 19, 10, 0, 0, tzinfo=timezone.utc)
+        t3 = datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc)
+
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, started_at=t1, workout_type="walking")
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, started_at=t2, workout_type="cycling")
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, started_at=t3, workout_type="running")
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert len(result.workouts) == 3
+        # Most recent first.
+        assert result.workouts[0].started_at == t3
+        assert result.workouts[0].workout_type == "running"
+        assert result.workouts[1].started_at == t2
+        assert result.workouts[1].workout_type == "cycling"
+        assert result.workouts[2].started_at == t1
+        assert result.workouts[2].workout_type == "walking"
+
+    async def test_limit_truncates_results(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        for i in range(5):
+            t = datetime(2026, 7, 20, i, 0, 0, tzinfo=timezone.utc)
+            _seed_workout(pool, user_id=user_id, connection_id=conn_id, started_at=t)
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool, limit=2)
+        assert len(result.workouts) == 2
+
+    async def test_workout_with_all_optional_metrics(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+        _seed_workout(
+            pool,
+            user_id=user_id,
+            connection_id=conn_id,
+            workout_type="running",
+            duration_seconds=3600,
+            distance_meters=10000.0,
+            steps=12000,
+            energy_kcal=500.0,
+            elevation_gain_meters=50.0,
+            average_heart_rate_bpm=145.0,
+            max_heart_rate_bpm=172.0,
+            source_device_id="watch-01",
+            source_device_model="ScanWatch",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        w = result.workouts[0]
+        assert w.duration_seconds == 3600
+        assert w.distance_meters == pytest.approx(10000.0)
+        assert w.steps == 12000
+        assert w.energy_kcal == pytest.approx(500.0)
+        assert w.elevation_gain_meters == pytest.approx(50.0)
+        assert w.average_heart_rate_bpm == pytest.approx(145.0)
+        assert w.max_heart_rate_bpm == pytest.approx(172.0)
+        assert w.source_device_id == "watch-01"
+        assert w.source_device_model == "ScanWatch"
+
+
+class TestRecentWorkoutsProjectionStates:
+    """get_recent_workouts projection state classification."""
+
+    async def test_projected_state(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+        source_id = uuid4()
+        event_id = uuid4()
+        commitment_id = uuid4()
+
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, source_record_id=source_id)
+        _seed_projection(
+            pool,
+            source_record_id=source_id,
+            connection_id=conn_id,
+            user_id=user_id,
+            event_id=event_id,
+            commitment_id=commitment_id,
+            projection_status="projected",
+            decision_reason="matched",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].projection.status == "projected"
+        assert result.workouts[0].projection.commitment_id == commitment_id
+        assert result.workouts[0].projection.event_id == event_id
+
+    async def test_unmatched_state_no_eligible_slot(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+        source_id = uuid4()
+
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, source_record_id=source_id)
+        _seed_projection(
+            pool,
+            source_record_id=source_id,
+            connection_id=conn_id,
+            user_id=user_id,
+            projection_status="projected",
+            decision_reason="no_eligible_slot",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].projection.status == "unmatched"
+        assert result.workouts[0].projection.decision_reason == "no_eligible_slot"
+
+    async def test_ambiguous_state(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+        source_id = uuid4()
+
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, source_record_id=source_id)
+        _seed_projection(
+            pool,
+            source_record_id=source_id,
+            connection_id=conn_id,
+            user_id=user_id,
+            projection_status="projected",
+            decision_reason="ambiguous_multiple_commitments",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].projection.status == "ambiguous"
+
+    async def test_removed_state(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+        source_id = uuid4()
+
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, source_record_id=source_id)
+        _seed_projection(
+            pool,
+            source_record_id=source_id,
+            connection_id=conn_id,
+            user_id=user_id,
+            projection_status="removed",
+            decision_reason="matched",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].projection.status == "removed"
+
+    async def test_duplicate_linked_state(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+        source_id = uuid4()
+        event_id = uuid4()
+        commitment_id = uuid4()
+
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, source_record_id=source_id)
+        # Older, superseded version.
+        _seed_projection(
+            pool,
+            source_record_id=source_id,
+            connection_id=conn_id,
+            user_id=user_id,
+            projection_version=1,
+            projection_status="superseded",
+            decision_reason="matched",
+        )
+        # Newer, active version.
+        _seed_projection(
+            pool,
+            source_record_id=source_id,
+            connection_id=conn_id,
+            user_id=user_id,
+            event_id=event_id,
+            commitment_id=commitment_id,
+            projection_version=2,
+            projection_status="projected",
+            decision_reason="matched",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].projection.status == "duplicate_linked"
+
+    async def test_none_state_no_projection_row(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id)
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].projection.status == "none"
+        assert result.workouts[0].projection.commitment_id is None
+        assert result.workouts[0].projection.event_id is None
+
+    async def test_mixed_projection_states(self) -> None:
+        """Multiple workouts with different projection states in one query."""
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        # Workout 1: projected
+        sid1 = uuid4()
+        eid1 = uuid4()
+        cid1 = uuid4()
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id,
+                      source_record_id=sid1,
+                      started_at=datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc))
+        _seed_projection(pool, source_record_id=sid1, connection_id=conn_id, user_id=user_id,
+                         event_id=eid1, commitment_id=cid1,
+                         projection_status="projected", decision_reason="matched")
+
+        # Workout 2: unmatched
+        sid2 = uuid4()
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id,
+                      source_record_id=sid2,
+                      started_at=datetime(2026, 7, 19, 10, 0, 0, tzinfo=timezone.utc))
+        _seed_projection(pool, source_record_id=sid2, connection_id=conn_id, user_id=user_id,
+                         projection_status="projected", decision_reason="no_eligible_slot")
+
+        # Workout 3: no projection
+        sid3 = uuid4()
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id,
+                      source_record_id=sid3,
+                      started_at=datetime(2026, 7, 18, 10, 0, 0, tzinfo=timezone.utc))
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert len(result.workouts) == 3
+
+        states = {w.projection.status for w in result.workouts}
+        assert states == {"projected", "unmatched", "none"}
+
+
+class TestRecentWorkoutsCrossUser:
+    """get_recent_workouts cross-user isolation."""
+
+    async def test_only_current_user_workouts_returned(self) -> None:
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_a = pool.seed_health_connection(user_id=user_a)
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        _seed_workout(pool, user_id=user_a, connection_id=conn_a, workout_type="running")
+        _seed_workout(pool, user_id=user_b, connection_id=conn_b, workout_type="cycling")
+
+        result = await get_recent_workouts(user_id=user_a, pool=pool)
+        assert len(result.workouts) == 1
+        assert result.workouts[0].workout_type == "running"
+
+    async def test_projections_not_leaked_across_users(self) -> None:
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_a = pool.seed_health_connection(user_id=user_a)
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        sid = uuid4()
+        eid = uuid4()
+        cid = uuid4()
+
+        _seed_workout(pool, user_id=user_a, connection_id=conn_a, source_record_id=sid)
+        # Projection belongs to user_b, not user_a.
+        _seed_projection(pool, source_record_id=sid, connection_id=conn_b, user_id=user_b,
+                         event_id=eid, commitment_id=cid,
+                         projection_status="projected", decision_reason="matched")
+
+        result = await get_recent_workouts(user_id=user_a, pool=pool)
+        # User A's workout should show no projection since the projection
+        # is scoped to user_b.
+        assert result.workouts[0].projection.status == "none"
+
+
+# ---------------------------------------------------------------------------
+# get_weekly_workout_summary
+# ---------------------------------------------------------------------------
+
+
+class TestWeeklyWorkoutSummaryEmpty:
+    """get_weekly_workout_summary when the user has no workout data."""
+
+    async def test_no_workouts_returns_empty(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        pool.seed_health_connection(user_id=user_id)
+
+        result = await get_weekly_workout_summary(user_id=user_id, pool=pool)
+        assert isinstance(result, WeeklyWorkoutSummaryResult)
+        assert result.summaries == []
+        assert result.days_with_workouts == 0
+
+    async def test_no_workouts_in_window(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        # Workout outside the 7-day window.
+        old = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(pool, user_id=user_id, connection_id=conn_id, started_at=old)
+
+        result = await get_weekly_workout_summary(
+            user_id=user_id,
+            pool=pool,
+            reference_date=date(2026, 7, 20),
+        )
+        assert result.summaries == []
+        assert result.days_with_workouts == 0
+
+
+class TestWeeklyWorkoutSummaryBasic:
+    """get_weekly_workout_summary basic aggregation."""
+
+    async def test_single_workout_single_day(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        t = datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(
+            pool,
+            user_id=user_id,
+            connection_id=conn_id,
+            started_at=t,
+            workout_type="running",
+            duration_seconds=1800,
+            distance_meters=5000.0,
+            energy_kcal=300.0,
+        )
+
+        result = await get_weekly_workout_summary(
+            user_id=user_id,
+            pool=pool,
+            reference_date=date(2026, 7, 20),
+        )
+        assert result.days_with_workouts == 1
+        assert len(result.summaries) == 1
+        day = result.summaries[0]
+        assert day.workout_count == 1
+        assert day.total_duration_seconds == 1800
+        assert day.total_distance_meters == pytest.approx(5000.0)
+        assert day.total_energy_kcal == pytest.approx(300.0)
+        assert day.projected_count == 0
+
+    async def test_multiple_workouts_same_day(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id,
+            started_at=datetime(2026, 7, 20, 8, 0, 0, tzinfo=timezone.utc),
+            workout_type="running", duration_seconds=1800, distance_meters=5000.0,
+        )
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id,
+            started_at=datetime(2026, 7, 20, 16, 0, 0, tzinfo=timezone.utc),
+            workout_type="swimming", duration_seconds=3600, distance_meters=2000.0,
+        )
+
+        result = await get_weekly_workout_summary(
+            user_id=user_id,
+            pool=pool,
+            reference_date=date(2026, 7, 20),
+        )
+        assert result.days_with_workouts == 1
+        day = result.summaries[0]
+        assert day.workout_count == 2
+        assert day.total_duration_seconds == 5400
+        assert day.total_distance_meters == pytest.approx(7000.0)
+
+    async def test_workouts_across_multiple_days(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id,
+            started_at=datetime(2026, 7, 18, 10, 0, 0, tzinfo=timezone.utc),
+            workout_type="cycling",
+        )
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id,
+            started_at=datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc),
+            workout_type="running",
+        )
+
+        result = await get_weekly_workout_summary(
+            user_id=user_id,
+            pool=pool,
+            reference_date=date(2026, 7, 20),
+        )
+        assert result.days_with_workouts == 2
+        assert len(result.summaries) == 2
+
+    async def test_projected_count_aggregation(self) -> None:
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        sid1 = uuid4()
+        sid2 = uuid4()
+        eid = uuid4()
+        cid = uuid4()
+
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id, source_record_id=sid1,
+            started_at=datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc),
+            workout_type="running",
+        )
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id, source_record_id=sid2,
+            started_at=datetime(2026, 7, 20, 16, 0, 0, tzinfo=timezone.utc),
+            workout_type="swimming",
+        )
+
+        # Only first workout is projected.
+        _seed_projection(
+            pool, source_record_id=sid1, connection_id=conn_id, user_id=user_id,
+            event_id=eid, commitment_id=cid,
+            projection_status="projected", decision_reason="matched",
+        )
+        # Second workout is unmatched.
+        _seed_projection(
+            pool, source_record_id=sid2, connection_id=conn_id, user_id=user_id,
+            projection_status="projected", decision_reason="no_eligible_slot",
+        )
+
+        result = await get_weekly_workout_summary(
+            user_id=user_id,
+            pool=pool,
+            reference_date=date(2026, 7, 20),
+        )
+        day = result.summaries[0]
+        assert day.workout_count == 2
+        assert day.projected_count == 1
+
+    async def test_weekly_summary_cross_user_isolation(self) -> None:
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_a = pool.seed_health_connection(user_id=user_a)
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        _seed_workout(
+            pool, user_id=user_a, connection_id=conn_a,
+            started_at=datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc),
+            workout_type="running",
+        )
+        _seed_workout(
+            pool, user_id=user_b, connection_id=conn_b,
+            started_at=datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc),
+            workout_type="cycling",
+        )
+
+        result = await get_weekly_workout_summary(
+            user_id=user_a,
+            pool=pool,
+            reference_date=date(2026, 7, 20),
+        )
+        assert result.days_with_workouts == 1
+        day = result.summaries[0]
+        assert day.workout_count == 1
+        assert day.workouts[0].workout_type == "running"
+
+
+class TestWorkoutLocalDateDerivation:
+    """Local date derivation from started_at + offset."""
+
+    async def test_local_date_from_offset_east(self) -> None:
+        """UTC+8 timezone: 2026-07-20T22:00Z → local 2026-07-21."""
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        # 22:00 UTC on July 20 → 06:00 on July 21 in UTC+8
+        t = datetime(2026, 7, 20, 22, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id,
+            started_at=t,
+            local_offset_seconds=8 * 3600,  # UTC+8
+            workout_type="running",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].local_date == date(2026, 7, 21)
+
+    async def test_local_date_from_offset_west(self) -> None:
+        """UTC-5 timezone: 2026-07-20T02:00Z → local 2026-07-19."""
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        # 02:00 UTC on July 20 → 21:00 on July 19 in UTC-5
+        t = datetime(2026, 7, 20, 2, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id,
+            started_at=t,
+            local_offset_seconds=-5 * 3600,  # UTC-5
+            workout_type="running",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].local_date == date(2026, 7, 19)
+
+    async def test_local_date_fallback_no_offset(self) -> None:
+        """When no offset is available, fall back to UTC date."""
+        pool = FakePool()
+        user_id = uuid4()
+        conn_id = pool.seed_health_connection(user_id=user_id)
+
+        t = datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(
+            pool, user_id=user_id, connection_id=conn_id,
+            started_at=t,
+            local_offset_seconds=None,
+            workout_type="running",
+        )
+
+        result = await get_recent_workouts(user_id=user_id, pool=pool)
+        assert result.workouts[0].local_date == date(2026, 7, 20)
+
+
+# ---------------------------------------------------------------------------
+# Privacy boundary tests — workout read models
+# ---------------------------------------------------------------------------
+
+
+class TestWorkoutPrivacyBoundaries:
+    """Cross-user, cross-projection-ownership privacy assertions."""
+
+    async def test_weekly_summary_only_returns_requesting_user_workouts(self) -> None:
+        """User A's weekly summary must not include any of user B's workout types."""
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_a = pool.seed_health_connection(user_id=user_a)
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        # Both users have workouts on the same UTC date.
+        t = datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(pool, user_id=user_a, connection_id=conn_a, started_at=t, workout_type="running")
+        _seed_workout(pool, user_id=user_b, connection_id=conn_b, started_at=t, workout_type="swimming")
+
+        result = await get_weekly_workout_summary(
+            user_id=user_a, pool=pool, reference_date=date(2026, 7, 20),
+        )
+        assert result.days_with_workouts == 1
+        day = result.summaries[0]
+        assert day.workout_count == 1
+        assert "running" in day.workouts[0].workout_type
+        # User B's swimming must never leak.
+        for w in day.workouts:
+            assert w.workout_type != "swimming"
+
+    async def test_weekly_summary_projected_count_not_leaked_across_users(self) -> None:
+        """Projected_count counts only projections owned by the requesting user."""
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_a = pool.seed_health_connection(user_id=user_a)
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        t = datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc)
+        sid_a = uuid4()
+        sid_b = uuid4()
+        _seed_workout(pool, user_id=user_a, connection_id=conn_a, source_record_id=sid_a, started_at=t, workout_type="running")
+        _seed_workout(pool, user_id=user_b, connection_id=conn_b, source_record_id=sid_b, started_at=t, workout_type="cycling")
+
+        # User B's workout has a projection; User A's does not.
+        _seed_projection(pool, source_record_id=sid_b, connection_id=conn_b, user_id=user_b,
+                         event_id=uuid4(), commitment_id=uuid4(),
+                         projection_status="projected", decision_reason="matched")
+        _seed_projection(pool, source_record_id=sid_a, connection_id=conn_a, user_id=user_a,
+                         projection_status="projected", decision_reason="no_eligible_slot")
+
+        result = await get_weekly_workout_summary(
+            user_id=user_a, pool=pool, reference_date=date(2026, 7, 20),
+        )
+        day = result.summaries[0]
+        assert day.projected_count == 0  # User B's projection must not affect A's count
+
+    async def test_recent_workouts_no_projection_leak_from_other_user(self) -> None:
+        """get_recent_workouts must not return projection info from another user's ledger."""
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_a = pool.seed_health_connection(user_id=user_a)
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        sid = uuid4()
+        _seed_workout(pool, user_id=user_a, connection_id=conn_a, source_record_id=sid, workout_type="running")
+        # Projection belongs to user_b for the SAME source_record_id — must not leak to user_a.
+        _seed_projection(pool, source_record_id=sid, connection_id=conn_b, user_id=user_b,
+                         event_id=uuid4(), commitment_id=uuid4(),
+                         projection_status="projected", decision_reason="matched")
+
+        result = await get_recent_workouts(user_id=user_a, pool=pool)
+        assert result.workouts[0].projection.status == "none"
+
+    async def test_weekly_summary_empty_for_user_with_no_health_connection(self) -> None:
+        """A user with no health connection gets an empty result — no error, no leak."""
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        # User B has workouts; user A has no connection at all.
+        t = datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(pool, user_id=user_b, connection_id=conn_b, started_at=t, workout_type="hiking")
+
+        result = await get_weekly_workout_summary(
+            user_id=user_a, pool=pool, reference_date=date(2026, 7, 20),
+        )
+        assert result.summaries == []
+        assert result.days_with_workouts == 0
+
+    async def test_recent_workouts_empty_for_user_with_no_connection(self) -> None:
+        """get_recent_workouts returns empty for user with no health connection."""
+        pool = FakePool()
+        user_a = uuid4()
+        user_b = uuid4()
+        conn_b = pool.seed_health_connection(user_id=user_b)
+
+        t = datetime(2026, 7, 20, 10, 0, 0, tzinfo=timezone.utc)
+        _seed_workout(pool, user_id=user_b, connection_id=conn_b, started_at=t)
+
+        result = await get_recent_workouts(user_id=user_a, pool=pool)
+        assert result.workouts == []

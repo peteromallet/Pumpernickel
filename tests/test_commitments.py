@@ -377,3 +377,340 @@ class TestTimezoneHandling:
         slots = compute_slots(c, pacific, now)
         today_slots = [s for s in slots if "Today" in s["label"]]
         assert today_slots[0]["date"] == "2026-05-13"
+
+
+# ── Type-safety regression ─────────────────────────────────────────────────
+# Verifies the contract: only events with an explicit adherence_status in
+# ('done', 'missed', 'excused') AND a matching commitment_id can classify a
+# slot.  Weight, sleep, and generic numeric measurement events can NEVER
+# satisfy a workout commitment — even through the compatibility shim.
+
+
+class TestTypeSafetyNumericFallbackRemoved:
+    """Prove the unsafe numeric-only fallback has been removed in the shim.
+
+    These tests exercise the commitments.py compatibility shim
+    (classify_slots / get_adherence) and verify it enforces the same
+    type-safe contract as the canonical adherence.py.
+    """
+
+    def test_weight_event_not_classified_as_done(self):
+        """Weight measurement (value_numeric=185.5, no adherence_status)
+        must NOT mark a slot as done in classify_slots."""
+        c = _make_commitment(cadence="daily", start_date="2026-05-11")
+        now = _utc_dt(2026, 5, 14, 12, 0)  # Thursday
+        slots = compute_slots(c, EASTERN, now)
+        events = [
+            _make_event(
+                observed_at=_utc_dt(2026, 5, 11, 8, 0),
+                adherence_status=None,
+                value_numeric=185.5,
+                metric_key="weight",
+            ),
+        ]
+        classified = classify_slots(slots, events, EASTERN, now)
+        # Monday (May 11) is in the past, no adherence_status → unknown
+        assert classified[0]["status"] == "unknown", (
+            f"Weight event must not satisfy slot; got {classified[0]['status']}"
+        )
+
+    def test_sleep_event_not_classified_as_done(self):
+        """Sleep measurement (value_numeric=7.5, no adherence_status)
+        must NOT mark a slot as done in classify_slots."""
+        c = _make_commitment(cadence="daily", start_date="2026-05-11")
+        now = _utc_dt(2026, 5, 14, 12, 0)
+        slots = compute_slots(c, EASTERN, now)
+        events = [
+            _make_event(
+                observed_at=_utc_dt(2026, 5, 11, 8, 0),
+                adherence_status=None,
+                value_numeric=7.5,
+                metric_key="sleep",
+            ),
+        ]
+        classified = classify_slots(slots, events, EASTERN, now)
+        assert classified[0]["status"] == "unknown", (
+            f"Sleep event must not satisfy slot; got {classified[0]['status']}"
+        )
+
+    def test_numeric_only_event_not_classified_as_done(self):
+        """A generic event with value_numeric=1.0 and no adherence_status
+        must NOT mark a slot as done."""
+        c = _make_commitment(cadence="daily", start_date="2026-05-11")
+        now = _utc_dt(2026, 5, 14, 12, 0)
+        slots = compute_slots(c, EASTERN, now)
+        events = [
+            _make_event(
+                observed_at=_utc_dt(2026, 5, 11, 8, 0),
+                adherence_status=None,
+                value_numeric=1.0,
+            ),
+        ]
+        classified = classify_slots(slots, events, EASTERN, now)
+        assert classified[0]["status"] == "unknown", (
+            f"Numeric-only event must not satisfy slot; got {classified[0]['status']}"
+        )
+
+    def test_wrong_commitment_id_adherence_event_not_classified(self):
+        """An event with adherence_status='done' but a different
+        commitment_id must NOT classify another commitment's slot.
+
+        Tests via get_adherence (the proper integration path), which
+        filters events by commitment_id before classification.
+        classify_slots is an internal helper that inherits this
+        filtering from its caller; testing it in isolation with
+        unfiltered events is not a realistic call pattern."""
+        c = _make_commitment(cadence="daily", start_date="2026-05-11")
+        now = _utc_dt(2026, 5, 14, 12, 0)
+        events = [
+            _make_event(
+                commitment_id="different-cid",
+                observed_at=_utc_dt(2026, 5, 11, 8, 0),
+                adherence_status="done",
+            ),
+        ]
+        result = get_adherence([c], events, EASTERN, now)
+        totals = result["commitments"][0]["period_totals"]
+        # The event has commitment_id="different-cid", but our
+        # commitment is "test-id" — get_adherence filters by cid,
+        # so the event should NOT match and the slot remains unknown.
+        assert totals["done"] == 0, (
+            f"Wrong-cid event must not count as done; got {totals['done']}"
+        )
+        assert totals["unknown"] >= 1, (
+            f"Expected unknown slot for past date with mismatched event; got unknown={totals['unknown']}"
+        )
+
+    def test_get_adherence_does_not_count_numeric_events(self):
+        """get_adherence must not count numeric-only events in period_totals."""
+        c = _make_commitment(
+            label="Workout",
+            cadence="daily",
+            start_date="2026-05-11",
+        )
+        now = _utc_dt(2026, 5, 14, 12, 0)
+        events = [
+            _make_event(
+                observed_at=_utc_dt(2026, 5, 11, 8, 0),
+                adherence_status=None,
+                value_numeric=500.0,
+            ),
+            _make_event(
+                observed_at=_utc_dt(2026, 5, 12, 8, 0),
+                adherence_status="done",
+            ),
+        ]
+        result = get_adherence([c], events, EASTERN, now)
+        totals = result["commitments"][0]["period_totals"]
+        # Only the May 12 done event should count
+        assert totals["done"] == 1, (
+            f"Expected 1 done (from explicit adherence event), got {totals['done']}"
+        )
+        # May 11 numeric-only event should produce unknown, not done
+        assert totals["unknown"] >= 1, (
+            f"Expected unknown for numeric-only event date; got unknown={totals['unknown']}"
+        )
+
+
+# ── Shim parity with canonical implementation ──────────────────────────────
+# These tests prove the commitments.py compatibility shim produces results
+# identical to the canonical app.services.adherence module.
+
+
+class TestShimParityWithCanonical:
+    """Verify the shim (commitments.py) matches canonical (adherence.py)."""
+
+    def test_get_adherence_matches_canonical_daily(self):
+        """get_adherence via shim produces same period_totals as
+        compute_adherence via canonical for daily cadence."""
+        from app.services.adherence import compute_adherence as canonical
+
+        c_shim = _make_commitment(cadence="daily", start_date="2026-05-11")
+        c_canonical = {
+            "id": "test-id",
+            "label": "test",
+            "cadence": "daily",
+            "days_of_week": [],
+            "target_count": None,
+            "start_date": date(2026, 5, 11),
+            "end_date": None,
+            "schedule_rule": {},
+        }
+        now = _utc_dt(2026, 5, 14, 12, 0)
+        events_shim = [
+            _make_event(observed_at=_utc_dt(2026, 5, 11, 8, 0), adherence_status="done"),
+            _make_event(observed_at=_utc_dt(2026, 5, 12, 8, 0), adherence_status="missed"),
+        ]
+        events_canonical = [
+            {
+                "commitment_id": "test-id",
+                "observed_at": _utc_dt(2026, 5, 11, 8, 0),
+                "adherence_status": "done",
+                "value_numeric": None,
+                "value_text": None,
+            },
+            {
+                "commitment_id": "test-id",
+                "observed_at": _utc_dt(2026, 5, 12, 8, 0),
+                "adherence_status": "missed",
+                "value_numeric": None,
+                "value_text": None,
+            },
+        ]
+
+        # Shim path
+        result = get_adherence([c_shim], events_shim, EASTERN, now)
+        shim_totals = result["commitments"][0]["period_totals"]
+
+        # Canonical path
+        today = now.astimezone(EASTERN).date()
+        board = canonical(c_canonical, events_canonical, today, EASTERN)
+        canonical_totals = {
+            "done": board.done,
+            "missed": board.missed,
+            "excused": board.excused,
+            "unknown": board.unknown,
+            "pending": board.pending,
+        }
+
+        assert shim_totals["done"] == canonical_totals["done"], (
+            f"done mismatch: shim={shim_totals['done']} canonical={canonical_totals['done']}"
+        )
+        assert shim_totals["missed"] == canonical_totals["missed"], (
+            f"missed mismatch: shim={shim_totals['missed']} canonical={canonical_totals['missed']}"
+        )
+        assert shim_totals["excused"] == canonical_totals["excused"], (
+            f"excused mismatch: shim={shim_totals['excused']} canonical={canonical_totals['excused']}"
+        )
+
+    def test_get_adherence_matches_canonical_weekdays(self):
+        """Shim get_adherence matches canonical compute_adherence for
+        weekdays cadence."""
+        from app.services.adherence import compute_adherence as canonical
+
+        c_shim = _make_commitment(cadence="weekdays", start_date="2026-05-11")
+        c_canonical = {
+            "id": "test-id",
+            "label": "test",
+            "cadence": "weekdays",
+            "days_of_week": [],
+            "target_count": None,
+            "start_date": date(2026, 5, 11),
+            "end_date": None,
+            "schedule_rule": {},
+        }
+        now = _utc_dt(2026, 5, 14, 12, 0)
+        events = [
+            _make_event(observed_at=_utc_dt(2026, 5, 11, 8, 0), adherence_status="done"),
+        ]
+        events_canonical = [
+            {
+                "commitment_id": "test-id",
+                "observed_at": _utc_dt(2026, 5, 11, 8, 0),
+                "adherence_status": "done",
+                "value_numeric": None,
+                "value_text": None,
+            },
+        ]
+
+        result = get_adherence([c_shim], events, EASTERN, now)
+        shim_totals = result["commitments"][0]["period_totals"]
+
+        today = now.astimezone(EASTERN).date()
+        board = canonical(c_canonical, events_canonical, today, EASTERN)
+
+        assert shim_totals["done"] == board.done, (
+            f"done mismatch: shim={shim_totals['done']} canonical={board.done}"
+        )
+
+    def test_get_adherence_matches_canonical_custom_days(self):
+        """Shim get_adherence matches canonical compute_adherence for
+        custom_days cadence."""
+        from app.services.adherence import compute_adherence as canonical
+
+        c_shim = _make_commitment(
+            cadence="custom_days",
+            days_of_week=[1, 3, 5],  # Tue, Thu, Sat
+            start_date="2026-05-11",
+        )
+        c_canonical = {
+            "id": "test-id",
+            "label": "test",
+            "cadence": "custom_days",
+            "days_of_week": [1, 3, 5],
+            "target_count": None,
+            "start_date": date(2026, 5, 11),
+            "end_date": None,
+            "schedule_rule": {},
+        }
+        now = _utc_dt(2026, 5, 16, 12, 0)  # Saturday
+        events = [
+            _make_event(observed_at=_utc_dt(2026, 5, 12, 8, 0), adherence_status="done"),
+        ]
+        events_canonical = [
+            {
+                "commitment_id": "test-id",
+                "observed_at": _utc_dt(2026, 5, 12, 8, 0),
+                "adherence_status": "done",
+                "value_numeric": None,
+                "value_text": None,
+            },
+        ]
+
+        result = get_adherence([c_shim], events, EASTERN, now)
+        shim_totals = result["commitments"][0]["period_totals"]
+
+        today = now.astimezone(EASTERN).date()
+        board = canonical(c_canonical, events_canonical, today, EASTERN)
+
+        assert shim_totals["done"] == board.done, (
+            f"done mismatch: shim={shim_totals['done']} canonical={board.done}"
+        )
+
+    def test_shim_and_canonical_both_reject_numeric_only(self):
+        """Both shim and canonical must reject numeric-only events equally."""
+        from app.services.adherence import compute_adherence as canonical
+
+        c_shim = _make_commitment(cadence="daily", start_date="2026-05-11")
+        c_canonical = {
+            "id": "test-id",
+            "label": "test",
+            "cadence": "daily",
+            "days_of_week": [],
+            "target_count": None,
+            "start_date": date(2026, 5, 11),
+            "end_date": None,
+            "schedule_rule": {},
+        }
+        now = _utc_dt(2026, 5, 14, 12, 0)
+
+        # Numeric-only events — should NOT produce 'done'
+        events_shim = [
+            _make_event(
+                observed_at=_utc_dt(2026, 5, 11, 8, 0),
+                adherence_status=None,
+                value_numeric=500.0,
+            ),
+        ]
+        events_canonical = [
+            {
+                "commitment_id": "test-id",
+                "observed_at": _utc_dt(2026, 5, 11, 8, 0),
+                "adherence_status": None,
+                "value_numeric": 500.0,
+                "value_text": None,
+            },
+        ]
+
+        result = get_adherence([c_shim], events_shim, EASTERN, now)
+        shim_totals = result["commitments"][0]["period_totals"]
+
+        today = now.astimezone(EASTERN).date()
+        board = canonical(c_canonical, events_canonical, today, EASTERN)
+
+        # Both should show 0 done for numeric-only events
+        assert shim_totals["done"] == 0, f"Shim counted numeric event as done"
+        assert board.done == 0, f"Canonical counted numeric event as done"
+        assert shim_totals["done"] == board.done, (
+            f"Mismatch: shim done={shim_totals['done']}, canonical done={board.done}"
+        )

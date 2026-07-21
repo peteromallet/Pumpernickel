@@ -154,6 +154,39 @@ async def test_workout_and_sleep_sync_store_normalized_records() -> None:
     }
     assert all(row["is_deleted"] is False for row in stored_workouts + stored_sleep)
 
+    # Workout sync must produce one normalized workout row.
+    normalized_workouts = list(pool.health_normalized_workouts.values())
+    assert len(normalized_workouts) == 1
+    nw = normalized_workouts[0]
+    workout_source = stored_workouts[0]
+    assert nw["source_record_id"] == workout_source["id"]
+    assert nw["connection_id"] == connection_id
+    assert nw["user_id"] == user_id
+    assert nw["workout_type"] == "running"  # category=2 → running
+    assert nw["started_at"] == datetime.fromtimestamp(1784490000, tz=UTC)
+    assert nw["ended_at"] == datetime.fromtimestamp(1784492460, tz=UTC)
+    assert nw["duration_seconds"] == 2460  # end - start
+    assert nw["distance_meters"] == pytest.approx(6210.0)
+    assert nw["steps"] == 8120
+    assert nw["energy_kcal"] == pytest.approx(346.0)
+    assert nw["elevation_gain_meters"] == pytest.approx(84.0)
+    assert nw["average_heart_rate_bpm"] == pytest.approx(146.0)
+    assert nw["max_heart_rate_bpm"] == pytest.approx(172.0)
+    assert nw["pause_duration_seconds"] == 75
+    assert nw["local_timezone"] == "America/New_York"
+    assert nw["source_device_id"] == "synthetic-watch-device-01"
+    assert nw["source_device_model"] == "93"
+    assert nw["attribution"]["fixture_scenario"] == "workouts_page_1"
+    assert nw["attribution"]["revision_count"] == 1
+    assert nw["attribution"]["provider_category"] == 2
+
+    # Sleep sync must produce one normalized sleep row (summary only; detail is filtered).
+    normalized_sleep = list(pool.health_normalized_sleep.values())
+    assert len(normalized_sleep) == 1
+
+    # No normalized measurement rows from workout or sleep syncs.
+    assert len(pool.health_normalized_measurements) == 0
+
 
 # ---------------------------------------------------------------------------
 # T4: normalization wiring, revision replacement, tombstone deletion
@@ -370,8 +403,9 @@ async def test_measurement_tombstone_deletes_derived_rows() -> None:
 
 
 async def test_normalized_rows_not_produced_for_workout_or_sleep() -> None:
-    """Only measurement records should produce normalized_measurements rows;
-    workout and sleep syncs must not create measurement derived rows."""
+    """Workout records produce normalized_workouts rows, not normalized_measurements.
+    Sleep records produce normalized_sleep rows, not normalized_measurements.
+    Only measurement records fan out into normalized_measurements."""
     pool = FakePool()
     repository = repository_for(pool)
     provider = FakeWithingsProvider()
@@ -403,6 +437,15 @@ async def test_normalized_rows_not_produced_for_workout_or_sleep() -> None:
     # Workout and sleep source records exist
     assert len(pool.health_source_records) == 3  # 1 workout + 2 sleep
 
+    # Workout sync must produce a normalized workout row (not a measurement row).
+    assert len(pool.health_normalized_workouts) == 1
+    nw = list(pool.health_normalized_workouts.values())[0]
+    assert nw["workout_type"] == "running"
+    assert nw["user_id"] == user_id
+
+    # Sleep sync must produce a normalized sleep row (summary only).
+    assert len(pool.health_normalized_sleep) == 1
+
 
 async def test_cursor_advances_after_derived_writes_in_transaction() -> None:
     """The sync cursor must advance only after both source and derived
@@ -433,3 +476,99 @@ async def test_cursor_advances_after_derived_writes_in_transaction() -> None:
     assert len(pool.health_normalized_measurements) == 6
     # Source records exist
     assert len(pool.health_source_records) == 2
+
+
+# ---------------------------------------------------------------------------
+# T6: workout normalization insert, revision replacement, tombstone removal,
+#     and FakePool rollback/snapshot behaviour.
+# ---------------------------------------------------------------------------
+
+
+async def test_workout_sync_produces_normalized_workout_row() -> None:
+    """A workout sync must store the source record and produce exactly one
+    normalized workout row with the correct workout_type and metrics."""
+    pool = FakePool()
+    repository = repository_for(pool)
+    provider = FakeWithingsProvider()
+    access_token = await _rotated_access_token(provider)
+    user_id = uuid4()
+    connection_id = pool.seed_health_connection(user_id=user_id, external_user_id="420001")
+
+    outcome = await sync_connection_resource(
+        repository=repository,
+        provider=provider,
+        connection_id=connection_id,
+        user_id=user_id,
+        access_token=access_token,
+        resource_type=HealthResourceType.WORKOUT,
+        now=datetime(2026, 7, 20, 7, 30, tzinfo=UTC),
+    )
+
+    assert outcome.status.value == "completed"
+    assert outcome.fetched_count == 1
+    assert outcome.cursor_after is not None
+
+    # One source record, one normalized workout row, no measurement rows.
+    assert len(pool.health_source_records) == 1
+    assert len(pool.health_normalized_workouts) == 1
+    assert len(pool.health_normalized_measurements) == 0
+
+    nw = list(pool.health_normalized_workouts.values())[0]
+    sr = list(pool.health_source_records.values())[0]
+    assert nw["source_record_id"] == sr["id"]
+    assert nw["workout_type"] == "running"
+    assert nw["duration_seconds"] == 2460
+    assert nw["distance_meters"] == pytest.approx(6210.0)
+    assert nw["steps"] == 8120
+
+
+async def test_workout_sync_cursor_advances_after_normalized_write() -> None:
+    """The workout sync cursor must advance only after the normalized
+    workout row is written within the same transaction."""
+    pool = FakePool()
+    repository = repository_for(pool)
+    user_id = uuid4()
+    connection_id = pool.seed_health_connection(user_id=user_id, external_user_id="420001")
+
+    provider = FakeWithingsProvider()
+    access_token = await _rotated_access_token(provider)
+
+    outcome = await sync_connection_resource(
+        repository=repository,
+        provider=provider,
+        connection_id=connection_id,
+        user_id=user_id,
+        access_token=access_token,
+        resource_type=HealthResourceType.WORKOUT,
+        now=datetime(2026, 7, 20, 7, 30, tzinfo=UTC),
+    )
+
+    assert outcome.status.value == "completed"
+    assert outcome.cursor_after is not None
+    assert len(pool.health_normalized_workouts) == 1
+    assert len(pool.health_source_records) == 1
+
+
+async def test_measurement_sync_does_not_produce_workout_rows() -> None:
+    """A measurement sync must never create normalized workout rows."""
+    pool = FakePool()
+    repository = repository_for(pool)
+    user_id = uuid4()
+    connection_id = pool.seed_health_connection(user_id=user_id, external_user_id="420001")
+
+    provider = FakeWithingsProvider()
+    access_token = await _rotated_access_token(provider)
+
+    await sync_connection_resource(
+        repository=repository,
+        provider=provider,
+        connection_id=connection_id,
+        user_id=user_id,
+        access_token=access_token,
+        resource_type=HealthResourceType.MEASUREMENT,
+        now=datetime(2026, 7, 20, 7, 30, tzinfo=UTC),
+    )
+
+    assert len(pool.health_normalized_measurements) == 6
+    assert len(pool.health_normalized_workouts) == 0
+    assert len(pool.health_normalized_sleep) == 0

@@ -32,6 +32,7 @@ from app.services.tools.read_tools import (
     list_commitments,
     list_events,
     get_adherence,
+    get_workout_summary,
 )
 from app.services.tools.registry import (
     READ_BEFORE_WRITE,
@@ -46,6 +47,7 @@ from tool_schemas import (
     ListCommitmentsInput,
     ListEventsInput,
     GetAdherenceInput,
+    GetWorkoutSummaryInput,
     Cadence,
     PressureStyle,
     AdherenceStatus,
@@ -1033,3 +1035,473 @@ async def test_missing_bot_id_rejected():
             ctx,
             CreateCommitmentInput(label="X", kind="workout", cadence=Cadence.daily),
         )
+
+
+# ---------------------------------------------------------------------------
+# get_workout_summary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_empty_no_connection():
+    """get_workout_summary returns empty output when no health connection exists."""
+    pool = _fresh_pool()
+    ctx = _make_hector_ctx(pool, current_step="read")
+
+    result = await get_workout_summary(ctx, GetWorkoutSummaryInput())
+    assert result.is_error is False
+    assert result.summaries == []
+    assert result.days_with_workouts == 0
+    assert result.connection_fresh is False
+    assert result.last_sync_at is None
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_empty_no_workouts():
+    """get_workout_summary returns empty output when health connection exists but no workouts."""
+    pool = _fresh_pool()
+    ctx = _make_hector_ctx(pool, current_step="read")
+    # Seed a health connection for this user.
+    pool.seed_health_connection(user_id=ctx.user.id)
+
+    result = await get_workout_summary(ctx, GetWorkoutSummaryInput())
+    assert result.is_error is False
+    assert result.summaries == []
+    assert result.days_with_workouts == 0
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_with_workout_data():
+    """get_workout_summary returns summaries when workouts exist."""
+    from datetime import date as dt_date
+
+    pool = _fresh_pool()
+    user = _make_user()
+    ctx = _make_hector_ctx(pool, user, current_step="read")
+    conn_id = pool.seed_health_connection(user_id=user.id)
+
+    # Seed a workout in the normalized workouts table.
+    now = datetime.now(timezone.utc)
+    wid = uuid4()
+    pool.health_normalized_workouts[wid] = {
+        "id": wid,
+        "source_record_id": uuid4(),
+        "connection_id": conn_id,
+        "user_id": user.id,
+        "started_at": now,
+        "ended_at": now,
+        "local_timezone": "UTC",
+        "local_offset_seconds": 0,
+        "workout_type": "running",
+        "duration_seconds": 1800,
+        "pause_duration_seconds": None,
+        "distance_meters": 5000.0,
+        "steps": None,
+        "energy_kcal": 300.0,
+        "elevation_gain_meters": None,
+        "average_heart_rate_bpm": None,
+        "max_heart_rate_bpm": None,
+        "source_device_id": None,
+        "source_device_model": None,
+        "attribution": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    result = await get_workout_summary(ctx, GetWorkoutSummaryInput())
+    assert result.is_error is False
+    assert result.days_with_workouts == 1
+    assert len(result.summaries) == 1
+    day = result.summaries[0]
+    assert day.workout_count == 1
+    assert "running" in day.workout_types
+    assert day.total_duration_minutes is not None
+    assert day.total_distance_km is not None
+    assert day.projected_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_with_projected_workout():
+    """get_workout_summary reflects projected_count from the projection ledger."""
+    from datetime import date as dt_date
+
+    pool = _fresh_pool()
+    user = _make_user()
+    ctx = _make_hector_ctx(pool, user, current_step="read")
+    conn_id = pool.seed_health_connection(user_id=user.id)
+
+    now = datetime.now(timezone.utc)
+    source_id = uuid4()
+    wid = uuid4()
+    pool.health_normalized_workouts[wid] = {
+        "id": wid,
+        "source_record_id": source_id,
+        "connection_id": conn_id,
+        "user_id": user.id,
+        "started_at": now,
+        "ended_at": now,
+        "local_timezone": "UTC",
+        "local_offset_seconds": 0,
+        "workout_type": "running",
+        "duration_seconds": 1800,
+        "pause_duration_seconds": None,
+        "distance_meters": 5000.0,
+        "steps": None,
+        "energy_kcal": 300.0,
+        "elevation_gain_meters": None,
+        "average_heart_rate_bpm": None,
+        "max_heart_rate_bpm": None,
+        "source_device_id": None,
+        "source_device_model": None,
+        "attribution": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    # Seed a projected projection.
+    proj_id = uuid4()
+    eid = uuid4()
+    cid = uuid4()
+    pool.health_source_to_event_projections[proj_id] = {
+        "id": proj_id,
+        "source_record_id": source_id,
+        "connection_id": conn_id,
+        "user_id": user.id,
+        "event_id": eid,
+        "commitment_id": cid,
+        "projection_version": 1,
+        "projection_status": "projected",
+        "match_rule": None,
+        "note": None,
+        "decision_reason": "matched",
+        "matched_local_date": None,
+        "supersedes_projection_id": None,
+        "projected_at": now,
+        "removed_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    result = await get_workout_summary(ctx, GetWorkoutSummaryInput())
+    assert result.is_error is False
+    day = result.summaries[0]
+    assert day.projected_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_coach_rejected():
+    """get_workout_summary rejects non-Hector bot (coach)."""
+    pool = _fresh_pool()
+    ctx = _make_coach_ctx(pool)
+    ctx = TurnContext(
+        turn_id=ctx.turn_id,
+        pool=pool,
+        user=ctx.user,
+        partner=None,
+        triggering_message_ids=ctx.triggering_message_ids,
+        bot_id="coach",
+        primary_topic_id=_FITNESS_TOPIC_ID,
+        primary_topic_slug="fitness",
+        current_step="read",
+    )
+
+    with pytest.raises(ValueError, match="restricted to.*hector"):
+        await get_workout_summary(ctx, GetWorkoutSummaryInput())
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_wrong_topic_rejected():
+    """get_workout_summary rejects when topic_slug is not a health topic."""
+    pool = _fresh_pool()
+    user = _make_user()
+    pool.users[user.id] = {
+        "id": user.id, "name": user.name, "phone": user.phone,
+        "timezone": user.timezone, "onboarding_state": "welcomed",
+        "pacing_preferences": {}, "pregnancy_edd": None,
+        "pregnancy_dating_basis": None, "pregnancy_lmp_date": None,
+        "pregnancy_scan_date": None, "pregnancy_scan_corrected_at": None,
+        "pregnancy_started_at": None, "pregnancy_ended_at": None,
+        "pregnancy_outcome": None,
+    }
+    ctx = TurnContext(
+        turn_id=uuid4(),
+        pool=pool,
+        user=user,
+        partner=None,
+        triggering_message_ids=[uuid4()],
+        bot_id="hector",
+        primary_topic_id=uuid4(),
+        primary_topic_slug="relationship",
+        current_step="read",
+    )
+
+    with pytest.raises(ValueError, match="health topic"):
+        await get_workout_summary(ctx, GetWorkoutSummaryInput())
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_in_read_phase():
+    """get_workout_summary is available in the 'read' step."""
+    pool = _fresh_pool()
+    ctx = _make_hector_ctx(pool, current_step="read")
+
+    allowed = _step_allowed(ctx)
+    assert "get_workout_summary" in allowed
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_in_record_phase():
+    """get_workout_summary is available in the 'record' step (RECORD_READ_TOOLS)."""
+    pool = _fresh_pool()
+    user = _make_user()
+    pool.users[user.id] = {
+        "id": user.id, "name": user.name, "phone": user.phone,
+        "timezone": user.timezone, "onboarding_state": "welcomed",
+        "pacing_preferences": {}, "pregnancy_edd": None,
+        "pregnancy_dating_basis": None, "pregnancy_lmp_date": None,
+        "pregnancy_scan_date": None, "pregnancy_scan_corrected_at": None,
+        "pregnancy_started_at": None, "pregnancy_ended_at": None,
+        "pregnancy_outcome": None,
+    }
+    ctx = TurnContext(
+        turn_id=uuid4(),
+        pool=pool,
+        user=user,
+        partner=None,
+        triggering_message_ids=[uuid4()],
+        bot_id="hector",
+        primary_topic_id=_FITNESS_TOPIC_ID,
+        primary_topic_slug="fitness",
+        current_step="record",
+    )
+
+    allowed = _step_allowed(ctx)
+    assert "get_workout_summary" in allowed
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_cross_user_isolation():
+    """get_workout_summary only returns workouts for the current user."""
+    pool = _fresh_pool()
+    user_a = _make_user()
+    user_b = _make_user()
+
+    conn_a = pool.seed_health_connection(user_id=user_a.id)
+    conn_b = pool.seed_health_connection(user_id=user_b.id)
+
+    now = datetime.now(timezone.utc)
+
+    # Seed workout for user_a.
+    wid_a = uuid4()
+    pool.health_normalized_workouts[wid_a] = {
+        "id": wid_a,
+        "source_record_id": uuid4(),
+        "connection_id": conn_a,
+        "user_id": user_a.id,
+        "started_at": now,
+        "ended_at": now,
+        "local_timezone": "UTC",
+        "local_offset_seconds": 0,
+        "workout_type": "running",
+        "duration_seconds": 1800,
+        "pause_duration_seconds": None,
+        "distance_meters": 5000.0,
+        "steps": None,
+        "energy_kcal": 300.0,
+        "elevation_gain_meters": None,
+        "average_heart_rate_bpm": None,
+        "max_heart_rate_bpm": None,
+        "source_device_id": None,
+        "source_device_model": None,
+        "attribution": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    # Seed workout for user_b.
+    wid_b = uuid4()
+    pool.health_normalized_workouts[wid_b] = {
+        "id": wid_b,
+        "source_record_id": uuid4(),
+        "connection_id": conn_b,
+        "user_id": user_b.id,
+        "started_at": now,
+        "ended_at": now,
+        "local_timezone": "UTC",
+        "local_offset_seconds": 0,
+        "workout_type": "cycling",
+        "duration_seconds": 3600,
+        "pause_duration_seconds": None,
+        "distance_meters": 20000.0,
+        "steps": None,
+        "energy_kcal": 600.0,
+        "elevation_gain_meters": None,
+        "average_heart_rate_bpm": None,
+        "max_heart_rate_bpm": None,
+        "source_device_id": None,
+        "source_device_model": None,
+        "attribution": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    ctx_a = _make_hector_ctx(pool, user_a, current_step="read")
+    result = await get_workout_summary(ctx_a, GetWorkoutSummaryInput())
+    assert result.days_with_workouts >= 1
+    # Only user_a's running workout should appear.
+    for day in result.summaries:
+        for wt in day.workout_types:
+            assert wt != "cycling"  # user_b's workout type must never leak
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_unmatched_projection_not_counted():
+    """Unmatched projections (no_eligible_slot) do NOT contribute to projected_count."""
+    pool = _fresh_pool()
+    user = _make_user()
+    ctx = _make_hector_ctx(pool, user, current_step="read")
+    conn_id = pool.seed_health_connection(user_id=user.id)
+
+    now = datetime.now(timezone.utc)
+    source_id = uuid4()
+    wid = uuid4()
+    pool.health_normalized_workouts[wid] = {
+        "id": wid,
+        "source_record_id": source_id,
+        "connection_id": conn_id,
+        "user_id": user.id,
+        "started_at": now,
+        "ended_at": now,
+        "local_timezone": "UTC",
+        "local_offset_seconds": 0,
+        "workout_type": "running",
+        "duration_seconds": 1800,
+        "pause_duration_seconds": None,
+        "distance_meters": 5000.0,
+        "steps": None,
+        "energy_kcal": 300.0,
+        "elevation_gain_meters": None,
+        "average_heart_rate_bpm": None,
+        "max_heart_rate_bpm": None,
+        "source_device_id": None,
+        "source_device_model": None,
+        "attribution": {},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    # Unmatched projection (no event_id, no commitment_id, reason = no_eligible_slot).
+    proj_id = uuid4()
+    pool.health_source_to_event_projections[proj_id] = {
+        "id": proj_id,
+        "source_record_id": source_id,
+        "connection_id": conn_id,
+        "user_id": user.id,
+        "event_id": None,
+        "commitment_id": None,
+        "projection_version": 1,
+        "projection_status": "projected",
+        "match_rule": None,
+        "note": None,
+        "decision_reason": "no_eligible_slot",
+        "matched_local_date": None,
+        "supersedes_projection_id": None,
+        "projected_at": now,
+        "removed_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    result = await get_workout_summary(ctx, GetWorkoutSummaryInput())
+    day = result.summaries[0]
+    assert day.projected_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_missing_bot_id_rejected():
+    """get_workout_summary rejects ctx with None bot_id."""
+    pool = _fresh_pool()
+    user = _make_user()
+    pool.users[user.id] = {
+        "id": user.id, "name": user.name, "phone": user.phone,
+        "timezone": user.timezone, "onboarding_state": "welcomed",
+        "pacing_preferences": {}, "pregnancy_edd": None,
+        "pregnancy_dating_basis": None, "pregnancy_lmp_date": None,
+        "pregnancy_scan_date": None, "pregnancy_scan_corrected_at": None,
+        "pregnancy_started_at": None, "pregnancy_ended_at": None,
+        "pregnancy_outcome": None,
+    }
+    ctx = TurnContext(
+        turn_id=uuid4(),
+        pool=pool,
+        user=user,
+        partner=None,
+        triggering_message_ids=[uuid4()],
+        bot_id=None,
+        primary_topic_id=_FITNESS_TOPIC_ID,
+        primary_topic_slug="fitness",
+        current_step="read",
+    )
+
+    with pytest.raises(ValueError, match="require ctx.bot_id"):
+        await get_workout_summary(ctx, GetWorkoutSummaryInput())
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_missing_topic_slug_rejected():
+    """get_workout_summary rejects ctx with None primary_topic_slug."""
+    pool = _fresh_pool()
+    user = _make_user()
+    pool.users[user.id] = {
+        "id": user.id, "name": user.name, "phone": user.phone,
+        "timezone": user.timezone, "onboarding_state": "welcomed",
+        "pacing_preferences": {}, "pregnancy_edd": None,
+        "pregnancy_dating_basis": None, "pregnancy_lmp_date": None,
+        "pregnancy_scan_date": None, "pregnancy_scan_corrected_at": None,
+        "pregnancy_started_at": None, "pregnancy_ended_at": None,
+        "pregnancy_outcome": None,
+    }
+    ctx = TurnContext(
+        turn_id=uuid4(),
+        pool=pool,
+        user=user,
+        partner=None,
+        triggering_message_ids=[uuid4()],
+        bot_id="hector",
+        primary_topic_id=_FITNESS_TOPIC_ID,
+        primary_topic_slug=None,
+        current_step="read",
+    )
+
+    with pytest.raises(ValueError, match="require ctx.primary_topic_slug"):
+        await get_workout_summary(ctx, GetWorkoutSummaryInput())
+
+
+@pytest.mark.asyncio
+async def test_get_workout_summary_write_phase_not_available():
+    """get_workout_summary is NOT available in 'respond' step."""
+    pool = _fresh_pool()
+    user = _make_user()
+    pool.users[user.id] = {
+        "id": user.id, "name": user.name, "phone": user.phone,
+        "timezone": user.timezone, "onboarding_state": "welcomed",
+        "pacing_preferences": {}, "pregnancy_edd": None,
+        "pregnancy_dating_basis": None, "pregnancy_lmp_date": None,
+        "pregnancy_scan_date": None, "pregnancy_scan_corrected_at": None,
+        "pregnancy_started_at": None, "pregnancy_ended_at": None,
+        "pregnancy_outcome": None,
+    }
+    ctx = TurnContext(
+        turn_id=uuid4(),
+        pool=pool,
+        user=user,
+        partner=None,
+        triggering_message_ids=[uuid4()],
+        bot_id="hector",
+        primary_topic_id=_FITNESS_TOPIC_ID,
+        primary_topic_slug="fitness",
+        current_step="respond",
+    )
+
+    allowed = _step_allowed(ctx)
+    assert "get_workout_summary" not in allowed

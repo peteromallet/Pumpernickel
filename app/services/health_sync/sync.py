@@ -20,6 +20,7 @@ from app.services.health_sync.models import (
 from app.services.health_sync.normalization import (
     normalize_measure_group,
     normalize_sleep_summary,
+    normalize_workout,
 )
 from app.services.health_sync.provider import HealthSyncProvider
 from app.services.health_sync.repository import HealthDirtyCategory, HealthSyncRepository
@@ -301,6 +302,22 @@ async def sync_connection_resource(
                         attribution=normalized_sleep.attribution,
                         executor=connection,
                     )
+            elif (
+                record.resource_type == HealthResourceType.WORKOUT
+                and not record.is_deleted
+            ):
+                normalized_workout = normalize_workout(
+                    record,
+                    revision_count=stored.revision_count,
+                )
+                if normalized_workout is not None:
+                    await repository.replace_normalized_workout(
+                        source_record_id=stored.record_id,
+                        connection_id=connection_id,
+                        user_id=user_id,
+                        workout=normalized_workout,
+                        executor=connection,
+                    )
         for tombstone in tombstones_to_store:
             stored = await repository.tombstone_source_record(
                 connection_id=connection_id,
@@ -324,7 +341,12 @@ async def sync_connection_resource(
                     executor=connection,
                 )
             elif tombstone.resource_type == HealthResourceType.WORKOUT:
-                pass
+                await repository.delete_normalized_workout(
+                    source_record_id=stored.record_id,
+                    connection_id=connection_id,
+                    user_id=user_id,
+                    executor=connection,
+                )
         if cursor_after is not None:
             await repository.store_cursor(
                 connection_id=connection_id,

@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     health_sync_measurements_enabled: bool = False
     health_sync_workouts_enabled: bool = False
     health_sync_sleep_enabled: bool = False
+    health_workout_projection_enabled: bool = False
     health_sync_poll_interval_s: float = Field(default=30.0, gt=0.0, le=3600.0)
     health_sync_batch_size: int = Field(default=25, ge=1, le=500)
     health_sync_request_timeout_s: float = Field(default=10.0, gt=0.0, le=60.0)

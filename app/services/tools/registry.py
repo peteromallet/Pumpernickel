@@ -163,6 +163,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     # health read tools (hector + habits exclusive)
     "get_weight_trend": "Read the user's latest weight plus 7-day and 30-day rolling aggregates (avg, min, max). Returns only compact derived summaries — never raw measurements. Only available to Hector (fitness) and Habits (habits) bots. Call before discussing weight progress to ground the conversation in data. Returns empty when no Withings data is available.",
     "get_sleep_summary": "Read the user's 7-day rolling sleep summary with per-night session counts, total asleep time (hours), total in-bed time (hours), and average sleep score. Returns only compact per-date aggregates — never raw sleep-stage timelines. Only available to Hector (fitness) and Habits (habits) bots. Call before discussing sleep patterns to ground the conversation in data. Returns empty when no Withings sleep data is available.",
+    "get_workout_summary": "Read the user's 7-day rolling workout summary with per-date workout counts, workout types, total duration (minutes), total distance (km), total energy (kcal), and projected workout counts. Returns only compact per-date aggregates — never raw workout timelines, device IDs, or heart-rate detail. Only available to Hector (fitness) and Habits (habits) bots. Call before discussing workout progress to ground the conversation in data. Returns empty when no Withings workout data is available.",
     # orientation tools — principles/manifestations/goals/priorities/anti-patterns (not memory facts, observation patterns, distillation explanations, commitment/event tracking, or OOB boundaries)
     "list_orientation_items": "List your stated principles, manifestations, goals, priorities, and anti-patterns for a topic — these are your compass headings, not memory facts, observations, or distillations. Use scope='own' for the primary topic; 'all' is not allowed for orientation reads. By default excludes unreviewed and rejected items because they are not Compass-visible. Use include_unreviewed=true or include_rejected=true to widen the result set when reviewing pending proposals.",
     "get_orientation_item": "Fetch a single orientation item by its UUID. Use to inspect a specific principle, manifestation, goal, priority, or anti-pattern's full detail before reviewing, updating, or linking evidence to it. Unreviewed bot_proposed items are hidden from Compass and only visible via this tool.",
@@ -261,6 +262,7 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     # health read tools (hector + habits exclusive)
     "get_weight_trend": read_tools.get_weight_trend,
     "get_sleep_summary": read_tools.get_sleep_summary,
+    "get_workout_summary": read_tools.get_workout_summary,
     # orientation read tools
     "list_orientation_items": read_tools.list_orientation_items,
     "get_orientation_item": read_tools.get_orientation_item,
@@ -294,6 +296,7 @@ HECTOR_ONLY_TOOLS: frozenset[str] = frozenset({
     "get_adherence",
     "get_weight_trend",
     "get_sleep_summary",
+    "get_workout_summary",
 })
 
 # ── Plan tools (mediator-only live-voice agenda authoring) ─────────────────
@@ -412,6 +415,7 @@ READ_PHASE_TOOLS = {
     # health read tools (hector + habits exclusive)
     "get_weight_trend",
     "get_sleep_summary",
+    "get_workout_summary",
     # orientation read tools
     "list_orientation_items",
     "get_orientation_item",

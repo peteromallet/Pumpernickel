@@ -1,13 +1,12 @@
-"""Pure (no-DB) adherence computation for the Hector fitness bot.
+"""EXPLICIT COMPATIBILITY SHIM — delegates to app.services.adherence.
 
-Computes slot grids from commitments, joins events against them by date,
-and classifies every slot as done / missed / excused / unknown / pending.
+All new code should import compute_adherence / summarize_board directly from
+app.services.adherence.  This module exists only for backward compatibility
+with tests and code that still import from app.services.commitments.
 
-Key design decisions (per plan):
-- 'unknown' is purely derived; it is NEVER written as an event.
-- 'weekly_count' produces count-based summaries, not exact weekday slots.
-- Weekly boundaries are Mon-Sun in the user's local timezone.
-- All date/time math uses stdlib (datetime, zoneinfo) — no DB imports.
+The production adherence path (compute_adherence) is the single canonical
+implementation.  classify_slots and get_adherence here delegate to it so
+there is no duplicate classification logic.
 """
 
 from __future__ import annotations
@@ -20,7 +19,18 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-# ── Cadence helpers ────────────────────────────────────────────────────────
+# ── Re-export canonical functions ──────────────────────────────────────────
+
+from app.services.adherence import (  # noqa: E402, F401
+    compute_adherence,
+    summarize_board,
+    AdherenceBoard,
+    AdherenceSlot,
+    iter_week_dates,
+)
+
+
+# ── Helpers (kept for slot generation — richer label format) ──────────────
 
 
 def _today_in_tz(tz: ZoneInfo, now_utc: datetime | None = None) -> dt_date:
@@ -51,7 +61,7 @@ def _day_label(d: dt_date, today: dt_date) -> str:
     return f"{wd} {date_str}"
 
 
-# ── Slot computation ───────────────────────────────────────────────────────
+# ── Slot computation (kept — generates richer labels than adherence.py) ───
 
 
 def compute_slots(
@@ -153,7 +163,7 @@ def compute_slots(
     return slots
 
 
-# ── Slot classification ────────────────────────────────────────────────────
+# ── Slot classification — delegates to canonical compute_adherence ─────────
 
 
 def classify_slots(
@@ -164,52 +174,62 @@ def classify_slots(
 ) -> list[dict[str, Any]]:
     """Join events against slots by date and classify each slot.
 
-    Classification rules:
-      - Events with adherence_status='done'/'missed'/'excused' set the slot status.
-      - Slots in the past with no matching event → 'unknown'
-      - Slots today or in the future with no event → 'pending'
+    DELEGATES to app.services.adherence.compute_adherence for the
+    canonical classification logic.  This ensures no duplicate
+    implementation of the type-safety invariant:
 
-    For weekly_count slots, count done/missed/excused events against target_count.
+      Only events with an explicit adherence_status in
+      ('done', 'missed', 'excused') AND a matching commitment_id
+      can classify a slot.
+
+    Numeric-only, weight, sleep, or generic measurement events can
+    NEVER satisfy a commitment through this path.
     """
-    today = _today_in_tz(timezone, now_utc)
-    events_by_date: dict[dt_date, list[dict[str, Any]]] = defaultdict(list)
-    for evt in events:
-        observed_at = evt.get("observed_at")
-        if isinstance(observed_at, str):
-            try:
-                observed_dt = datetime.fromisoformat(observed_at)
-            except (ValueError, TypeError):
-                continue
-        elif isinstance(observed_at, datetime):
-            observed_dt = observed_at
-        else:
-            continue
+    if not slots:
+        return []
 
-        # Convert to user-local date
-        if observed_dt.tzinfo is None:
-            observed_dt = observed_dt.replace(tzinfo=dt_timezone.utc)
-        local_dt = observed_dt.astimezone(timezone)
-        evt_date = local_dt.date()
-        events_by_date[evt_date].append(evt)
+    today = _today_in_tz(timezone, now_utc)
+
+    # Reconstruct a minimal commitment that matches the slot date range.
+    # compute_adherence handles commitment_id filtering and the
+    # type-safe classification rules internally.
+    slot_dates = sorted(dt_date.fromisoformat(s["date"]) for s in slots)
+    first_date = slot_dates[0]
+    last_date = slot_dates[-1]
+
+    # Infer cadence for weekly_count summary slots
+    if slots[0].get("is_weekly_count"):
+        cadence = "weekly_count"
+        target_count = slots[0].get("target_count", len(slots))
+    else:
+        cadence = "custom"
+        target_count = None
+
+    commitment: dict[str, Any] = {
+        "id": events[0].get("commitment_id", "") if events else "",
+        "label": "",
+        "cadence": cadence,
+        "start_date": first_date,
+        "end_date": last_date,
+        "days_of_week": list({d.weekday() for d in slot_dates}),
+        "target_count": target_count,
+        "schedule_rule": {},
+    }
+
+    board = compute_adherence(commitment, events, today, timezone)
+
+    # Map canonical statuses back to the pre-computed slots
+    status_by_date: dict[str, str] = {s.date.isoformat(): s.status for s in board.slots}
 
     classified: list[dict[str, Any]] = []
     for slot in slots:
-        slot_date = dt_date.fromisoformat(slot["date"])
-        matching = events_by_date.get(slot_date, [])
+        slot_date = slot["date"]
+        status = status_by_date.get(slot_date, "pending")
 
-        # Check if any event has adherence_status
-        adherence_event = None
-        for evt in matching:
-            if evt.get("adherence_status") in ("done", "missed", "excused"):
-                adherence_event = evt
-                break
-
-        if adherence_event:
-            slot["status"] = adherence_event["adherence_status"]
-            slot["event_id"] = str(adherence_event.get("id", "")) if adherence_event.get("id") else None
-            slot["event_note"] = adherence_event.get("note")
-        elif slot.get("is_weekly_count"):
-            # For weekly_count, count adherence events occurring this week
+        if slot.get("is_weekly_count"):
+            # For weekly_count, count done/missed events across all
+            # matching events (same logic as the canonical path in
+            # compute_adherence, but applied to the summary slot).
             done_count = sum(
                 1 for evt in events
                 if evt.get("adherence_status") == "done"
@@ -228,17 +248,44 @@ def classify_slots(
                 slot["_missed_count"] = missed_count
             else:
                 slot["status"] = "pending"
-        elif slot_date < today:
-            slot["status"] = "unknown"
         else:
-            slot["status"] = "pending"  # today or future
+            slot["status"] = status
+
+            # Attach event metadata for the matching date
+            # Build a quick lookup by date to find the event that matched
+            event_map: dict[dt_date, dict[str, Any]] = {}
+            for evt in events:
+                observed_at = evt.get("observed_at")
+                if isinstance(observed_at, str):
+                    try:
+                        observed_dt = datetime.fromisoformat(observed_at)
+                    except (ValueError, TypeError):
+                        continue
+                elif isinstance(observed_at, datetime):
+                    observed_dt = observed_at
+                else:
+                    continue
+                if observed_dt.tzinfo is None:
+                    observed_dt = observed_dt.replace(tzinfo=dt_timezone.utc)
+                local_dt = observed_dt.astimezone(timezone)
+                evt_date = local_dt.date()
+                if evt_date not in event_map or (
+                    event_map[evt_date].get("adherence_status") is None
+                    and evt.get("adherence_status") is not None
+                ):
+                    event_map[evt_date] = evt
+
+            matching_evt = event_map.get(dt_date.fromisoformat(slot_date))
+            if matching_evt and matching_evt.get("adherence_status") in ("done", "missed", "excused"):
+                slot["event_id"] = str(matching_evt.get("id", "")) if matching_evt.get("id") else None
+                slot["event_note"] = matching_evt.get("note")
 
         classified.append(slot)
 
     return classified
 
 
-# ── Adherence summary ──────────────────────────────────────────────────────
+# ── Adherence summary — delegates to canonical compute_adherence ───────────
 
 
 def get_adherence(
@@ -249,6 +296,10 @@ def get_adherence(
 ) -> dict[str, Any]:
     """Compute adherence read-model for a set of commitments and events.
 
+    DELEGATES to app.services.adherence.compute_adherence for each
+    commitment.  This is the only classification path — there is no
+    duplicate implementation.
+
     Returns:
         {
             'commitments': [
@@ -258,7 +309,7 @@ def get_adherence(
                     'cadence': str,
                     'slots': [...],
                     'period_totals': {'done': N, 'missed': N, 'excused': N, 'unknown': N, 'pending': N},
-                    'summary': str,  # count-based for weekly_count
+                    'summary': str,
                 }
             ],
             'period_label': 'this week',
@@ -276,14 +327,19 @@ def get_adherence(
         label = str(c.get("label", ""))
         cadence = str(c.get("cadence", "custom"))
 
+        # Generate slots using the legacy slot generator (clips to today
+        # for commitments without end_date, unlike compute_adherence
+        # which always generates the full week).
         slots = compute_slots(c, timezone, now_utc)
 
-        # Filter events to those matching this commitment
+        # Filter events to those matching this commitment.
         c_events = [
             e for e in events
             if str(e.get("commitment_id", "")) == cid
         ]
 
+        # Classify using the canonical implementation via classify_slots,
+        # which delegates to compute_adherence.
         classified = classify_slots(slots, c_events, timezone, now_utc)
 
         # Period totals
@@ -302,7 +358,7 @@ def get_adherence(
             elif status in totals:
                 totals[status] += 1
 
-        # Summary string
+        # Summary string (compatible format)
         if cadence == "weekly_count":
             target = c.get("target_count") or 0
             done = totals["done"]

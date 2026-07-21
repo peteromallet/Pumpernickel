@@ -27,6 +27,7 @@ def test_health_sync_defaults_off_and_starts_without_provider_secrets(app_env, m
     assert settings.health_sync_measurements_enabled is False
     assert settings.health_sync_workouts_enabled is False
     assert settings.health_sync_sleep_enabled is False
+    assert settings.health_workout_projection_enabled is False
     assert settings.data_encryption_key is None
     assert settings.withings_client_id is None
     assert settings.withings_client_secret is None

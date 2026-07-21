@@ -531,6 +531,205 @@ class NormalizedSleep:
         object.__setattr__(self, "attribution", dict(self.attribution))
 
 
+# ---------------------------------------------------------------------------
+# Withings workout category → Hector taxonomy
+# ---------------------------------------------------------------------------
+
+
+# Canonical Withings workout category constants.
+# Source: Withings API v2 getworkouts response `category` field.
+class WithingsWorkoutCategory(IntEnum):
+    WALK = 1
+    RUN = 2
+    HIKING = 3
+    SKATING = 4
+    BMX = 5
+    BICYCLING = 6
+    SWIMMING = 7
+    SURFING = 8
+    KITESURFING = 9
+    WINDSURFING = 10
+    BODYBOARD = 11
+    TENNIS = 12
+    TABLE_TENNIS = 13
+    SQUASH = 14
+    BADMINTON = 15
+    LIFT_WEIGHTS = 16
+    CALISTHENICS = 17
+    ELLIPTICAL = 18
+    PILATES = 19
+    BASKETBALL = 20
+    SOCCER = 21
+    FOOTBALL = 22
+    RUGBY = 23
+    VOLLEYBALL = 24
+    WATERPOLO = 25
+    HORSE_RIDING = 26
+    GOLF = 27
+    YOGA = 28
+    DANCING = 29
+    BOXING = 30
+    FENCING = 31
+    WRESTLING = 32
+    MARTIAL_ARTS = 33
+    SKIING = 34
+    SNOWBOARDING = 35
+    ICE_HOCKEY = 36
+    CLIMBING = 37
+    ICE_SKATING = 38
+    MULTISPORT = 39
+    ROWING = 40
+    ZUMBA = 41
+    BASEBALL = 42
+    HANDBALL = 43
+    HOCKEY = 44
+    PING_PONG = 45
+    RIDING = 46
+    ROCK_CLIMBING = 47
+    SAILING = 48
+    SKI_TOURING = 49
+    SNOWSHOEING = 50
+    STAND_UP_PADDLE = 51
+    TRIATHLON = 52
+    # Catch-all for unknown categories.
+    OTHER = 999
+
+
+# Mapping from Withings workout category integer to Hector taxonomy label.
+# Unknown / unmapped categories resolve to "unknown".
+WITHINGS_WORKOUT_TAXONOMY: dict[int, str] = {
+    WithingsWorkoutCategory.WALK: "walking",
+    WithingsWorkoutCategory.RUN: "running",
+    WithingsWorkoutCategory.HIKING: "hiking",
+    WithingsWorkoutCategory.SKATING: "skating",
+    WithingsWorkoutCategory.BMX: "cycling",
+    WithingsWorkoutCategory.BICYCLING: "cycling",
+    WithingsWorkoutCategory.SWIMMING: "swimming",
+    WithingsWorkoutCategory.SURFING: "surfing",
+    WithingsWorkoutCategory.KITESURFING: "kitesurfing",
+    WithingsWorkoutCategory.WINDSURFING: "windsurfing",
+    WithingsWorkoutCategory.BODYBOARD: "bodyboard",
+    WithingsWorkoutCategory.TENNIS: "tennis",
+    WithingsWorkoutCategory.TABLE_TENNIS: "table_tennis",
+    WithingsWorkoutCategory.SQUASH: "squash",
+    WithingsWorkoutCategory.BADMINTON: "badminton",
+    WithingsWorkoutCategory.LIFT_WEIGHTS: "strength",
+    WithingsWorkoutCategory.CALISTHENICS: "strength",
+    WithingsWorkoutCategory.ELLIPTICAL: "elliptical",
+    WithingsWorkoutCategory.PILATES: "pilates",
+    WithingsWorkoutCategory.BASKETBALL: "basketball",
+    WithingsWorkoutCategory.SOCCER: "soccer",
+    WithingsWorkoutCategory.FOOTBALL: "football",
+    WithingsWorkoutCategory.RUGBY: "rugby",
+    WithingsWorkoutCategory.VOLLEYBALL: "volleyball",
+    WithingsWorkoutCategory.WATERPOLO: "waterpolo",
+    WithingsWorkoutCategory.HORSE_RIDING: "horse_riding",
+    WithingsWorkoutCategory.GOLF: "golf",
+    WithingsWorkoutCategory.YOGA: "yoga",
+    WithingsWorkoutCategory.DANCING: "dancing",
+    WithingsWorkoutCategory.BOXING: "boxing",
+    WithingsWorkoutCategory.FENCING: "fencing",
+    WithingsWorkoutCategory.WRESTLING: "wrestling",
+    WithingsWorkoutCategory.MARTIAL_ARTS: "martial_arts",
+    WithingsWorkoutCategory.SKIING: "skiing",
+    WithingsWorkoutCategory.SNOWBOARDING: "snowboarding",
+    WithingsWorkoutCategory.ICE_HOCKEY: "ice_hockey",
+    WithingsWorkoutCategory.CLIMBING: "climbing",
+    WithingsWorkoutCategory.ICE_SKATING: "ice_skating",
+    WithingsWorkoutCategory.MULTISPORT: "multisport",
+    WithingsWorkoutCategory.ROWING: "rowing",
+    WithingsWorkoutCategory.ZUMBA: "zumba",
+    WithingsWorkoutCategory.BASEBALL: "baseball",
+    WithingsWorkoutCategory.HANDBALL: "handball",
+    WithingsWorkoutCategory.HOCKEY: "hockey",
+    WithingsWorkoutCategory.PING_PONG: "table_tennis",
+    WithingsWorkoutCategory.RIDING: "horse_riding",
+    WithingsWorkoutCategory.ROCK_CLIMBING: "climbing",
+    WithingsWorkoutCategory.SAILING: "sailing",
+    WithingsWorkoutCategory.SKI_TOURING: "skiing",
+    WithingsWorkoutCategory.SNOWSHOEING: "snowshoeing",
+    WithingsWorkoutCategory.STAND_UP_PADDLE: "stand_up_paddle",
+    WithingsWorkoutCategory.TRIATHLON: "triathlon",
+}
+
+
+# Broadcast Hector taxonomy labels that can satisfy a Hector fitness commitment.
+# These are the types that the projection matcher considers compatible.
+HECTOR_FITNESS_TAXONOMY_LABELS: frozenset[str] = frozenset(
+    {
+        "walking",
+        "running",
+        "hiking",
+        "cycling",
+        "swimming",
+        "strength",
+        "elliptical",
+        "yoga",
+        "pilates",
+        "dancing",
+        "rowing",
+        "climbing",
+        "skiing",
+        "snowboarding",
+        "skating",
+        "ice_skating",
+        "martial_arts",
+        "boxing",
+        "soccer",
+        "basketball",
+        "tennis",
+        "golf",
+        "triathlon",
+        "multisport",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedWorkout:
+    """A single normalized workout row ready for persistence.
+
+    This carries the decoded fields extracted from a Withings workout
+    source record.  The ``workout_type`` is the Hector taxonomy label
+    resolved from the Withings category via ``WITHINGS_WORKOUT_TAXONOMY``
+    (``"unknown"`` when the category is absent or unmapped).
+
+    Provider source identity is carried through ``attribution`` so
+    downstream consumers can trace the original source record without
+    coupling to any particular storage engine.
+
+    Optional metrics (distance, steps, energy, elevation, heart-rate)
+    are nullable — the normalizer never estimates missing fields.
+    """
+
+    started_at: datetime
+    ended_at: datetime | None = None
+    local_date: date | None = None
+    local_timezone: str | None = None
+    local_offset_seconds: int | None = None
+    workout_type: str = "unknown"
+    duration_seconds: int | None = None
+    pause_duration_seconds: int | None = None
+    distance_meters: float | None = None
+    steps: int | None = None
+    energy_kcal: float | None = None
+    elevation_gain_meters: float | None = None
+    average_heart_rate_bpm: float | None = None
+    max_heart_rate_bpm: float | None = None
+    source_device_id: str | None = None
+    source_device_model: str | None = None
+    attribution: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "started_at", _normalize_datetime(self.started_at))
+        if self.ended_at is not None:
+            object.__setattr__(self, "ended_at", _normalize_datetime(self.ended_at))
+        object.__setattr__(self, "workout_type", _require_text(self.workout_type, field_name="workout_type"))
+        object.__setattr__(self, "attribution", dict(self.attribution))
+        if self.ended_at is not None and self.ended_at < self.started_at:
+            raise ValueError("ended_at must not be earlier than started_at")
+
+
 __all__ = [
     "DEFAULT_CURSOR_OVERLAP",
     "HealthDirtyState",
@@ -547,11 +746,15 @@ __all__ = [
     "HealthSyncOutcome",
     "HealthSyncStatus",
     "HealthTombstone",
+    "HECTOR_FITNESS_TAXONOMY_LABELS",
     "NormalizedMeasurement",
     "NormalizedSleep",
+    "NormalizedWorkout",
     "WITHINGS_METRIC_MAP",
     "WITHINGS_PROVIDER_CAPABILITIES",
+    "WITHINGS_WORKOUT_TAXONOMY",
     "WithingsMeasureType",
+    "WithingsWorkoutCategory",
     "build_fallback_external_id",
     "resolve_external_id",
 ]

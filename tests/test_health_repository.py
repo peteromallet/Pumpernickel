@@ -11,6 +11,7 @@ from app.services.health_sync.models import (
     HealthSourceRecord,
     HealthSyncCursor,
     HealthTombstone,
+    NormalizedWorkout,
 )
 from app.services.health_sync.repository import HealthSyncRepository
 from tests.conftest import FakePool
@@ -182,3 +183,213 @@ async def test_repository_transaction_rolls_back_health_mutations() -> None:
         resource_type=HealthResourceType.WORKOUT,
     )
     assert loaded is None
+
+
+# ---------------------------------------------------------------------------
+# T6: workout normalized row repository operations — insert, replace, delete,
+#     and FakePool rollback/snapshot behaviour.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replace_normalized_workout_inserts_and_replaces() -> None:
+    """replace_normalized_workout must delete any existing row for the same
+    source_record_id and insert exactly one new row (replace semantics)."""
+    pool = FakePool()
+    repository = HealthSyncRepository(pool)
+    user_id = uuid4()
+    connection_id = pool.seed_health_connection(user_id=user_id, external_user_id="420001")
+
+    # First, upsert a source record to get a record_id.
+    stored = await repository.upsert_source_record(
+        connection_id=connection_id,
+        user_id=user_id,
+        record=HealthSourceRecord(
+            provider=HealthProviderSlug.WITHINGS,
+            resource_type=HealthResourceType.WORKOUT,
+            external_id="workout-1",
+            source_modified_at=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+            payload_hash="hash-v1",
+        ),
+        now=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+    )
+
+    # Insert a normalized workout row via the repository.
+    workout_1 = NormalizedWorkout(
+        started_at=datetime(2026, 7, 19, 14, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 7, 19, 14, 41, tzinfo=UTC),
+        workout_type="running",
+        duration_seconds=2460,
+        distance_meters=6210.0,
+        steps=8120,
+        energy_kcal=346.0,
+        attribution={"revision_count": 1},
+    )
+    async with repository.transaction() as connection:
+        row_id_1 = await repository.replace_normalized_workout(
+            source_record_id=stored.record_id,
+            connection_id=connection_id,
+            user_id=user_id,
+            workout=workout_1,
+            executor=connection,
+        )
+
+    assert len(pool.health_normalized_workouts) == 1
+    assert pool.health_normalized_workouts[row_id_1]["workout_type"] == "running"
+
+    # Replace with updated workout data (same source_record_id).
+    workout_2 = NormalizedWorkout(
+        started_at=datetime(2026, 7, 19, 14, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 7, 19, 14, 50, tzinfo=UTC),
+        workout_type="cycling",
+        duration_seconds=3000,
+        distance_meters=15000.0,
+        energy_kcal=520.0,
+        attribution={"revision_count": 2},
+    )
+    async with repository.transaction() as connection:
+        row_id_2 = await repository.replace_normalized_workout(
+            source_record_id=stored.record_id,
+            connection_id=connection_id,
+            user_id=user_id,
+            workout=workout_2,
+            executor=connection,
+        )
+
+    # Only one row — replaced, not duplicated.
+    assert len(pool.health_normalized_workouts) == 1
+    assert row_id_1 != row_id_2
+    replaced = pool.health_normalized_workouts[row_id_2]
+    assert replaced["workout_type"] == "cycling"
+    assert replaced["duration_seconds"] == 3000
+    assert replaced["distance_meters"] == pytest.approx(15000.0)
+    assert replaced["energy_kcal"] == pytest.approx(520.0)
+    assert replaced["attribution"]["revision_count"] == 2
+
+    # Old row must be gone.
+    assert row_id_1 not in pool.health_normalized_workouts
+
+
+@pytest.mark.asyncio
+async def test_delete_normalized_workout_removes_row() -> None:
+    """delete_normalized_workout must remove the normalized row for the
+    given source_record_id while leaving other normalized rows intact."""
+    pool = FakePool()
+    repository = HealthSyncRepository(pool)
+    user_id = uuid4()
+    connection_id = pool.seed_health_connection(user_id=user_id, external_user_id="420001")
+
+    stored_1 = await repository.upsert_source_record(
+        connection_id=connection_id,
+        user_id=user_id,
+        record=HealthSourceRecord(
+            provider=HealthProviderSlug.WITHINGS,
+            resource_type=HealthResourceType.WORKOUT,
+            external_id="workout-1",
+            source_modified_at=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+            payload_hash="hash-v1",
+        ),
+        now=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+    )
+    stored_2 = await repository.upsert_source_record(
+        connection_id=connection_id,
+        user_id=user_id,
+        record=HealthSourceRecord(
+            provider=HealthProviderSlug.WITHINGS,
+            resource_type=HealthResourceType.WORKOUT,
+            external_id="workout-2",
+            source_modified_at=datetime(2026, 7, 20, 12, 5, tzinfo=UTC),
+            payload_hash="hash-v2",
+        ),
+        now=datetime(2026, 7, 20, 12, 5, tzinfo=UTC),
+    )
+
+    workout_1 = NormalizedWorkout(
+        started_at=datetime(2026, 7, 19, 14, 0, tzinfo=UTC),
+        workout_type="running",
+        duration_seconds=2460,
+    )
+    workout_2 = NormalizedWorkout(
+        started_at=datetime(2026, 7, 19, 16, 0, tzinfo=UTC),
+        workout_type="cycling",
+        duration_seconds=3000,
+    )
+
+    async with repository.transaction() as connection:
+        await repository.replace_normalized_workout(
+            source_record_id=stored_1.record_id,
+            connection_id=connection_id,
+            user_id=user_id,
+            workout=workout_1,
+            executor=connection,
+        )
+        await repository.replace_normalized_workout(
+            source_record_id=stored_2.record_id,
+            connection_id=connection_id,
+            user_id=user_id,
+            workout=workout_2,
+            executor=connection,
+        )
+
+    assert len(pool.health_normalized_workouts) == 2
+
+    # Delete workout-1's normalized row.
+    async with repository.transaction() as connection:
+        await repository.delete_normalized_workout(
+            source_record_id=stored_1.record_id,
+            connection_id=connection_id,
+            user_id=user_id,
+            executor=connection,
+        )
+
+    assert len(pool.health_normalized_workouts) == 1
+    remaining = list(pool.health_normalized_workouts.values())[0]
+    assert remaining["source_record_id"] == stored_2.record_id
+    assert remaining["workout_type"] == "cycling"
+
+
+@pytest.mark.asyncio
+async def test_repository_transaction_rolls_back_normalized_workout() -> None:
+    """When a transaction is rolled back, the normalized workout row
+    inserted inside it must also be rolled back (FakePool snapshot)."""
+    pool = FakePool()
+    repository = HealthSyncRepository(pool)
+    user_id = uuid4()
+    connection_id = pool.seed_health_connection(user_id=user_id, external_user_id="420001")
+
+    stored = await repository.upsert_source_record(
+        connection_id=connection_id,
+        user_id=user_id,
+        record=HealthSourceRecord(
+            provider=HealthProviderSlug.WITHINGS,
+            resource_type=HealthResourceType.WORKOUT,
+            external_id="workout-1",
+            source_modified_at=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+            payload_hash="hash-v1",
+        ),
+        now=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+    )
+
+    workout = NormalizedWorkout(
+        started_at=datetime(2026, 7, 19, 14, 0, tzinfo=UTC),
+        workout_type="running",
+        duration_seconds=2460,
+    )
+
+    with pytest.raises(RuntimeError):
+        async with repository.transaction() as connection:
+            await repository.replace_normalized_workout(
+                source_record_id=stored.record_id,
+                connection_id=connection_id,
+                user_id=user_id,
+                workout=workout,
+                executor=connection,
+            )
+            raise RuntimeError("force rollback")
+
+    # Normalized workout row must be absent after rollback.
+    assert len(pool.health_normalized_workouts) == 0
+    # Source record should also be rolled back (part of same txn in snapshots).
+    # But source record was upserted *outside* the transaction — it remains.
+    assert len(pool.health_source_records) == 1
+    assert pool.health_source_records[stored.record_id]["external_id"] == "workout-1"

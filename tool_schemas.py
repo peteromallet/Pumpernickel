@@ -2619,6 +2619,62 @@ class GetSleepSummaryOutput(BaseModel):
     )
 
 
+class WorkoutDaySummaryRow(BaseModel):
+    """Per-date workout aggregation within the 7-day rolling window."""
+
+    local_date: str = Field(description="ISO date (YYYY-MM-DD) in the user's local timezone.")
+    workout_count: int = Field(description="Number of workouts on this date.")
+    workout_types: list[str] = Field(
+        default_factory=list,
+        description="Distinct workout types on this date (e.g., running, cycling).",
+    )
+    total_duration_minutes: float | None = Field(
+        default=None,
+        description="Total active duration in minutes. None when no duration data.",
+    )
+    total_distance_km: float | None = Field(
+        default=None,
+        description="Total distance in km. None when no distance data.",
+    )
+    total_energy_kcal: float | None = Field(
+        default=None,
+        description="Total energy in kcal. None when no energy data.",
+    )
+    projected_count: int = Field(
+        default=0,
+        description="Number of workouts on this date that projected to an active commitment.",
+    )
+
+
+class GetWorkoutSummaryInput(BaseModel):
+    """No arguments — scope derives from the calling bot's turn context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GetWorkoutSummaryOutput(BaseModel):
+    """Compact 7-day rolling workout summary — aggregated per local date."""
+
+    is_error: bool = False
+    error: str | None = None
+    summaries: list[WorkoutDaySummaryRow] = Field(
+        default_factory=list,
+        description="One row per local_date in the 7-day window, oldest first.",
+    )
+    days_with_workouts: int = Field(
+        default=0,
+        description="Number of distinct days with workouts in the window.",
+    )
+    connection_fresh: bool = Field(
+        default=False,
+        description="True when the health connection completed a sync in the last 7 days.",
+    )
+    last_sync_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp of the last successful sync. None when never synced.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orientation tools — user-stated/reviewed principles, manifestations, goals,
 # priorities, and anti-patterns. Orientation is durable directional data distinct from
@@ -3246,6 +3302,7 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     # health read tools (hector + habits exclusive)
     "get_weight_trend": (GetWeightTrendInput, GetWeightTrendOutput),
     "get_sleep_summary": (GetSleepSummaryInput, GetSleepSummaryOutput),
+    "get_workout_summary": (GetWorkoutSummaryInput, GetWorkoutSummaryOutput),
     # live-voice plan tools
     "read_conversation_plan": (ReadConversationPlanInput, ReadConversationPlanOutput),
     "list_conversation_plans": (ListConversationPlansInput, ListConversationPlansOutput),

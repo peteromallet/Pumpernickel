@@ -275,6 +275,8 @@ class FakePool:
         self.health_dirty_categories: dict[UUID, dict[str, Any]] = {}
         self.health_normalized_measurements: dict[UUID, dict[str, Any]] = {}
         self.health_normalized_sleep: dict[UUID, dict[str, Any]] = {}
+        self.health_normalized_workouts: dict[UUID, dict[str, Any]] = {}
+        self.health_source_to_event_projections: dict[UUID, dict[str, Any]] = {}
         self._health_transaction_snapshots: list[dict[str, Any]] = []
 
     def _canonical_searchable_text(self, row: dict[str, Any]) -> str:
@@ -996,6 +998,12 @@ class FakePool:
                 "health_normalized_sleep": copy.deepcopy(
                     self.health_normalized_sleep
                 ),
+                "health_normalized_workouts": copy.deepcopy(
+                    self.health_normalized_workouts
+                ),
+                "health_source_to_event_projections": copy.deepcopy(
+                    self.health_source_to_event_projections
+                ),
             }
         )
 
@@ -1025,6 +1033,10 @@ class FakePool:
         self.health_dirty_categories = snapshot["health_dirty_categories"]
         self.health_normalized_measurements = snapshot["health_normalized_measurements"]
         self.health_normalized_sleep = snapshot["health_normalized_sleep"]
+        self.health_normalized_workouts = snapshot["health_normalized_workouts"]
+        self.health_source_to_event_projections = snapshot[
+            "health_source_to_event_projections"
+        ]
 
     def seed_health_connection(
         self,
@@ -1172,6 +1184,12 @@ class FakePool:
             return self._health_insert_normalized_measurement(*args)
         if compact.startswith("INSERT INTO mediator.health_normalized_sleep"):
             return self._health_insert_normalized_sleep(*args)
+        if compact.startswith("INSERT INTO mediator.health_normalized_workouts"):
+            return self._health_insert_normalized_workout(*args)
+        if compact.startswith("INSERT INTO mediator.health_source_to_event_projections"):
+            return self._health_insert_projection(*args)
+        if compact.startswith("INSERT INTO mediator.events") and "RETURNING id, commitment_id, metric_key, adherence_status, observed_at" in compact:
+            return self._health_insert_projection_event(*args)
         if compact.startswith("SELECT last_success_at FROM mediator.health_connections"):
             row = self.health_connections.get(args[0])
             if row is None or row.get("deleted_at") is not None:
@@ -1193,6 +1211,37 @@ class FakePool:
                 return None
             rows.sort(key=lambda r: (r["measured_at"], str(r["id"])), reverse=True)
             return dict(rows[0])
+        # ── Projection ledger SELECT / UPDATE (RETURNING) ──────────────────
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "projection_status IN ('pending', 'projected')" in compact
+            and "FOR UPDATE" in compact
+        ):
+            return self._health_find_active_projection_for_update(*args)
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "projection_status IN ('pending', 'projected')" in compact
+            and "FOR UPDATE" not in compact
+        ):
+            return self._health_find_active_projection(*args)
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "event_id = $1" in compact
+            and "LIMIT 1" in compact
+        ):
+            return self._health_find_projection_by_event(*args)
+        if compact.startswith(
+            "UPDATE mediator.health_source_to_event_projections SET projection_status = 'superseded'"
+        ):
+            return self._health_supersede_projection(*args)
+        if compact.startswith(
+            "UPDATE mediator.health_source_to_event_projections SET projection_status = 'removed'"
+        ):
+            return self._health_remove_projection(*args)
+        if compact.startswith(
+            "UPDATE mediator.health_source_to_event_projections SET event_id = NULL"
+        ):
+            return self._health_detach_projection_event(*args)
         return None
 
     def _health_fetch(self, compact: str, *args: Any) -> list[dict[str, Any]] | None:
@@ -1247,6 +1296,56 @@ class FakePool:
             ]
             rows.sort(key=lambda r: (r["local_sleep_date"], r["started_at"], str(r["id"])))
             return rows
+        # ── Workout read-model queries ──────────────────────────────────────
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_timezone, local_offset_seconds,")
+            and "FROM mediator.health_normalized_workouts" in compact
+            and "ORDER BY started_at DESC" in compact
+            and "LIMIT $2" in compact
+        ):
+            user_id, limit_val = args
+            rows = [
+                dict(r) for r in self.health_normalized_workouts.values()
+                if r["user_id"] == user_id
+            ]
+            rows.sort(key=lambda r: (r["started_at"], str(r["id"])), reverse=True)
+            return rows[: int(limit_val)]
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_timezone, local_offset_seconds,")
+            and "FROM mediator.health_normalized_workouts" in compact
+            and "started_at >= $2" in compact
+            and "started_at < $3" in compact
+            and "ORDER BY started_at" in compact
+        ):
+            user_id, range_start, range_end = args
+            rows = [
+                dict(r) for r in self.health_normalized_workouts.values()
+                if r["user_id"] == user_id
+                and r["started_at"] >= range_start
+                and r["started_at"] < range_end
+            ]
+            rows.sort(key=lambda r: (r["started_at"], str(r["id"])))
+            return rows
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "source_record_id = ANY($1::uuid[])" in compact
+            and "user_id = $2" in compact
+            and "ORDER BY source_record_id, projection_version DESC" in compact
+        ):
+            source_ids, user_id = args
+            allowed = set(source_ids or [])
+            rows = [
+                dict(r) for r in self.health_source_to_event_projections.values()
+                if r["user_id"] == user_id
+                and r["source_record_id"] in allowed
+            ]
+            rows.sort(
+                key=lambda r: (
+                    str(r["source_record_id"]),
+                    -r.get("projection_version", 0),
+                )
+            )
+            return rows
         return None
 
     def _health_execute(self, compact: str, *args: Any) -> str | None:
@@ -1256,6 +1355,8 @@ class FakePool:
             return self._health_delete_normalized_measurements(*args)
         if compact.startswith("DELETE FROM mediator.health_normalized_sleep"):
             return self._health_delete_normalized_sleep(*args)
+        if compact.startswith("DELETE FROM mediator.health_normalized_workouts"):
+            return self._health_delete_normalized_workouts(*args)
         return None
 
     def _health_upsert_connection(self, *args: Any) -> dict[str, Any]:
@@ -1692,6 +1793,201 @@ class FakePool:
         }
         self.health_normalized_sleep[row_id] = row
         return dict(row)
+
+    def _health_insert_normalized_workout(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id, connection_id, user_id,
+            started_at, ended_at,
+            local_timezone, local_offset_seconds, workout_type,
+            duration_seconds, pause_duration_seconds,
+            distance_meters, steps, energy_kcal,
+            elevation_gain_meters, average_heart_rate_bpm, max_heart_rate_bpm,
+            source_device_id, source_device_model, attribution,
+        ) = args
+        row_id = uuid4()
+        now = datetime.now(UTC)
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "local_timezone": local_timezone,
+            "local_offset_seconds": local_offset_seconds,
+            "workout_type": workout_type,
+            "duration_seconds": duration_seconds,
+            "pause_duration_seconds": pause_duration_seconds,
+            "distance_meters": distance_meters,
+            "steps": steps,
+            "energy_kcal": energy_kcal,
+            "elevation_gain_meters": elevation_gain_meters,
+            "average_heart_rate_bpm": average_heart_rate_bpm,
+            "max_heart_rate_bpm": max_heart_rate_bpm,
+            "source_device_id": source_device_id,
+            "source_device_model": source_device_model,
+            "attribution": dict(attribution or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.health_normalized_workouts[row_id] = row
+        return dict(row)
+
+    def _health_delete_normalized_workouts(self, *args: Any) -> str:
+        source_record_id, connection_id, user_id = args
+        deleted = 0
+        record_ids = [
+            rid for rid, row in self.health_normalized_workouts.items()
+            if row["source_record_id"] == source_record_id
+            and row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_normalized_workouts.pop(rid)
+            deleted += 1
+        return f"DELETE {deleted}"
+
+    # ── Projection ledger handlers ──────────────────────────────────────────
+
+    def _health_find_active_projection(self, *args: Any) -> dict[str, Any] | None:
+        source_record_id, user_id = args
+        for row in self.health_source_to_event_projections.values():
+            if (
+                row["source_record_id"] == source_record_id
+                and row["user_id"] == user_id
+                and row["projection_status"] in ("pending", "projected")
+            ):
+                return dict(row)
+        return None
+
+    def _health_find_active_projection_for_update(self, *args: Any) -> dict[str, Any] | None:
+        return self._health_find_active_projection(*args)
+
+    def _health_find_projection_by_event(self, *args: Any) -> dict[str, Any] | None:
+        (event_id,) = args
+        for row in self.health_source_to_event_projections.values():
+            if row.get("event_id") == event_id:
+                return dict(row)
+        return None
+
+    def _health_insert_projection(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id,
+            connection_id,
+            user_id,
+            event_id,
+            commitment_id,
+            projection_version,
+            projection_status,
+            match_rule,
+            note,
+            decision_reason,
+            matched_local_date,
+            supersedes_projection_id,
+            projected_at,
+        ) = args
+        now_val = projected_at or datetime.now(UTC)
+        row_id = uuid4()
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "event_id": event_id,
+            "commitment_id": commitment_id,
+            "projection_version": projection_version,
+            "projection_status": projection_status,
+            "match_rule": match_rule,
+            "note": note,
+            "decision_reason": decision_reason,
+            "matched_local_date": matched_local_date,
+            "supersedes_projection_id": supersedes_projection_id,
+            "projected_at": now_val,
+            "removed_at": None,
+            "created_at": now_val,
+            "updated_at": now_val,
+        }
+        self.health_source_to_event_projections[row_id] = row
+        return dict(row)
+
+    def _health_supersede_projection(self, *args: Any) -> dict[str, Any] | None:
+        projection_id, removed_at, user_id = args
+        row = self.health_source_to_event_projections.get(projection_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        row["projection_status"] = "superseded"
+        row["removed_at"] = removed_at
+        row["updated_at"] = removed_at
+        return dict(row)
+
+    def _health_remove_projection(self, *args: Any) -> dict[str, Any] | None:
+        projection_id, removed_at, user_id = args
+        row = self.health_source_to_event_projections.get(projection_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        row["projection_status"] = "removed"
+        row["event_id"] = None
+        row["removed_at"] = removed_at
+        row["updated_at"] = removed_at
+        return dict(row)
+
+    def _health_detach_projection_event(self, *args: Any) -> dict[str, Any] | None:
+        projection_id, updated_at, user_id = args
+        row = self.health_source_to_event_projections.get(projection_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        row["event_id"] = None
+        row["updated_at"] = updated_at
+        return {"id": row["id"]}
+
+    def _health_insert_projection_event(self, *args: Any) -> dict[str, Any]:
+        (
+            commitment_id,
+            user_id,
+            topic_id,
+            bot_id,
+            metric_key,
+            adherence_status,
+            value_numeric,
+            value_text,
+            unit,
+            observed_at,
+            note,
+            source_message_ids,
+        ) = args
+        row_id = uuid4()
+        row = {
+            "id": row_id,
+            "commitment_id": commitment_id,
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "bot_id": bot_id,
+            "metric_key": metric_key,
+            "adherence_status": adherence_status,
+            "value_numeric": value_numeric,
+            "value_text": value_text,
+            "unit": unit,
+            "observed_at": observed_at,
+            "note": note,
+            "source_message_ids": list(source_message_ids or []),
+            "created_at": observed_at,
+        }
+        self.events[row_id] = row
+        return {
+            "id": row_id,
+            "commitment_id": commitment_id,
+            "metric_key": metric_key,
+            "adherence_status": adherence_status,
+            "observed_at": observed_at,
+        }
+
+    def _health_delete_projection_event(self, *args: Any) -> dict[str, Any] | None:
+        event_id, user_id = args
+        row = self.events.get(event_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        del self.events[event_id]
+        return {"id": event_id}
 
     def _health_upsert_source_record(self, *args: Any) -> dict[str, Any]:
         (
@@ -3898,6 +4194,12 @@ class FakePool:
                 "scheduled_for": row["scheduled_for"],
                 "context": row["context"],
             }
+        # ── Projection: delete projection-owned event ────────────────────────
+        if (
+            "DELETE FROM mediator.events" in compact
+            and "RETURNING id" in compact
+        ):
+            return self._health_delete_projection_event(*args)
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):

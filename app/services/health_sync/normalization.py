@@ -14,10 +14,13 @@ from typing import Any, Mapping, Sequence
 import zoneinfo
 
 from app.services.health_sync.models import (
+    HealthResourceType,
     HealthSourceRecord,
     NormalizedMeasurement,
     NormalizedSleep,
+    NormalizedWorkout,
     WITHINGS_METRIC_MAP,
+    WITHINGS_WORKOUT_TAXONOMY,
 )
 
 
@@ -258,11 +261,150 @@ def normalize_sleep_summary(
     )
 
 
+# ---------------------------------------------------------------------------
+# Workout normalization
+# ---------------------------------------------------------------------------
+
+
+def resolve_workout_type(withings_category: int | None) -> str:
+    """Map a Withings workout category integer to a Hector taxonomy label.
+
+    Returns ``"unknown"`` when *withings_category* is ``None`` or is not
+    present in ``WITHINGS_WORKOUT_TAXONOMY``.  The normalizer never
+    estimates type from other fields.
+    """
+    if withings_category is None:
+        return "unknown"
+    return WITHINGS_WORKOUT_TAXONOMY.get(withings_category, "unknown")
+
+
+def normalize_workout(
+    record: HealthSourceRecord,
+    *,
+    revision_count: int = 1,
+) -> NormalizedWorkout | None:
+    """Decode a Withings workout source record into a NormalizedWorkout row.
+
+    Only workout records (``resource_type == WORKOUT``) are processed.
+    Deleted records (``is_deleted == True``) return ``None`` — the caller
+    is responsible for removing the normalized row via the repository
+    tombstone path.
+
+    The ``local_date`` is derived from ``started_at`` converted to the
+    source timezone when available, falling back to UTC.
+
+    Optional metrics (distance, steps, energy, elevation, pause duration,
+    heart-rate averages) are extracted from ``source_metadata.data`` and
+    remain ``None`` when absent — the normalizer never estimates missing
+    fields.
+
+    *revision_count* is threaded through from the persisted source record
+    and is carried in ``attribution`` for auditability.
+    """
+    if record.resource_type != HealthResourceType.WORKOUT:
+        return None
+
+    if record.is_deleted:
+        return None
+
+    started_at = record.starts_at
+    if started_at is None:
+        return None
+
+    ended_at = record.ends_at
+    timezone_name = record.source_timezone
+    local_date: date | None = None
+    offset_seconds: int | None = None
+
+    # Derive local_date from started_at in source timezone.
+    tz = resolve_timezone(timezone_name)
+    if tz is not None and started_at is not None:
+        local_start = started_at.astimezone(tz)
+        local_date = local_start.date()
+        offset = local_start.utcoffset()
+        if offset is not None:
+            offset_seconds = int(offset.total_seconds())
+
+    if local_date is None:
+        local_date = started_at.date()
+
+    if offset_seconds is None:
+        offset_seconds = calculate_offset_seconds(timezone_name, at_datetime=started_at)
+
+    # Resolve workout type from Withings category.
+    raw_category = record.source_metadata.get("category") if isinstance(record.source_metadata, Mapping) else None
+    category_int: int | None = None
+    if raw_category is not None:
+        try:
+            category_int = int(raw_category)
+        except (TypeError, ValueError):
+            category_int = None
+    workout_type = resolve_workout_type(category_int)
+
+    # Extract optional metrics from source_metadata.data.
+    data = record.source_metadata.get("data") if isinstance(record.source_metadata, Mapping) else None
+
+    def _float_field(key: str) -> float | None:
+        if data is None:
+            return None
+        raw = data.get(key)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _int_field(key: str) -> int | None:
+        if data is None:
+            return None
+        raw = data.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    # Duration from end-start when not provided explicitly.
+    duration_seconds: int | None = _int_field("duration")
+    if duration_seconds is None and started_at is not None and ended_at is not None:
+        delta = (ended_at - started_at).total_seconds()
+        if delta >= 0:
+            duration_seconds = int(delta) if delta.is_integer() else None
+
+    attribution = dict(record.attribution)
+    attribution["revision_count"] = revision_count
+    attribution["provider_category"] = category_int
+
+    return NormalizedWorkout(
+        started_at=started_at,
+        ended_at=ended_at,
+        local_date=local_date,
+        local_timezone=timezone_name,
+        local_offset_seconds=offset_seconds,
+        workout_type=workout_type,
+        duration_seconds=duration_seconds,
+        pause_duration_seconds=_int_field("pause_duration"),
+        distance_meters=_float_field("distance"),
+        steps=_int_field("steps"),
+        energy_kcal=_float_field("calories"),
+        elevation_gain_meters=_float_field("elevation"),
+        average_heart_rate_bpm=_float_field("hr_average"),
+        max_heart_rate_bpm=_float_field("hr_max"),
+        source_device_id=record.source_device_id or None,
+        source_device_model=record.source_device_model or None,
+        attribution=attribution,
+    )
+
+
 __all__ = [
     "calculate_offset_seconds",
     "decode_withings_value",
     "metric_info",
     "normalize_measure_group",
     "normalize_sleep_summary",
+    "normalize_workout",
     "resolve_timezone",
+    "resolve_workout_type",
 ]

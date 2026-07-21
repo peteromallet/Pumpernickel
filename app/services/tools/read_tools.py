@@ -124,6 +124,9 @@ from tool_schemas import (
     GetSleepSummaryInput,
     GetSleepSummaryOutput,
     SleepDaySummaryRow,
+    GetWorkoutSummaryInput,
+    GetWorkoutSummaryOutput,
+    WorkoutDaySummaryRow,
     # plan tools
     ReadConversationPlanInput,
     ReadConversationPlanOutput,
@@ -3500,6 +3503,77 @@ async def get_sleep_summary(
     return GetSleepSummaryOutput(
         summaries=summaries,
         nights_with_data=result.nights_with_data,
+        connection_fresh=connection_fresh,
+        last_sync_at=last_sync_at,
+    )
+
+
+async def get_workout_summary(
+    ctx: TurnContext, args: "GetWorkoutSummaryInput",
+) -> "GetWorkoutSummaryOutput":
+    """Return compact 7-day rolling workout summary.
+
+    Scoped to the current user.  Returns empty output (empty summaries,
+    zero days) when no workout data or no health connection exists.
+    """
+    _check_health_read_scope(ctx)
+
+    from app.services.health_sync.read_models import (  # noqa: PLC0415
+        get_weekly_workout_summary,
+        get_connection_freshness,
+    )
+
+    conn = await _fetch_health_connection(ctx)
+
+    # Connection freshness
+    connection_fresh = False
+    last_sync_at: str | None = None
+    if conn is not None:
+        freshness = await get_connection_freshness(
+            connection_id=conn["id"],
+            user_id=ctx.user.id,
+            pool=ctx.pool,
+        )
+        connection_fresh = freshness.is_fresh
+        if freshness.last_success_at is not None:
+            last_sync_at = freshness.last_success_at.isoformat()
+
+    # Workout data
+    result = await get_weekly_workout_summary(user_id=ctx.user.id, pool=ctx.pool)
+
+    summaries: list[WorkoutDaySummaryRow] = []
+    for day in result.summaries:
+        duration_minutes: float | None = None
+        if day.total_duration_seconds is not None:
+            duration_minutes = round(day.total_duration_seconds / 60.0, 1)
+        distance_km: float | None = None
+        if day.total_distance_meters is not None:
+            distance_km = round(day.total_distance_meters / 1000.0, 2)
+
+        # Collect distinct workout types for this day (compact, non-raw)
+        workout_types: list[str] = []
+        seen: set[str] = set()
+        for w in day.workouts:
+            wt = w.workout_type
+            if wt and wt not in seen:
+                seen.add(wt)
+                workout_types.append(wt)
+
+        summaries.append(
+            WorkoutDaySummaryRow(
+                local_date=str(day.local_date),
+                workout_count=day.workout_count,
+                workout_types=workout_types,
+                total_duration_minutes=duration_minutes,
+                total_distance_km=distance_km,
+                total_energy_kcal=day.total_energy_kcal,
+                projected_count=day.projected_count,
+            )
+        )
+
+    return GetWorkoutSummaryOutput(
+        summaries=summaries,
+        days_with_workouts=result.days_with_workouts,
         connection_fresh=connection_fresh,
         last_sync_at=last_sync_at,
     )

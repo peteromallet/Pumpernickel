@@ -17,6 +17,7 @@ from app.services.health_sync.models import (
     HealthSyncError,
     HealthTombstone,
     NormalizedMeasurement,
+    NormalizedWorkout,
 )
 
 _LOAD_CONNECTION_BY_PROVIDER_USER_SQL = """
@@ -241,6 +242,179 @@ _INSERT_NORMALIZED_SLEEP_SQL = """
     RETURNING id
 """
 
+_DELETE_NORMALIZED_WORKOUT_SQL = """
+    DELETE FROM mediator.health_normalized_workouts
+    WHERE source_record_id = $1
+      AND connection_id = $2
+      AND user_id = $3
+"""
+
+# ── Projection ledger SQL ───────────────────────────────────────────────────
+
+_SELECT_ACTIVE_PROJECTION_SQL = """
+    SELECT id, source_record_id, connection_id, user_id,
+           event_id, commitment_id, projection_version,
+           projection_status, match_rule, note,
+           decision_reason, matched_local_date,
+           supersedes_projection_id,
+           projected_at, removed_at, created_at, updated_at
+    FROM mediator.health_source_to_event_projections
+    WHERE source_record_id = $1
+      AND user_id = $2
+      AND projection_status IN ('pending', 'projected')
+    ORDER BY projection_version DESC
+    LIMIT 1
+"""
+
+_SELECT_ACTIVE_PROJECTION_FOR_UPDATE_SQL = """
+    SELECT id, source_record_id, connection_id, user_id,
+           event_id, commitment_id, projection_version,
+           projection_status, match_rule, note,
+           decision_reason, matched_local_date,
+           supersedes_projection_id,
+           projected_at, removed_at, created_at, updated_at
+    FROM mediator.health_source_to_event_projections
+    WHERE source_record_id = $1
+      AND user_id = $2
+      AND projection_status IN ('pending', 'projected')
+    ORDER BY projection_version DESC
+    LIMIT 1
+    FOR UPDATE
+"""
+
+_SELECT_PROJECTION_BY_EVENT_SQL = """
+    SELECT id, source_record_id, connection_id, user_id,
+           event_id, commitment_id, projection_version,
+           projection_status, match_rule, note,
+           decision_reason, matched_local_date,
+           supersedes_projection_id,
+           projected_at, removed_at, created_at, updated_at
+    FROM mediator.health_source_to_event_projections
+    WHERE event_id = $1
+    LIMIT 1
+"""
+
+_INSERT_PROJECTION_SQL = """
+    INSERT INTO mediator.health_source_to_event_projections (
+        source_record_id,
+        connection_id,
+        user_id,
+        event_id,
+        commitment_id,
+        projection_version,
+        projection_status,
+        match_rule,
+        note,
+        decision_reason,
+        matched_local_date,
+        supersedes_projection_id,
+        projected_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    RETURNING id, source_record_id, connection_id, user_id,
+              event_id, commitment_id, projection_version,
+              projection_status, match_rule, note,
+              decision_reason, matched_local_date,
+              supersedes_projection_id,
+              projected_at, removed_at, created_at, updated_at
+"""
+
+_SUPERSEDE_PROJECTION_SQL = """
+    UPDATE mediator.health_source_to_event_projections
+    SET projection_status = 'superseded',
+        removed_at = $2,
+        updated_at = $2
+    WHERE id = $1
+      AND user_id = $3
+    RETURNING id, source_record_id, connection_id, user_id,
+              event_id, commitment_id, projection_version,
+              projection_status, match_rule, note,
+              decision_reason, matched_local_date,
+              supersedes_projection_id,
+              projected_at, removed_at, created_at, updated_at
+"""
+
+_REMOVE_PROJECTION_SQL = """
+    UPDATE mediator.health_source_to_event_projections
+    SET projection_status = 'removed',
+        event_id = NULL,
+        removed_at = $2,
+        updated_at = $2
+    WHERE id = $1
+      AND user_id = $3
+    RETURNING id, source_record_id, connection_id, user_id,
+              event_id, commitment_id, projection_version,
+              projection_status, match_rule, note,
+              decision_reason, matched_local_date,
+              supersedes_projection_id,
+              projected_at, removed_at, created_at, updated_at
+"""
+
+_DETACH_PROJECTION_EVENT_SQL = """
+    UPDATE mediator.health_source_to_event_projections
+    SET event_id = NULL,
+        updated_at = $2
+    WHERE id = $1
+      AND user_id = $3
+    RETURNING id
+"""
+
+_INSERT_PROJECTION_EVENT_SQL = """
+    INSERT INTO mediator.events (
+        commitment_id,
+        user_id,
+        topic_id,
+        bot_id,
+        metric_key,
+        adherence_status,
+        value_numeric,
+        value_text,
+        unit,
+        observed_at,
+        note,
+        source_message_ids
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    RETURNING id, commitment_id, metric_key, adherence_status, observed_at
+"""
+
+_DELETE_PROJECTION_EVENT_SQL = """
+    DELETE FROM mediator.events
+    WHERE id = $1
+      AND user_id = $2
+    RETURNING id
+"""
+
+_INSERT_NORMALIZED_WORKOUT_SQL = """
+    INSERT INTO mediator.health_normalized_workouts (
+        source_record_id,
+        connection_id,
+        user_id,
+        started_at,
+        ended_at,
+        local_timezone,
+        local_offset_seconds,
+        workout_type,
+        duration_seconds,
+        pause_duration_seconds,
+        distance_meters,
+        steps,
+        energy_kcal,
+        elevation_gain_meters,
+        average_heart_rate_bpm,
+        max_heart_rate_bpm,
+        source_device_id,
+        source_device_model,
+        attribution
+    )
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13, $14, $15, $16, $17,
+        $18, $19
+    )
+    RETURNING id
+"""
+
 _UPSERT_SOURCE_RECORD_SQL = """
     INSERT INTO mediator.health_source_records (
         connection_id,
@@ -385,6 +559,35 @@ class StoredHealthSourceRecord:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class HealthProjectionRecord:
+    """A single row from the projection ledger.
+
+    ``event_id`` is None when the projection has not yet created (or has
+    detached) its projection-owned event.  Only projection-owned events
+    — those linked through this ledger row — may be mutated by projection
+    code.  Manual ``log_event`` testimony is never touched.
+    """
+
+    projection_id: UUID
+    source_record_id: UUID
+    connection_id: UUID
+    user_id: UUID
+    event_id: UUID | None
+    commitment_id: UUID | None
+    projection_version: int
+    projection_status: str
+    match_rule: str | None
+    note: str | None
+    decision_reason: str | None
+    matched_local_date: Any  # date | None
+    supersedes_projection_id: UUID | None
+    projected_at: datetime | None
+    removed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 def _connection_from_row(row: Mapping[str, Any]) -> HealthConnectionRecord:
     return HealthConnectionRecord(
         connection_id=row["id"],
@@ -445,6 +648,28 @@ def _stored_source_record_from_row(row: Mapping[str, Any]) -> StoredHealthSource
         provider_revision=row.get("provider_revision"),
         is_deleted=bool(row["is_deleted"]),
         deleted_at=_normalize_datetime(row.get("deleted_at")),
+        updated_at=_normalize_datetime(row["updated_at"]) or _utc_now(),
+    )
+
+
+def _projection_from_row(row: Mapping[str, Any]) -> HealthProjectionRecord:
+    return HealthProjectionRecord(
+        projection_id=row["id"],
+        source_record_id=row["source_record_id"],
+        connection_id=row["connection_id"],
+        user_id=row["user_id"],
+        event_id=row.get("event_id"),
+        commitment_id=row.get("commitment_id"),
+        projection_version=int(row["projection_version"]),
+        projection_status=str(row["projection_status"]),
+        match_rule=row.get("match_rule"),
+        note=row.get("note"),
+        decision_reason=row.get("decision_reason"),
+        matched_local_date=row.get("matched_local_date"),
+        supersedes_projection_id=row.get("supersedes_projection_id"),
+        projected_at=_normalize_datetime(row.get("projected_at")),
+        removed_at=_normalize_datetime(row.get("removed_at")),
+        created_at=_normalize_datetime(row["created_at"]) or _utc_now(),
         updated_at=_normalize_datetime(row["updated_at"]) or _utc_now(),
     )
 
@@ -893,6 +1118,311 @@ class HealthSyncRepository:
             user_id,
         )
 
+    # ------------------------------------------------------------------
+    # Normalized workout helpers
+    # ------------------------------------------------------------------
+
+    async def replace_normalized_workout(
+        self,
+        *,
+        source_record_id: UUID,
+        connection_id: UUID,
+        user_id: UUID,
+        workout: NormalizedWorkout,
+        executor: Any | None = None,
+    ) -> UUID:
+        """Delete existing normalized workout row then insert a new one.
+
+        Must be called inside a transaction for atomicity with the
+        source-record upsert.
+        """
+        store = self._executor(executor)
+        await store.execute(
+            _DELETE_NORMALIZED_WORKOUT_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+        )
+        row = await store.fetchrow(
+            _INSERT_NORMALIZED_WORKOUT_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+            workout.started_at,
+            workout.ended_at,
+            workout.local_timezone,
+            workout.local_offset_seconds,
+            workout.workout_type,
+            workout.duration_seconds,
+            workout.pause_duration_seconds,
+            workout.distance_meters,
+            workout.steps,
+            workout.energy_kcal,
+            workout.elevation_gain_meters,
+            workout.average_heart_rate_bpm,
+            workout.max_heart_rate_bpm,
+            workout.source_device_id,
+            workout.source_device_model,
+            dict(workout.attribution),
+        )
+        return row["id"]
+
+    async def delete_normalized_workout(
+        self,
+        *,
+        source_record_id: UUID,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        """Remove all normalized workout rows for a source record."""
+        await self._executor(executor).execute(
+            _DELETE_NORMALIZED_WORKOUT_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Projection ledger primitives
+    # ------------------------------------------------------------------
+
+    async def find_active_projection(
+        self,
+        *,
+        source_record_id: UUID,
+        user_id: UUID,
+        for_update: bool = False,
+        executor: Any | None = None,
+    ) -> HealthProjectionRecord | None:
+        """Return the active projection for *source_record_id*, or None.
+
+        When *for_update* is True the row is locked (``FOR UPDATE``)
+        so callers can safely supersede or remove it inside a transaction.
+        """
+        sql = (
+            _SELECT_ACTIVE_PROJECTION_FOR_UPDATE_SQL
+            if for_update
+            else _SELECT_ACTIVE_PROJECTION_SQL
+        )
+        row = await self._executor(executor).fetchrow(
+            sql,
+            source_record_id,
+            user_id,
+        )
+        if row is None:
+            return None
+        return _projection_from_row(_mapping_row(row))
+
+    async def find_projection_by_event(
+        self,
+        *,
+        event_id: UUID,
+        executor: Any | None = None,
+    ) -> HealthProjectionRecord | None:
+        """Return the projection that owns *event_id*, or None.
+
+        If a projection row is returned then *event_id* is
+        projection-owned and may be safely mutated by projection code.
+        If None is returned then the event is manual testimony and
+        must never be touched by projection code.
+        """
+        row = await self._executor(executor).fetchrow(
+            _SELECT_PROJECTION_BY_EVENT_SQL,
+            event_id,
+        )
+        if row is None:
+            return None
+        return _projection_from_row(_mapping_row(row))
+
+    async def insert_projection(
+        self,
+        *,
+        source_record_id: UUID,
+        connection_id: UUID,
+        user_id: UUID,
+        event_id: UUID | None = None,
+        commitment_id: UUID | None = None,
+        projection_version: int = 1,
+        projection_status: str = "pending",
+        match_rule: str | None = None,
+        note: str | None = None,
+        decision_reason: str | None = None,
+        matched_local_date: Any = None,
+        supersedes_projection_id: UUID | None = None,
+        projected_at: datetime | None = None,
+        executor: Any | None = None,
+    ) -> HealthProjectionRecord:
+        """Insert a new projection row into the ledger.
+
+        Must be called inside a transaction.  The caller is responsible
+        for enforcing the at-most-one-active constraint before calling
+        this method.
+        """
+        row = await self._executor(executor).fetchrow(
+            _INSERT_PROJECTION_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+            event_id,
+            commitment_id,
+            projection_version,
+            projection_status,
+            match_rule,
+            note,
+            decision_reason,
+            matched_local_date,
+            supersedes_projection_id,
+            _normalize_datetime(projected_at or _utc_now()),
+        )
+        return _projection_from_row(_mapping_row(row))
+
+    async def supersede_projection(
+        self,
+        *,
+        existing_projection_id: UUID,
+        user_id: UUID,
+        now: datetime | None = None,
+        executor: Any | None = None,
+    ) -> HealthProjectionRecord:
+        """Mark an existing projection as superseded.
+
+        Sets ``projection_status = 'superseded'`` and stamps
+        ``removed_at``.  Returns the updated row.  The caller must
+        insert the new version in the same transaction.
+
+        Does NOT detach or delete the projection-owned event — the
+        new version may re-use the same ``event_id``.
+        """
+        row = await self._executor(executor).fetchrow(
+            _SUPERSEDE_PROJECTION_SQL,
+            existing_projection_id,
+            _normalize_datetime(now or _utc_now()),
+            user_id,
+        )
+        if row is None:
+            raise LookupError("projection not found or not owned by user")
+        return _projection_from_row(_mapping_row(row))
+
+    async def remove_projection(
+        self,
+        *,
+        projection_id: UUID,
+        user_id: UUID,
+        now: datetime | None = None,
+        executor: Any | None = None,
+    ) -> HealthProjectionRecord:
+        """Mark a projection as removed and detach its event.
+
+        Sets ``projection_status = 'removed'``, sets ``event_id = NULL``,
+        and stamps ``removed_at``.  The event itself is NOT deleted (it
+        may still be referenced by adherence computations), but the link
+        is severed so future projection runs do not see a stale event.
+        """
+        row = await self._executor(executor).fetchrow(
+            _REMOVE_PROJECTION_SQL,
+            projection_id,
+            _normalize_datetime(now or _utc_now()),
+            user_id,
+        )
+        if row is None:
+            raise LookupError("projection not found or not owned by user")
+        return _projection_from_row(_mapping_row(row))
+
+    async def detach_projection_event(
+        self,
+        *,
+        projection_id: UUID,
+        user_id: UUID,
+        now: datetime | None = None,
+        executor: Any | None = None,
+    ) -> UUID:
+        """Set ``event_id = NULL`` on a projection row without changing status.
+
+        Returns the *projection_id* on success.  Use this when the
+        projection-owned event needs to be removed (e.g., during
+        supersession where the new version gets a fresh event).
+        """
+        row = await self._executor(executor).fetchrow(
+            _DETACH_PROJECTION_EVENT_SQL,
+            projection_id,
+            _normalize_datetime(now or _utc_now()),
+            user_id,
+        )
+        if row is None:
+            raise LookupError("projection not found or not owned by user")
+        return row["id"]
+
+    async def create_projection_event(
+        self,
+        *,
+        commitment_id: UUID,
+        user_id: UUID,
+        topic_id: UUID,
+        bot_id: str = "hector",
+        metric_key: str = "workout",
+        adherence_status: str = "done",
+        value_numeric: float | None = None,
+        value_text: str | None = None,
+        unit: str | None = None,
+        observed_at: datetime | None = None,
+        note: str | None = None,
+        source_message_ids: list[UUID] | None = None,
+        executor: Any | None = None,
+    ) -> dict[str, Any]:
+        """Create a projection-owned event in ``mediator.events``.
+
+        Returns a dict with ``id``, ``commitment_id``, ``metric_key``,
+        ``adherence_status``, and ``observed_at`` so callers can link
+        the event to a projection via ``insert_projection(event_id=...)``.
+        """
+        row = await self._executor(executor).fetchrow(
+            _INSERT_PROJECTION_EVENT_SQL,
+            commitment_id,
+            user_id,
+            topic_id,
+            bot_id,
+            metric_key,
+            adherence_status,
+            value_numeric,
+            value_text,
+            unit,
+            _normalize_datetime(observed_at or _utc_now()),
+            note,
+            source_message_ids or [],
+        )
+        return {
+            "id": row["id"],
+            "commitment_id": row["commitment_id"],
+            "metric_key": row["metric_key"],
+            "adherence_status": row["adherence_status"],
+            "observed_at": row["observed_at"],
+        }
+
+    async def delete_projection_event(
+        self,
+        *,
+        event_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> bool:
+        """Delete a projection-owned event after verifying ownership.
+
+        Returns True if the event was deleted.  The caller MUST first
+        verify ownership via ``find_projection_by_event`` — this method
+        does an additional user-scoped guard as defense-in-depth.
+
+        Manual ``log_event`` testimony (events not linked by any
+        projection row) will never match the user-scoped DELETE and
+        will therefore return False.
+        """
+        row = await self._executor(executor).fetchrow(
+            _DELETE_PROJECTION_EVENT_SQL,
+            event_id,
+            user_id,
+        )
+        return row is not None
+
     def _executor(self, executor: Any | None) -> Any:
         return executor if executor is not None else self._pool
 
@@ -904,6 +1434,7 @@ def repository_for(pool: Any) -> HealthSyncRepository:
 __all__ = [
     "HealthConnectionRecord",
     "HealthDirtyCategory",
+    "HealthProjectionRecord",
     "HealthSyncRepository",
     "HealthWebhookReceipt",
     "StoredHealthSourceRecord",

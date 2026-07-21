@@ -3,7 +3,7 @@
 - **Adapter:** IlikeBaselineRetriever
 - **Corpus:** /workspace/withings-health-sync-20260719/Pumpernickel/eval/retrieval/corpus.yaml
 - **Golden Set:** /workspace/withings-health-sync-20260719/Pumpernickel/eval/retrieval/golden_set.yaml
-- **Generated:** 2026-07-21T02:06:36.626055+00:00
+- **Generated:** 2026-07-21T08:29:10.319016+00:00
 - **Cases:** 80
 
 ## Overall Metrics

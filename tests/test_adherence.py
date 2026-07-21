@@ -516,9 +516,172 @@ class TestSummarizeBoard:
         assert "1 done" in summary
 
 
+# ── Type-safety regression ─────────────────────────────────────────────────
+# Verifies the contract: only events with an explicit adherence_status in
+# ('done', 'missed', 'excused') AND a matching commitment_id can classify a
+# slot.  Weight, sleep, and generic numeric measurement events can NEVER
+# satisfy a workout commitment.
+
+
+class TestTypeSafetyNumericFallbackRemoved:
+    """Prove the unsafe numeric-only fallback has been removed.
+
+    Under the old implementation, events with value_numeric would
+    automatically count as 'done' even without an explicit
+    adherence_status.  These tests lock in the type-safe contract.
+    """
+
+    def test_weight_event_with_value_numeric_does_not_satisfy_workout(self):
+        """A weight measurement event (value_numeric=185.5, no
+        adherence_status) must NOT classify a workout slot as done."""
+        today = date(2026, 5, 13)  # Wednesday
+        mon = _monday_of_week(today)
+        weight_event = {
+            "commitment_id": "workout_c1",
+            "observed_at": f"{mon}T08:00:00Z",
+            "adherence_status": None,
+            "value_numeric": 185.5,
+            "value_text": None,
+            "metric_key": "weight",
+        }
+        board = compute_adherence(
+            _make_commitment(cid="workout_c1", cadence="daily"),
+            [weight_event],
+            today,
+            UTC,
+        )
+        mon_slot = board.slots[0]
+        assert mon_slot.status == "unknown", (
+            f"Weight event must not satisfy workout slot; got {mon_slot.status}"
+        )
+
+    def test_sleep_event_with_value_numeric_does_not_satisfy_workout(self):
+        """A sleep measurement event (value_numeric=7.5 hours, no
+        adherence_status) must NOT classify a workout slot as done."""
+        today = date(2026, 5, 13)
+        mon = _monday_of_week(today)
+        sleep_event = {
+            "commitment_id": "workout_c1",
+            "observed_at": f"{mon}T08:00:00Z",
+            "adherence_status": None,
+            "value_numeric": 7.5,
+            "value_text": None,
+            "metric_key": "sleep",
+        }
+        board = compute_adherence(
+            _make_commitment(cid="workout_c1", cadence="daily"),
+            [sleep_event],
+            today,
+            UTC,
+        )
+        mon_slot = board.slots[0]
+        assert mon_slot.status == "unknown", (
+            f"Sleep event must not satisfy workout slot; got {mon_slot.status}"
+        )
+
+    def test_generic_numeric_event_without_adherence_status_is_unknown(self):
+        """A generic measurement event with value_numeric=1.0 but NO
+        adherence_status must NOT classify a slot as done."""
+        today = date(2026, 5, 13)
+        mon = _monday_of_week(today)
+        numeric_event = {
+            "commitment_id": "workout_c1",
+            "observed_at": f"{mon}T08:00:00Z",
+            "adherence_status": None,
+            "value_numeric": 1.0,
+            "value_text": None,
+        }
+        board = compute_adherence(
+            _make_commitment(cid="workout_c1", cadence="daily"),
+            [numeric_event],
+            today,
+            UTC,
+        )
+        mon_slot = board.slots[0]
+        assert mon_slot.status == "unknown", (
+            f"Numeric-only event must not satisfy a slot; got {mon_slot.status}"
+        )
+
+    def test_wrong_commitment_id_event_does_not_satisfy_slot(self):
+        """An event with adherence_status='done' but a different
+        commitment_id must NOT classify another commitment's slot."""
+        today = date(2026, 5, 13)
+        mon = _monday_of_week(today)
+        wrong_cid_event = {
+            "commitment_id": "other_c2",
+            "observed_at": f"{mon}T08:00:00Z",
+            "adherence_status": "done",
+            "value_numeric": None,
+            "value_text": None,
+        }
+        board = compute_adherence(
+            _make_commitment(cid="workout_c1", cadence="daily"),
+            [wrong_cid_event],
+            today,
+            UTC,
+        )
+        mon_slot = board.slots[0]
+        assert mon_slot.status == "unknown", (
+            f"Wrong-commitment-id event must not satisfy slot; got {mon_slot.status}"
+        )
+
+    def test_explicit_done_event_with_correct_cid_satisfies_slot(self):
+        """Sanity-check: an event with adherence_status='done' AND matching
+        commitment_id MUST still satisfy the slot."""
+        today = date(2026, 5, 13)
+        mon = _monday_of_week(today)
+        valid_event = {
+            "commitment_id": "workout_c1",
+            "observed_at": f"{mon}T08:00:00Z",
+            "adherence_status": "done",
+            "value_numeric": None,
+            "value_text": None,
+        }
+        board = compute_adherence(
+            _make_commitment(cid="workout_c1", cadence="daily"),
+            [valid_event],
+            today,
+            UTC,
+        )
+        mon_slot = board.slots[0]
+        assert mon_slot.status == "done", (
+            f"Explicit done event with correct cid must satisfy slot; got {mon_slot.status}"
+        )
+
+    def test_mixed_events_only_adherence_events_classify(self):
+        """When both numeric-only and adherence events exist for the same
+        date, the adherence event wins; numeric events are ignored."""
+        today = date(2026, 5, 13)
+        mon = _monday_of_week(today)
+        events = [
+            {
+                "commitment_id": "workout_c1",
+                "observed_at": f"{mon}T06:00:00Z",
+                "adherence_status": None,
+                "value_numeric": 500.0,
+                "value_text": None,
+            },
+            {
+                "commitment_id": "workout_c1",
+                "observed_at": f"{mon}T08:00:00Z",
+                "adherence_status": "done",
+                "value_numeric": None,
+                "value_text": None,
+            },
+        ]
+        board = compute_adherence(
+            _make_commitment(cid="workout_c1", cadence="daily"),
+            events,
+            today,
+            UTC,
+        )
+        mon_slot = board.slots[0]
+        assert mon_slot.status == "done", (
+            f"Adherence event should win over numeric-only event; got {mon_slot.status}"
+        )
+
+
 # ── All cadences reachability ──────────────────────────────────────────────
-
-
 class TestAllCadencesReachability:
     """Smoke-test that every cadence can produce every status."""
 
