@@ -41,7 +41,10 @@ def _read_migration(filename: str) -> str:
 @pytest.fixture(autouse=True)
 def _check_db_url() -> None:
     """Skip all DB-gated tests when no database URL is configured."""
-    if not os.environ.get("DATABASE_URL") and not os.environ.get("EVAL_DATABASE_URL"):
+    database_url = os.environ.get("DATABASE_URL")
+    eval_database_url = os.environ.get("EVAL_DATABASE_URL")
+    synthetic_test_url = "postgresql://user:pass@localhost:5432/db"
+    if (not database_url or database_url == synthetic_test_url) and not eval_database_url:
         pytest.skip("DATABASE_URL / EVAL_DATABASE_URL not set")
 
 
