@@ -1,0 +1,53 @@
+{
+  "scenario_id": "measurements_missing_optionals",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/measure",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getmeas",
+      "lastupdate": 1784505600,
+      "meastypes": "1,6,8,76,88"
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 0,
+      "body": {
+        "updatetime": 1784691600,
+        "timezone": "America/New_York",
+        "measuregrps": [
+          {
+            "grpid": 9003001,
+            "attrib": 0,
+            "date": 1784690100,
+            "created": 1784690160,
+            "modified": 1784691000,
+            "category": 1,
+            "measures": [
+              {
+                "value": 72000,
+                "type": 1,
+                "unit": -3,
+                "algo": 0,
+                "fm": 0,
+                "position": 0
+              }
+            ],
+            "model_id": 18,
+            "comment": ""
+          }
+        ],
+        "more": 0,
+        "offset": 0
+      }
+    }
+  }
+}

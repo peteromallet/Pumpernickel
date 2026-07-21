@@ -11,6 +11,7 @@ from app.bots.prompts.slots import (  # noqa: F401
     adherence_board_rules,
     body_image_eating_safety,
     commitment_flow_rules,
+    health_read_guidance,
     knowledge_primitives_rules,
     partner_nudge,
     reminders_bundling,

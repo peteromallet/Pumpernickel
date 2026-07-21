@@ -16,6 +16,7 @@ from app.services.health_sync.models import (
     HealthSyncCursor,
     HealthSyncError,
     HealthTombstone,
+    NormalizedMeasurement,
 )
 
 _LOAD_CONNECTION_BY_PROVIDER_USER_SQL = """
@@ -173,6 +174,71 @@ _MARK_SYNC_ERROR_SQL = """
       AND deleted_at IS NULL
     RETURNING id, user_id, provider, external_user_id, status, granted_scopes,
               cursor_state, updated_at
+"""
+
+_DELETE_NORMALIZED_MEASUREMENTS_SQL = """
+    DELETE FROM mediator.health_normalized_measurements
+    WHERE source_record_id = $1
+      AND connection_id = $2
+      AND user_id = $3
+"""
+
+_INSERT_NORMALIZED_MEASUREMENT_SQL = """
+    INSERT INTO mediator.health_normalized_measurements (
+        source_record_id,
+        connection_id,
+        user_id,
+        metric,
+        measured_at,
+        value_numeric,
+        canonical_unit,
+        source_unit,
+        source_device_id,
+        source_device_model,
+        attribution
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    RETURNING id
+"""
+
+_DELETE_NORMALIZED_SLEEP_SQL = """
+    DELETE FROM mediator.health_normalized_sleep
+    WHERE source_record_id = $1
+      AND connection_id = $2
+      AND user_id = $3
+"""
+
+_INSERT_NORMALIZED_SLEEP_SQL = """
+    INSERT INTO mediator.health_normalized_sleep (
+        source_record_id,
+        connection_id,
+        user_id,
+        started_at,
+        ended_at,
+        local_sleep_date,
+        local_timezone,
+        local_offset_seconds,
+        completeness_state,
+        total_in_bed_seconds,
+        total_asleep_seconds,
+        awake_seconds,
+        light_sleep_seconds,
+        deep_sleep_seconds,
+        rem_sleep_seconds,
+        sleep_latency_seconds,
+        wake_after_sleep_onset_seconds,
+        wakeups,
+        sleep_score,
+        source_device_id,
+        source_device_model,
+        attribution
+    )
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13, $14, $15, $16, $17,
+        $18, $19, $20, $21, $22
+    )
+    RETURNING id
 """
 
 _UPSERT_SOURCE_RECORD_SQL = """
@@ -680,6 +746,151 @@ class HealthSyncRepository:
             ),
             now=now,
             executor=executor,
+        )
+
+    # ------------------------------------------------------------------
+    # Normalized measurement helpers
+    # ------------------------------------------------------------------
+
+    async def replace_normalized_measurements(
+        self,
+        *,
+        source_record_id: UUID,
+        connection_id: UUID,
+        user_id: UUID,
+        measurements: list[NormalizedMeasurement],
+        executor: Any | None = None,
+    ) -> list[UUID]:
+        """Delete existing normalized rows then insert new ones.
+
+        Must be called inside a transaction so the delete + insert are
+        atomic with respect to the source-record upsert.
+        """
+        store = self._executor(executor)
+        await store.execute(
+            _DELETE_NORMALIZED_MEASUREMENTS_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+        )
+        row_ids: list[UUID] = []
+        for m in measurements:
+            row = await store.fetchrow(
+                _INSERT_NORMALIZED_MEASUREMENT_SQL,
+                source_record_id,
+                connection_id,
+                user_id,
+                m.metric,
+                m.measured_at,
+                m.value_numeric,
+                m.canonical_unit,
+                m.canonical_unit,  # source_unit mirrors canonical_unit
+                m.source_device_id,
+                m.source_device_model,
+                dict(m.attribution),
+            )
+            row_ids.append(row["id"])
+        return row_ids
+
+    async def delete_normalized_measurements(
+        self,
+        *,
+        source_record_id: UUID,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        """Remove all normalized measurement rows for a source record."""
+        await self._executor(executor).execute(
+            _DELETE_NORMALIZED_MEASUREMENTS_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+        )
+
+    # ------------------------------------------------------------------
+    # Normalized sleep helpers
+    # ------------------------------------------------------------------
+
+    async def replace_normalized_sleep(
+        self,
+        *,
+        source_record_id: UUID,
+        connection_id: UUID,
+        user_id: UUID,
+        started_at: datetime,
+        ended_at: datetime,
+        local_sleep_date: Any,  # date
+        local_timezone: str | None = None,
+        local_offset_seconds: int | None = None,
+        completeness_state: str = "partial",
+        total_in_bed_seconds: int | None = None,
+        total_asleep_seconds: int | None = None,
+        awake_seconds: int | None = None,
+        light_sleep_seconds: int | None = None,
+        deep_sleep_seconds: int | None = None,
+        rem_sleep_seconds: int | None = None,
+        sleep_latency_seconds: int | None = None,
+        wake_after_sleep_onset_seconds: int | None = None,
+        wakeups: int | None = None,
+        sleep_score: int | None = None,
+        source_device_id: str | None = None,
+        source_device_model: str | None = None,
+        attribution: dict[str, Any] | None = None,
+        executor: Any | None = None,
+    ) -> UUID:
+        """Delete existing normalized sleep row then insert a new one.
+
+        Must be called inside a transaction for atomicity.
+        """
+        store = self._executor(executor)
+        await store.execute(
+            _DELETE_NORMALIZED_SLEEP_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+        )
+        row = await store.fetchrow(
+            _INSERT_NORMALIZED_SLEEP_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
+            _normalize_datetime(started_at),
+            _normalize_datetime(ended_at),
+            local_sleep_date,
+            local_timezone,
+            local_offset_seconds,
+            completeness_state,
+            total_in_bed_seconds,
+            total_asleep_seconds,
+            awake_seconds,
+            light_sleep_seconds,
+            deep_sleep_seconds,
+            rem_sleep_seconds,
+            sleep_latency_seconds,
+            wake_after_sleep_onset_seconds,
+            wakeups,
+            sleep_score,
+            source_device_id,
+            source_device_model,
+            dict(attribution or {}),
+        )
+        return row["id"]
+
+    async def delete_normalized_sleep(
+        self,
+        *,
+        source_record_id: UUID,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        """Remove all normalized sleep rows for a source record."""
+        await self._executor(executor).execute(
+            _DELETE_NORMALIZED_SLEEP_SQL,
+            source_record_id,
+            connection_id,
+            user_id,
         )
 
     def _executor(self, executor: Any | None) -> Any:

@@ -1,0 +1,75 @@
+{
+  "scenario_id": "sleep_split_same_date",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/v2/sleep",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getsummary",
+      "lastupdate": 1784419200,
+      "data_fields": "total_timeinbed,total_sleep_time,lightsleepduration,remsleepduration,deepsleepduration,wakeupcount,sleep_score"
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 0,
+      "body": {
+        "series": [
+          {
+            "id": 9207001,
+            "timezone": "America/New_York",
+            "model": 32,
+            "model_id": 63,
+            "startdate": 1784469600,
+            "enddate": 1784484000,
+            "date": "2026-07-19",
+            "created": 1784484060,
+            "modified": 1784487600,
+            "hash_deviceid": "synthetic-sleep-hash-05",
+            "completed": true,
+            "data": {
+              "total_timeinbed": 14400,
+              "total_sleep_time": 12600,
+              "lightsleepduration": 5400,
+              "remsleepduration": 3600,
+              "deepsleepduration": 3600,
+              "wakeupcount": 1,
+              "sleep_score": 78
+            }
+          },
+          {
+            "id": 9207002,
+            "timezone": "America/New_York",
+            "model": 32,
+            "model_id": 63,
+            "startdate": 1784490000,
+            "enddate": 1784495400,
+            "date": "2026-07-20",
+            "created": 1784495460,
+            "modified": 1784499000,
+            "hash_deviceid": "synthetic-sleep-hash-06",
+            "completed": true,
+            "data": {
+              "total_timeinbed": 5400,
+              "total_sleep_time": 4800,
+              "lightsleepduration": 2400,
+              "remsleepduration": 1200,
+              "deepsleepduration": 1200,
+              "wakeupcount": 0,
+              "sleep_score": 65
+            }
+          }
+        ],
+        "more": false,
+        "offset": 0
+      }
+    }
+  }
+}

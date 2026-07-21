@@ -1,0 +1,53 @@
+{
+  "scenario_id": "sleep_summary_completed_revision",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/v2/sleep",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getsummary",
+      "lastupdate": 1784583000,
+      "data_fields": "total_timeinbed,total_sleep_time,lightsleepduration,remsleepduration,deepsleepduration,wakeupcount,sleep_score"
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 0,
+      "body": {
+        "series": [
+          {
+            "id": 9204001,
+            "timezone": "America/New_York",
+            "model": 32,
+            "model_id": 63,
+            "startdate": 1784606400,
+            "enddate": 1784637600,
+            "date": "2026-07-21",
+            "created": 1784581260,
+            "modified": 1784640000,
+            "hash_deviceid": "synthetic-sleep-hash-02",
+            "completed": true,
+            "data": {
+              "total_timeinbed": 25200,
+              "total_sleep_time": 23400,
+              "lightsleepduration": 10800,
+              "remsleepduration": 5400,
+              "deepsleepduration": 7200,
+              "wakeupcount": 2,
+              "sleep_score": 82
+            }
+          }
+        ],
+        "more": false,
+        "offset": 0
+      }
+    }
+  }
+}

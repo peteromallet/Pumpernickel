@@ -251,6 +251,10 @@ class FakeWithingsProvider:
             scenario_id="measurements_tombstones",
             payload=json.loads((self._fixture_dir / "measurements_tombstones.json").read_text()),
         )
+        loaded["sleep_tombstones"] = _FixtureScenario(
+            scenario_id="sleep_tombstones",
+            payload=json.loads((self._fixture_dir / "sleep_tombstones.json").read_text()),
+        )
         return loaded
 
     def _scenario(self, scenario_id: str) -> _FixtureScenario:
@@ -358,7 +362,9 @@ class FakeWithingsProvider:
                 ) from exc
             raise AssertionError("malformed fixture unexpectedly decoded successfully")
         if scenario_id == "measurements_tombstones":
-            return self._tombstone_result(fixture, scenario_id=scenario_id, cursor=cursor)
+            return self._tombstone_result(fixture, scenario_id=scenario_id, cursor=cursor, resource_type=HealthResourceType.MEASUREMENT)
+        if scenario_id == "sleep_tombstones":
+            return self._tombstone_result(fixture, scenario_id=scenario_id, cursor=cursor, resource_type=HealthResourceType.SLEEP)
 
         if resource_type is HealthResourceType.MEASUREMENT:
             return self._measurement_result(fixture, scenario_id=scenario_id, cursor=cursor)
@@ -640,33 +646,34 @@ class FakeWithingsProvider:
         *,
         scenario_id: str,
         cursor: HealthSyncCursor | None,
+        resource_type: HealthResourceType = HealthResourceType.MEASUREMENT,
     ) -> HealthFetchResult:
         payload = _require_mapping(fixture, context=f"{scenario_id} payload")
         tombstones = tuple(
-            self._tombstone(item, scenario_id=scenario_id)
+            self._tombstone(item, scenario_id=scenario_id, resource_type=resource_type)
             for item in _require_sequence(payload["tombstones"], context=f"{scenario_id} tombstones")
         )
         latest_deleted_at = max(tombstone.deleted_at for tombstone in tombstones)
         next_cursor = HealthSyncCursor(
-            resource_type=HealthResourceType.MEASUREMENT,
+            resource_type=resource_type,
             last_modified=max(
                 latest_deleted_at,
                 cursor.last_modified if cursor is not None and cursor.last_modified is not None else latest_deleted_at,
             ),
         )
         return HealthFetchResult(
-            resource_type=HealthResourceType.MEASUREMENT,
+            resource_type=resource_type,
             records=(),
             tombstones=tombstones,
             next_cursor=next_cursor,
             has_more=False,
         )
 
-    def _tombstone(self, value: Any, *, scenario_id: str) -> HealthTombstone:
+    def _tombstone(self, value: Any, *, scenario_id: str, resource_type: HealthResourceType = HealthResourceType.MEASUREMENT) -> HealthTombstone:
         payload = _require_mapping(value, context=f"{scenario_id} tombstone")
         return HealthTombstone(
             provider=HealthProviderSlug.WITHINGS,
-            resource_type=HealthResourceType.MEASUREMENT,
+            resource_type=resource_type,
             external_id=_require_text(payload["external_id"], context=f"{scenario_id} external_id"),
             deleted_at=datetime.fromisoformat(
                 _require_text(payload["deleted_at"], context=f"{scenario_id} deleted_at").replace("Z", "+00:00")

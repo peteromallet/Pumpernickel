@@ -17,7 +17,11 @@ from app.services.health_sync.models import (
     HealthSyncOutcome,
     HealthSyncStatus,
     HealthTombstone,
+    NormalizedMeasurement,
+    NormalizedSleep,
+    WITHINGS_METRIC_MAP,
     WITHINGS_PROVIDER_CAPABILITIES,
+    WithingsMeasureType,
     build_fallback_external_id,
     resolve_external_id,
 )
@@ -30,6 +34,14 @@ from app.services.health_sync.oauth_state import (
     reset_oauth_state_store_for_tests,
 )
 from app.services.health_sync.provider import HealthSyncProvider
+from app.services.health_sync.normalization import (
+    calculate_offset_seconds,
+    decode_withings_value,
+    metric_info,
+    normalize_measure_group,
+    normalize_sleep_summary,
+    resolve_timezone,
+)
 from app.services.health_sync.notifications import (
     WithingsNotificationError,
     WithingsNotificationResult,
@@ -66,6 +78,19 @@ from app.services.health_sync.tokens import (
     store_connection_tokens,
 )
 from app.services.health_sync.withings import WithingsAdapterError, WithingsProvider
+from app.services.health_sync.read_models import (
+    ConnectionFreshness,
+    NightlySleepResult,
+    SleepDaySummary,
+    SleepRollingResult,
+    SleepSession,
+    WeightReading,
+    WeightResult,
+    get_connection_freshness,
+    get_nightly_sleep,
+    get_sleep_rolling_7d,
+    get_weight,
+)
 from app.services.health_sync.worker import (
     HealthSyncWorker,
     HealthSyncWorkerResult,
@@ -73,6 +98,7 @@ from app.services.health_sync.worker import (
 )
 
 __all__ = [
+    "ConnectionFreshness",
     "ConsumedOAuthState",
     "DEFAULT_RECONCILIATION_BACKFILL_WINDOW",
     "DEFAULT_SYNC_MAX_ATTEMPTS",
@@ -106,23 +132,43 @@ __all__ = [
     "HealthTombstone",
     "HealthWebhookReceipt",
     "IssuedOAuthState",
+    "NightlySleepResult",
+    "NormalizedMeasurement",
+    "NormalizedSleep",
     "OAuthStateError",
     "OAuthStateStore",
+    "SleepDaySummary",
+    "SleepRollingResult",
+    "SleepSession",
     "StoredHealthSourceRecord",
+    "WeightReading",
+    "WeightResult",
+    "WITHINGS_METRIC_MAP",
     "WITHINGS_PROVIDER_CAPABILITIES",
+    "WithingsMeasureType",
     "WithingsNotificationError",
     "WithingsNotificationResult",
     "WithingsAdapterError",
     "WithingsProvider",
     "build_fallback_external_id",
+    "calculate_offset_seconds",
+    "decode_withings_value",
+    "get_connection_freshness",
+    "get_nightly_sleep",
     "get_oauth_state_store",
+    "get_sleep_rolling_7d",
+    "get_weight",
     "ingest_withings_notification",
     "apply_cursor_overlap",
     "load_connection_tokens",
+    "metric_info",
+    "normalize_measure_group",
+    "normalize_sleep_summary",
     "refresh_connection_tokens",
     "repository_for",
     "reset_oauth_state_store_for_tests",
     "resolve_external_id",
+    "resolve_timezone",
     "sync_claimed_dirty_category",
     "sync_connection_resource",
     "sync_connection_resource_safely",

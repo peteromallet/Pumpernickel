@@ -1,0 +1,47 @@
+{
+  "scenario_id": "sleep_missing_optional",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/v2/sleep",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getsummary",
+      "lastupdate": 1784419200,
+      "data_fields": "total_timeinbed,total_sleep_time,lightsleepduration,remsleepduration,deepsleepduration,wakeupcount,sleep_score"
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 0,
+      "body": {
+        "series": [
+          {
+            "id": 9211001,
+            "timezone": "America/New_York",
+            "model": 32,
+            "model_id": 63,
+            "startdate": 1784652000,
+            "enddate": 1784685600,
+            "date": "2026-07-21",
+            "created": 1784685660,
+            "modified": 1784688000,
+            "completed": true,
+            "data": {
+              "total_timeinbed": 33600,
+              "total_sleep_time": 28800
+            }
+          }
+        ],
+        "more": false,
+        "offset": 0
+      }
+    }
+  }
+}

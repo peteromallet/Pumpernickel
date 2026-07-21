@@ -2508,6 +2508,118 @@ class GetAdherenceOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Health read tools — compact derived summaries from normalized Withings data.
+# These tools are exclusive to Hector (fitness) and Habits (habits) bots.
+# They return only compact derived values — never raw measurements or PII.
+# ---------------------------------------------------------------------------
+
+
+class WeightTrendPoint(BaseModel):
+    """A single weight reading used for trend display."""
+
+    measured_at: str = Field(description="ISO-8601 UTC timestamp of the measurement.")
+    value_numeric: float = Field(description="Decoded numeric value in canonical_unit.")
+    canonical_unit: str = Field(description="Canonical unit, always 'kg'.")
+
+
+class GetWeightTrendInput(BaseModel):
+    """No arguments — scope derives from the calling bot's turn context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GetWeightTrendOutput(BaseModel):
+    """Compact weight trend: latest reading plus 7d/30d rolling aggregates."""
+
+    is_error: bool = False
+    error: str | None = None
+    latest: WeightTrendPoint | None = Field(
+        default=None,
+        description="Most recent weight reading. None when no weight data exists.",
+    )
+    avg_7d: float | None = Field(
+        default=None,
+        description="7-day rolling average in kg. None when fewer than 1 reading.",
+    )
+    min_7d: float | None = Field(
+        default=None,
+        description="Minimum weight in the last 7 days. None when no readings.",
+    )
+    max_7d: float | None = Field(
+        default=None,
+        description="Maximum weight in the last 7 days. None when no readings.",
+    )
+    avg_30d: float | None = Field(
+        default=None,
+        description="30-day rolling average in kg. None when fewer than 1 reading.",
+    )
+    reading_count_7d: int = Field(
+        default=0,
+        description="Number of weight readings in the last 7 days.",
+    )
+    reading_count_30d: int = Field(
+        default=0,
+        description="Number of weight readings in the last 30 days.",
+    )
+    connection_fresh: bool = Field(
+        default=False,
+        description="True when the health connection completed a sync in the last 7 days.",
+    )
+    last_sync_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp of the last successful sync. None when never synced.",
+    )
+
+
+class SleepDaySummaryRow(BaseModel):
+    """Per-date sleep aggregation within the 7-day rolling window."""
+
+    local_sleep_date: str = Field(description="ISO date (YYYY-MM-DD) in the user's local timezone.")
+    session_count: int = Field(description="Number of sleep sessions on this date.")
+    total_asleep_hours: float | None = Field(
+        default=None,
+        description="Total time asleep in hours (sum of all sessions). None when no data.",
+    )
+    total_in_bed_hours: float | None = Field(
+        default=None,
+        description="Total time in bed in hours (sum of all sessions). None when no data.",
+    )
+    avg_sleep_score: float | None = Field(
+        default=None,
+        description="Average sleep score across sessions. None when no scores available.",
+    )
+
+
+class GetSleepSummaryInput(BaseModel):
+    """No arguments — scope derives from the calling bot's turn context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GetSleepSummaryOutput(BaseModel):
+    """Compact 7-day rolling sleep summary — aggregated per local sleep date."""
+
+    is_error: bool = False
+    error: str | None = None
+    summaries: list[SleepDaySummaryRow] = Field(
+        default_factory=list,
+        description="One row per local_sleep_date in the 7-day window, oldest first.",
+    )
+    nights_with_data: int = Field(
+        default=0,
+        description="Number of distinct nights with sleep data in the window.",
+    )
+    connection_fresh: bool = Field(
+        default=False,
+        description="True when the health connection completed a sync in the last 7 days.",
+    )
+    last_sync_at: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp of the last successful sync. None when never synced.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orientation tools — user-stated/reviewed principles, manifestations, goals,
 # priorities, and anti-patterns. Orientation is durable directional data distinct from
 # memories (factual recall), observations (behaviour patterns),
@@ -3131,6 +3243,9 @@ TOOL_REGISTRY: dict[str, tuple[type[BaseModel], type]] = {
     "list_commitments": (ListCommitmentsInput, ListCommitmentsOutput),
     "list_events": (ListEventsInput, ListEventsOutput),
     "get_adherence": (GetAdherenceInput, GetAdherenceOutput),
+    # health read tools (hector + habits exclusive)
+    "get_weight_trend": (GetWeightTrendInput, GetWeightTrendOutput),
+    "get_sleep_summary": (GetSleepSummaryInput, GetSleepSummaryOutput),
     # live-voice plan tools
     "read_conversation_plan": (ReadConversationPlanInput, ReadConversationPlanOutput),
     "list_conversation_plans": (ListConversationPlansInput, ListConversationPlansOutput),

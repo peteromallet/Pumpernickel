@@ -160,6 +160,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "log_event": "Log an event against a commitment (or standalone with a metric_key). Provide at least one of adherence_status ('done', 'missed', 'excused'), value_numeric, or value_text. Use adherence_status to mark whether a scheduled slot was completed, missed, or excused. Events are scoped to the current user, topic, and bot.",
     "list_events": "List recent events for the current user and topic, optionally filtered by commitment_id. Use before logging a corrective event to avoid duplicates, and to answer questions about recent activity.",
     "get_adherence": "Compute this week's adherence status for active commitments. Returns per-day slot status for each commitment (done, missed, excused, unknown, pending). Use this before asking the user about missed days — check the adherence board first so you can distinguish unknown from missed and avoid shaming.",
+    # health read tools (hector + habits exclusive)
+    "get_weight_trend": "Read the user's latest weight plus 7-day and 30-day rolling aggregates (avg, min, max). Returns only compact derived summaries — never raw measurements. Only available to Hector (fitness) and Habits (habits) bots. Call before discussing weight progress to ground the conversation in data. Returns empty when no Withings data is available.",
+    "get_sleep_summary": "Read the user's 7-day rolling sleep summary with per-night session counts, total asleep time (hours), total in-bed time (hours), and average sleep score. Returns only compact per-date aggregates — never raw sleep-stage timelines. Only available to Hector (fitness) and Habits (habits) bots. Call before discussing sleep patterns to ground the conversation in data. Returns empty when no Withings sleep data is available.",
     # orientation tools — principles/manifestations/goals/priorities/anti-patterns (not memory facts, observation patterns, distillation explanations, commitment/event tracking, or OOB boundaries)
     "list_orientation_items": "List your stated principles, manifestations, goals, priorities, and anti-patterns for a topic — these are your compass headings, not memory facts, observations, or distillations. Use scope='own' for the primary topic; 'all' is not allowed for orientation reads. By default excludes unreviewed and rejected items because they are not Compass-visible. Use include_unreviewed=true or include_rejected=true to widen the result set when reviewing pending proposals.",
     "get_orientation_item": "Fetch a single orientation item by its UUID. Use to inspect a specific principle, manifestation, goal, priority, or anti-pattern's full detail before reviewing, updating, or linking evidence to it. Unreviewed bot_proposed items are hidden from Compass and only visible via this tool.",
@@ -255,6 +258,9 @@ TOOL_DISPATCH: dict[str, ToolFn] = {
     "list_commitments": read_tools.list_commitments,
     "list_events": read_tools.list_events,
     "get_adherence": read_tools.get_adherence,
+    # health read tools (hector + habits exclusive)
+    "get_weight_trend": read_tools.get_weight_trend,
+    "get_sleep_summary": read_tools.get_sleep_summary,
     # orientation read tools
     "list_orientation_items": read_tools.list_orientation_items,
     "get_orientation_item": read_tools.get_orientation_item,
@@ -286,6 +292,8 @@ HECTOR_ONLY_TOOLS: frozenset[str] = frozenset({
     "list_commitments",
     "list_events",
     "get_adherence",
+    "get_weight_trend",
+    "get_sleep_summary",
 })
 
 # ── Plan tools (mediator-only live-voice agenda authoring) ─────────────────
@@ -401,6 +409,9 @@ READ_PHASE_TOOLS = {
     "list_commitments",
     "list_events",
     "get_adherence",
+    # health read tools (hector + habits exclusive)
+    "get_weight_trend",
+    "get_sleep_summary",
     # orientation read tools
     "list_orientation_items",
     "get_orientation_item",

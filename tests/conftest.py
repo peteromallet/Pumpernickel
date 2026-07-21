@@ -273,6 +273,8 @@ class FakePool:
         self.health_webhook_receipts: dict[UUID, dict[str, Any]] = {}
         self.health_webhook_receipts_by_payload: dict[tuple[str, str], UUID] = {}
         self.health_dirty_categories: dict[UUID, dict[str, Any]] = {}
+        self.health_normalized_measurements: dict[UUID, dict[str, Any]] = {}
+        self.health_normalized_sleep: dict[UUID, dict[str, Any]] = {}
         self._health_transaction_snapshots: list[dict[str, Any]] = []
 
     def _canonical_searchable_text(self, row: dict[str, Any]) -> str:
@@ -988,6 +990,12 @@ class FakePool:
                 "health_dirty_categories": copy.deepcopy(
                     self.health_dirty_categories
                 ),
+                "health_normalized_measurements": copy.deepcopy(
+                    self.health_normalized_measurements
+                ),
+                "health_normalized_sleep": copy.deepcopy(
+                    self.health_normalized_sleep
+                ),
             }
         )
 
@@ -1015,6 +1023,8 @@ class FakePool:
             "health_webhook_receipts_by_payload"
         ]
         self.health_dirty_categories = snapshot["health_dirty_categories"]
+        self.health_normalized_measurements = snapshot["health_normalized_measurements"]
+        self.health_normalized_sleep = snapshot["health_normalized_sleep"]
 
     def seed_health_connection(
         self,
@@ -1069,6 +1079,14 @@ class FakePool:
     def _health_fetchrow(self, compact: str, *args: Any) -> dict[str, Any] | None:
         if compact.startswith("INSERT INTO mediator.health_connections"):
             return self._health_upsert_connection(*args)
+        if (
+            compact.startswith("SELECT id FROM mediator.health_connections")
+            and "WHERE user_id = $1" in compact
+        ):
+            result = self._health_connection_for_user(*args)
+            if result is None:
+                return None
+            return {"id": result["id"]}
         if (
             compact.startswith("SELECT id, status, granted_scopes")
             and "FROM mediator.health_connections" in compact
@@ -1150,6 +1168,31 @@ class FakePool:
             return self._health_clear_dirty(*args)
         if compact.startswith("INSERT INTO mediator.health_source_records"):
             return self._health_upsert_source_record(*args)
+        if compact.startswith("INSERT INTO mediator.health_normalized_measurements"):
+            return self._health_insert_normalized_measurement(*args)
+        if compact.startswith("INSERT INTO mediator.health_normalized_sleep"):
+            return self._health_insert_normalized_sleep(*args)
+        if compact.startswith("SELECT last_success_at FROM mediator.health_connections"):
+            row = self.health_connections.get(args[0])
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            if row.get("user_id") != args[1]:
+                return None
+            return {"last_success_at": row.get("last_success_at")}
+        if (
+            compact.startswith("SELECT metric, measured_at, value_numeric, canonical_unit,")
+            and "FROM mediator.health_normalized_measurements" in compact
+            and "LIMIT 1" in compact
+        ):
+            user_id = args[0]
+            rows = [
+                r for r in self.health_normalized_measurements.values()
+                if r["user_id"] == user_id and r["metric"] == "weight"
+            ]
+            if not rows:
+                return None
+            rows.sort(key=lambda r: (r["measured_at"], str(r["id"])), reverse=True)
+            return dict(rows[0])
         return None
 
     def _health_fetch(self, compact: str, *args: Any) -> list[dict[str, Any]] | None:
@@ -1161,11 +1204,58 @@ class FakePool:
             and "WHERE provider = $1" in compact
         ):
             return self._health_list_connections(*args)
+        if (
+            compact.startswith("SELECT metric, measured_at, value_numeric, canonical_unit,")
+            and "FROM mediator.health_normalized_measurements" in compact
+            and "measured_at >= $2" in compact
+        ):
+            user_id, cutoff = args
+            rows = [
+                dict(r) for r in self.health_normalized_measurements.values()
+                if r["user_id"] == user_id
+                and r["metric"] == "weight"
+                and r["measured_at"] >= cutoff
+            ]
+            rows.sort(key=lambda r: (r["measured_at"], str(r["id"])), reverse=True)
+            return rows
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_sleep_date, local_timezone,")
+            and "FROM mediator.health_normalized_sleep" in compact
+            and "local_sleep_date = $2" in compact
+            and "local_sleep_date <=" not in compact
+        ):
+            user_id, local_date = args
+            rows = [
+                dict(r) for r in self.health_normalized_sleep.values()
+                if r["user_id"] == user_id
+                and r["local_sleep_date"] == local_date
+            ]
+            rows.sort(key=lambda r: (r["started_at"], str(r["id"])))
+            return rows
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_sleep_date, local_timezone,")
+            and "FROM mediator.health_normalized_sleep" in compact
+            and "local_sleep_date >= $2" in compact
+            and "local_sleep_date <= $3" in compact
+        ):
+            user_id, date_from, date_to = args
+            rows = [
+                dict(r) for r in self.health_normalized_sleep.values()
+                if r["user_id"] == user_id
+                and r["local_sleep_date"] >= date_from
+                and r["local_sleep_date"] <= date_to
+            ]
+            rows.sort(key=lambda r: (r["local_sleep_date"], r["started_at"], str(r["id"])))
+            return rows
         return None
 
     def _health_execute(self, compact: str, *args: Any) -> str | None:
         if compact.startswith("DELETE FROM mediator.health_source_records WHERE connection_id = $1"):
             return self._health_delete_source_records(*args)
+        if compact.startswith("DELETE FROM mediator.health_normalized_measurements"):
+            return self._health_delete_normalized_measurements(*args)
+        if compact.startswith("DELETE FROM mediator.health_normalized_sleep"):
+            return self._health_delete_normalized_sleep(*args)
         return None
 
     def _health_upsert_connection(self, *args: Any) -> dict[str, Any]:
@@ -1504,6 +1594,104 @@ class FakePool:
             key = (row["connection_id"], row["resource_type"], row["external_id"])
             self.health_source_records_by_key.pop(key, None)
         return f"DELETE {len(record_ids)}"
+
+    def _health_delete_normalized_measurements(self, *args: Any) -> str:
+        source_record_id, connection_id, user_id = args
+        deleted = 0
+        record_ids = [
+            rid for rid, row in self.health_normalized_measurements.items()
+            if row["source_record_id"] == source_record_id
+            and row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_normalized_measurements.pop(rid)
+            deleted += 1
+        return f"DELETE {deleted}"
+
+    def _health_delete_normalized_sleep(self, *args: Any) -> str:
+        source_record_id, connection_id, user_id = args
+        deleted = 0
+        record_ids = [
+            rid for rid, row in self.health_normalized_sleep.items()
+            if row["source_record_id"] == source_record_id
+            and row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_normalized_sleep.pop(rid)
+            deleted += 1
+        return f"DELETE {deleted}"
+
+    def _health_insert_normalized_measurement(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id, connection_id, user_id, metric,
+            measured_at, value_numeric, canonical_unit,
+            source_unit, source_device_id, source_device_model, attribution,
+        ) = args
+        row_id = uuid4()
+        now = datetime.now(UTC)
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "metric": metric,
+            "measured_at": measured_at,
+            "value_numeric": value_numeric,
+            "canonical_unit": canonical_unit,
+            "source_unit": source_unit,
+            "source_device_id": source_device_id,
+            "source_device_model": source_device_model,
+            "attribution": dict(attribution or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.health_normalized_measurements[row_id] = row
+        return dict(row)
+
+    def _health_insert_normalized_sleep(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id, connection_id, user_id,
+            started_at, ended_at, local_sleep_date,
+            local_timezone, local_offset_seconds, completeness_state,
+            total_in_bed_seconds, total_asleep_seconds, awake_seconds,
+            light_sleep_seconds, deep_sleep_seconds, rem_sleep_seconds,
+            sleep_latency_seconds, wake_after_sleep_onset_seconds,
+            wakeups, sleep_score,
+            source_device_id, source_device_model, attribution,
+        ) = args
+        row_id = uuid4()
+        now = datetime.now(UTC)
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "local_sleep_date": local_sleep_date,
+            "local_timezone": local_timezone,
+            "local_offset_seconds": local_offset_seconds,
+            "completeness_state": completeness_state,
+            "total_in_bed_seconds": total_in_bed_seconds,
+            "total_asleep_seconds": total_asleep_seconds,
+            "awake_seconds": awake_seconds,
+            "light_sleep_seconds": light_sleep_seconds,
+            "deep_sleep_seconds": deep_sleep_seconds,
+            "rem_sleep_seconds": rem_sleep_seconds,
+            "sleep_latency_seconds": sleep_latency_seconds,
+            "wake_after_sleep_onset_seconds": wake_after_sleep_onset_seconds,
+            "wakeups": wakeups,
+            "sleep_score": sleep_score,
+            "source_device_id": source_device_id,
+            "source_device_model": source_device_model,
+            "attribution": dict(attribution or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.health_normalized_sleep[row_id] = row
+        return dict(row)
 
     def _health_upsert_source_record(self, *args: Any) -> dict[str, Any]:
         (

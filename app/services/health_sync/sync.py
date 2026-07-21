@@ -17,6 +17,10 @@ from app.services.health_sync.models import (
     HealthSyncOutcome,
     HealthSyncStatus,
 )
+from app.services.health_sync.normalization import (
+    normalize_measure_group,
+    normalize_sleep_summary,
+)
 from app.services.health_sync.provider import HealthSyncProvider
 from app.services.health_sync.repository import HealthDirtyCategory, HealthSyncRepository
 
@@ -224,23 +228,103 @@ async def sync_connection_resource(
         candidate=cursor_candidate,
     )
 
+    normalized_inserted = 0
     async with repository.transaction() as connection:
         for record in records_to_store:
-            await repository.upsert_source_record(
+            stored = await repository.upsert_source_record(
                 connection_id=connection_id,
                 user_id=user_id,
                 record=record,
                 now=timestamp,
                 executor=connection,
             )
+            if (
+                record.resource_type == HealthResourceType.MEASUREMENT
+                and not record.is_deleted
+            ):
+                measures = record.source_metadata.get("measures")
+                if measures:
+                    date_epoch = record.source_metadata.get("date")
+                    measured_at = (
+                        datetime.fromtimestamp(int(date_epoch), tz=UTC)
+                        if date_epoch is not None
+                        else (record.observed_at or timestamp)
+                    )
+                    normalized_rows = normalize_measure_group(
+                        measures,
+                        measured_at=measured_at,
+                        source_timezone=record.source_timezone,
+                        source_device_id=record.source_device_id,
+                        source_device_model=record.source_device_model,
+                        attribution=dict(record.attribution),
+                    )
+                    if normalized_rows:
+                        await repository.replace_normalized_measurements(
+                            source_record_id=stored.record_id,
+                            connection_id=connection_id,
+                            user_id=user_id,
+                            measurements=normalized_rows,
+                            executor=connection,
+                        )
+                        normalized_inserted += len(normalized_rows)
+            elif (
+                record.resource_type == HealthResourceType.SLEEP
+                and not record.is_deleted
+            ):
+                normalized_sleep = normalize_sleep_summary(
+                    record,
+                    revision_count=stored.revision_count,
+                )
+                if normalized_sleep is not None:
+                    await repository.replace_normalized_sleep(
+                        source_record_id=stored.record_id,
+                        connection_id=connection_id,
+                        user_id=user_id,
+                        started_at=normalized_sleep.started_at,
+                        ended_at=normalized_sleep.ended_at,
+                        local_sleep_date=normalized_sleep.local_sleep_date,
+                        local_timezone=normalized_sleep.local_timezone,
+                        local_offset_seconds=normalized_sleep.local_offset_seconds,
+                        completeness_state=normalized_sleep.completeness_state,
+                        total_in_bed_seconds=normalized_sleep.total_in_bed_seconds,
+                        total_asleep_seconds=normalized_sleep.total_asleep_seconds,
+                        awake_seconds=normalized_sleep.awake_seconds,
+                        light_sleep_seconds=normalized_sleep.light_sleep_seconds,
+                        deep_sleep_seconds=normalized_sleep.deep_sleep_seconds,
+                        rem_sleep_seconds=normalized_sleep.rem_sleep_seconds,
+                        sleep_latency_seconds=normalized_sleep.sleep_latency_seconds,
+                        wake_after_sleep_onset_seconds=normalized_sleep.wake_after_sleep_onset_seconds,
+                        wakeups=normalized_sleep.wakeups,
+                        sleep_score=normalized_sleep.sleep_score,
+                        source_device_id=normalized_sleep.source_device_id,
+                        source_device_model=normalized_sleep.source_device_model,
+                        attribution=normalized_sleep.attribution,
+                        executor=connection,
+                    )
         for tombstone in tombstones_to_store:
-            await repository.tombstone_source_record(
+            stored = await repository.tombstone_source_record(
                 connection_id=connection_id,
                 user_id=user_id,
                 tombstone=tombstone,
                 now=timestamp,
                 executor=connection,
             )
+            if tombstone.resource_type == HealthResourceType.MEASUREMENT:
+                await repository.delete_normalized_measurements(
+                    source_record_id=stored.record_id,
+                    connection_id=connection_id,
+                    user_id=user_id,
+                    executor=connection,
+                )
+            elif tombstone.resource_type == HealthResourceType.SLEEP:
+                await repository.delete_normalized_sleep(
+                    source_record_id=stored.record_id,
+                    connection_id=connection_id,
+                    user_id=user_id,
+                    executor=connection,
+                )
+            elif tombstone.resource_type == HealthResourceType.WORKOUT:
+                pass
         if cursor_after is not None:
             await repository.store_cursor(
                 connection_id=connection_id,

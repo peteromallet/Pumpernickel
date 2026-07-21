@@ -294,3 +294,418 @@ async def test_0063_apply_and_rollback_catalog_surface() -> None:
             await admin_conn.execute(f'DROP DATABASE IF EXISTS "{db_name}";')
         finally:
             await admin_conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Migration 0064 — measurement fan-out composite UNIQUE
+# ---------------------------------------------------------------------------
+
+MIGRATION_NUMBER_0064 = "0064"
+UP_PATH_0064 = MIGRATIONS_DIR / f"{MIGRATION_NUMBER_0064}_health_measurement_fan_out.sql"
+DOWN_PATH_0064 = MIGRATIONS_DIR / f"{MIGRATION_NUMBER_0064}_health_measurement_fan_out.down.sql"
+UP_SQL_0064 = UP_PATH_0064.read_text()
+DOWN_SQL_0064 = DOWN_PATH_0064.read_text()
+
+
+def test_0064_files_exist_and_are_numbered_pair() -> None:
+    assert UP_PATH_0064.exists()
+    assert DOWN_PATH_0064.exists()
+
+
+def test_0064_up_replaces_single_unique_with_composite() -> None:
+    compacted = _compact(UP_SQL_0064)
+    assert "begin;" in compacted
+    assert "commit;" in compacted
+    assert (
+        "drop constraint if exists health_normalized_measurements_source_record_id_key"
+        in compacted
+    )
+    assert (
+        "add constraint health_normalized_measurements_source_metric_key unique (source_record_id, metric)"
+        in compacted
+    )
+    # Must drop the old before adding the new.
+    drop_pos = compacted.index("drop constraint if exists")
+    add_pos = compacted.index("add constraint")
+    assert drop_pos < add_pos
+    # Must not touch RLS or indexes — no ALTER TABLE for those.
+    assert "force row level security" not in compacted
+    assert "enable row level security" not in compacted
+    assert "revoke all" not in compacted
+
+
+def test_0064_up_preserves_existing_index_and_does_not_touch_sleep() -> None:
+    compacted = _compact(UP_SQL_0064)
+    # This migration must NOT alter the sleep table at all.
+    assert "alter table mediator.health_normalized_sleep" not in compacted
+    # It must NOT issue CREATE INDEX or DROP INDEX for the measurement index.
+    assert (
+        "create index idx_health_normalized_measurements_user_metric_measured"
+        not in compacted
+    )
+    assert (
+        "drop index idx_health_normalized_measurements_user_metric_measured"
+        not in compacted
+    )
+
+
+def test_0064_down_reinstates_single_column_unique() -> None:
+    compacted = _compact(DOWN_SQL_0064)
+    assert "begin;" in compacted
+    assert "commit;" in compacted
+    assert (
+        "drop constraint if exists health_normalized_measurements_source_metric_key"
+        in compacted
+    )
+    assert (
+        "add constraint health_normalized_measurements_source_record_id_key unique (source_record_id)"
+        in compacted
+    )
+    drop_pos = compacted.index("drop constraint if exists")
+    add_pos = compacted.index("add constraint")
+    assert drop_pos < add_pos
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_0064_measurement_fan_out_and_sleep_uniqueness() -> None:
+    """Prove measurement fan-out via composite UNIQUE while sleep stays 1:1."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    admin_dsn = os.environ.get("TEST_DATABASE_URL")
+    if not admin_dsn:
+        pytest.skip("TEST_DATABASE_URL unset; migration validation requires it")
+
+    admin_conn = await asyncpg.connect(admin_dsn, statement_cache_size=0)
+    db_name = f"health_0064_{uuid4().hex[:12]}"
+    test_dsn = _database_dsn(admin_dsn, db_name)
+    try:
+        for role in ("anon", "authenticated", "service_role"):
+            await admin_conn.execute(
+                f"DO $$ BEGIN CREATE ROLE {role}; "
+                f"EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+            )
+        await admin_conn.execute(f'DROP DATABASE IF EXISTS "{db_name}";')
+        await admin_conn.execute(f'CREATE DATABASE "{db_name}";')
+
+        conn = await asyncpg.connect(test_dsn, statement_cache_size=0)
+        try:
+            await conn.execute("CREATE SCHEMA IF NOT EXISTS mediator;")
+            await conn.execute("CREATE SCHEMA IF NOT EXISTS auth;")
+            await conn.execute(
+                """
+                CREATE OR REPLACE FUNCTION auth.uid()
+                RETURNS uuid LANGUAGE sql STABLE
+                AS $$ SELECT NULL::uuid $$;
+                """
+            )
+            await conn.execute(
+                f'ALTER DATABASE "{db_name}" SET search_path TO mediator, public;'
+            )
+            await conn.execute("SET search_path TO mediator, public;")
+
+            # Minimal users table so health migrations' FK references resolve.
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mediator.users (
+                    id uuid PRIMARY KEY DEFAULT gen_random_uuid()
+                );
+                """
+            )
+            # Stub tables referenced by health_source_to_event_projections FKs.
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mediator.events (
+                    id uuid PRIMARY KEY DEFAULT gen_random_uuid()
+                );
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mediator.commitments (
+                    id uuid PRIMARY KEY DEFAULT gen_random_uuid()
+                );
+                """
+            )
+
+            # Apply 0063 then 0064 as a self-contained foundation.
+            await conn.execute(UP_SQL)
+            await conn.execute(UP_SQL_0064)
+
+            # ------------------------------------------------------------------
+            # Seed a connection + source record so FKs are satisfied.
+            # ------------------------------------------------------------------
+            uid = str(uuid4())
+            cid = str(uuid4())
+            await conn.execute(
+                "INSERT INTO mediator.users (id) VALUES ($1::uuid)", uid
+            )
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_connections
+                    (id, user_id, provider)
+                VALUES ($1::uuid, $2::uuid, 'withings')
+                """,
+                cid,
+                uid,
+            )
+
+            src_id1 = str(uuid4())
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_source_records
+                    (id, connection_id, user_id, provider, resource_type, external_id)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, 'withings', 'measurement', 'ext-1')
+                """,
+                src_id1,
+                cid,
+                uid,
+            )
+
+            src_id2 = str(uuid4())
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_source_records
+                    (id, connection_id, user_id, provider, resource_type, external_id)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, 'withings', 'sleep', 'ext-2')
+                """,
+                src_id2,
+                cid,
+                uid,
+            )
+
+            # ------------------------------------------------------------------
+            # 1. Fan-out: same source_record_id, two different metrics → OK.
+            # ------------------------------------------------------------------
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_normalized_measurements
+                    (source_record_id, connection_id, user_id, metric,
+                     measured_at, value_numeric, canonical_unit)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, 'weight',
+                        now(), 72.5, 'kg')
+                """,
+                src_id1,
+                cid,
+                uid,
+            )
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_normalized_measurements
+                    (source_record_id, connection_id, user_id, metric,
+                     measured_at, value_numeric, canonical_unit)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, 'fat_ratio',
+                        now(), 18.3, 'percent')
+                """,
+                src_id1,
+                cid,
+                uid,
+            )
+
+            fan_out = await conn.fetch(
+                """
+                SELECT metric FROM mediator.health_normalized_measurements
+                WHERE source_record_id = $1::uuid
+                ORDER BY metric
+                """,
+                src_id1,
+            )
+            metrics = [r["metric"] for r in fan_out]
+            assert metrics == ["fat_ratio", "weight"], f"unexpected fan-out: {metrics}"
+
+            # ------------------------------------------------------------------
+            # 2. Duplicate (same source_record_id + same metric) must be rejected.
+            # ------------------------------------------------------------------
+            with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+                await conn.execute(
+                    """
+                    INSERT INTO mediator.health_normalized_measurements
+                        (source_record_id, connection_id, user_id, metric,
+                         measured_at, value_numeric, canonical_unit)
+                    VALUES ($1::uuid, $2::uuid, $3::uuid, 'weight',
+                            now(), 73.0, 'kg')
+                    """,
+                    src_id1,
+                    cid,
+                    uid,
+                )
+
+            # ------------------------------------------------------------------
+            # 3. Sleep: still one row per source_record_id (its own UNIQUE).
+            # ------------------------------------------------------------------
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_normalized_sleep
+                    (source_record_id, connection_id, user_id,
+                     started_at, ended_at, local_sleep_date)
+                VALUES ($1::uuid, $2::uuid, $3::uuid,
+                        '2025-01-01 22:00+00', '2025-01-02 06:00+00',
+                        '2025-01-02')
+                """,
+                src_id2,
+                cid,
+                uid,
+            )
+            with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+                await conn.execute(
+                    """
+                    INSERT INTO mediator.health_normalized_sleep
+                        (source_record_id, connection_id, user_id,
+                         started_at, ended_at, local_sleep_date)
+                    VALUES ($1::uuid, $2::uuid, $3::uuid,
+                            '2025-01-02 22:00+00', '2025-01-03 06:00+00',
+                            '2025-01-03')
+                    """,
+                    src_id2,
+                    cid,
+                    uid,
+                )
+
+            # ------------------------------------------------------------------
+            # 4. FK cascade: deleting a source record cascades to normalized rows.
+            # ------------------------------------------------------------------
+            await conn.execute(
+                "DELETE FROM mediator.health_source_records WHERE id = $1::uuid",
+                src_id1,
+            )
+            remaining = await conn.fetchval(
+                "SELECT count(*) FROM mediator.health_normalized_measurements WHERE source_record_id = $1::uuid",
+                src_id1,
+            )
+            assert remaining == 0
+
+            # ------------------------------------------------------------------
+            # 5. Index still exists.
+            # ------------------------------------------------------------------
+            idx_exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE indexname = 'idx_health_normalized_measurements_user_metric_measured'
+                )
+                """
+            )
+            assert idx_exists is True
+
+            # ------------------------------------------------------------------
+            # 6. RLS and deny-anon posture preserved.
+            # ------------------------------------------------------------------
+            rls_info = await conn.fetchrow(
+                """
+                SELECT c.relrowsecurity AS rls_enabled,
+                       c.relforcerowsecurity AS rls_forced
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'mediator'
+                  AND c.relname = 'health_normalized_measurements'
+                """
+            )
+            assert rls_info["rls_enabled"] is True
+            assert rls_info["rls_forced"] is True
+
+            policy_rows = await conn.fetch(
+                """
+                SELECT policyname FROM pg_policies
+                WHERE schemaname = 'mediator'
+                  AND tablename = 'health_normalized_measurements'
+                """
+            )
+            policy_names = {r["policyname"] for r in policy_rows}
+            assert "deny_anon_health_normalized_measurements" in policy_names
+            assert "owner_scoped_health_normalized_measurements" in policy_names
+
+            # ------------------------------------------------------------------
+            # 7. Down migration: revert to single-column UNIQUE.
+            # ------------------------------------------------------------------
+            await conn.execute(DOWN_SQL_0064)
+
+            # Now composite UNIQUE is gone — single-column is back.
+            # Verify we can insert a row with a new source_record_id.
+            src_id3 = str(uuid4())
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_source_records
+                    (id, connection_id, user_id, provider, resource_type, external_id)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, 'withings', 'measurement', 'ext-3')
+                """,
+                src_id3,
+                cid,
+                uid,
+            )
+            await conn.execute(
+                """
+                INSERT INTO mediator.health_normalized_measurements
+                    (source_record_id, connection_id, user_id, metric,
+                     measured_at, value_numeric, canonical_unit)
+                VALUES ($1::uuid, $2::uuid, $3::uuid, 'weight',
+                        now(), 80.0, 'kg')
+                """,
+                src_id3,
+                cid,
+                uid,
+            )
+            # A second row with the same source_record_id (even diff metric)
+            # must now be rejected by the single-column UNIQUE.
+            with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+                await conn.execute(
+                    """
+                    INSERT INTO mediator.health_normalized_measurements
+                        (source_record_id, connection_id, user_id, metric,
+                         measured_at, value_numeric, canonical_unit)
+                    VALUES ($1::uuid, $2::uuid, $3::uuid, 'fat_ratio',
+                            now(), 20.0, 'percent')
+                    """,
+                    src_id3,
+                    cid,
+                    uid,
+                )
+
+            # Verify the composite constraint is gone and single-column is back.
+            single_col_exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'mediator'
+                      AND t.relname = 'health_normalized_measurements'
+                      AND c.contype = 'u'
+                      AND pg_get_constraintdef(c.oid) =
+                          'UNIQUE (source_record_id)'
+                )
+                """
+            )
+            assert single_col_exists is True
+
+            composite_exists = await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = 'mediator'
+                      AND t.relname = 'health_normalized_measurements'
+                      AND c.contype = 'u'
+                      AND pg_get_constraintdef(c.oid) =
+                          'UNIQUE (source_record_id, metric)'
+                )
+                """
+            )
+            assert composite_exists is False
+
+        finally:
+            await conn.close()
+    finally:
+        if admin_conn.is_closed():
+            admin_conn = await asyncpg.connect(admin_dsn, statement_cache_size=0)
+        try:
+            await admin_conn.execute(
+                "SELECT pg_terminate_backend(pid) "
+                "FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid();",
+                db_name,
+            )
+            await admin_conn.execute(f'DROP DATABASE IF EXISTS "{db_name}";')
+        finally:
+            await admin_conn.close()

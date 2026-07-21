@@ -56,6 +56,7 @@ class HotContextSolo:
     pregnancy_state: str | None = None
     partner_pregnancy_state: str | None = None
     fitness_block: str | None = None
+    health_block: str | None = None
     upcoming_items: list[dict[str, Any]] = field(default_factory=list)
     compass_snapshot: Any | None = None  # CompassSnapshot | None, imported lazily
     bot_id: str = "coach"
@@ -930,6 +931,7 @@ async def build_hot_context_solo(
 
     # ── Fitness adherence (Hector only) ────────────────────────────────
     fitness_block: str | None = None
+    health_block: str | None = None
     if bot_id == "hector":
         try:
             fitness_block = await _format_fitness_block(
@@ -942,6 +944,14 @@ async def build_hot_context_solo(
         except Exception:
             # Failure isolation: non-Hector bots and any DB errors
             # result in None (no fitness block)
+            pass
+        try:
+            health_block = await _build_health_summary_block(
+                user_id=user.id,
+                pool=pool,
+            )
+        except Exception:
+            # Failure isolation: health queries are best-effort
             pass
 
     # ── Compass orientation snapshot ──────────────────────────────────
@@ -1019,6 +1029,7 @@ async def build_hot_context_solo(
         pregnancy_state=pregnancy_state,
         partner_pregnancy_state=partner_pregnancy_state,
         fitness_block=fitness_block,
+        health_block=health_block,
         upcoming_items=upcoming_items,
         compass_snapshot=compass_snapshot,
         bot_id=bot_id,
@@ -1049,6 +1060,102 @@ async def build_hot_context_solo(
             ],
         },
     )
+
+async def _build_health_summary_block(
+    user_id: UUID,
+    pool: Any,
+) -> str | None:
+    """Query derived health summaries (weight trend + sleep rolling) and
+    return a compact pre-formatted string for Hector hot context.
+
+    Returns None when no health data is available (no connection or no
+    normalized rows).  This runs independently of active commitments so
+    the bot always sees the user's health picture when data exists.
+    """
+    from app.services.health_sync.read_models import (
+        get_connection_freshness,
+        get_sleep_rolling_7d,
+        get_weight,
+    )
+
+    # Find the user's active Withings connection.
+    conn_row = await pool.fetchrow(
+        """\
+        SELECT id
+        FROM mediator.health_connections
+        WHERE user_id = $1
+          AND provider = 'withings'
+          AND deleted_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        user_id,
+    )
+    if conn_row is None:
+        return None
+
+    connection_id = conn_row["id"]
+
+    # Connection freshness.
+    freshness = await get_connection_freshness(
+        connection_id=connection_id,
+        user_id=user_id,
+        pool=pool,
+    )
+
+    # Weight trend.
+    weight = await get_weight(user_id=user_id, pool=pool)
+
+    # Sleep rolling 7-day.
+    sleep = await get_sleep_rolling_7d(user_id=user_id, pool=pool)
+
+    # Determine if there is anything to report.
+    has_weight = weight.latest is not None
+    has_sleep = sleep.nights_with_data > 0
+    if not has_weight and not has_sleep:
+        return None
+
+    lines: list[str] = []
+    lines.append("Health summaries:")
+
+    if not freshness.is_fresh and not has_weight and not has_sleep:
+        lines.append("  (no recent health data)")
+        return "\n".join(lines)
+
+    if has_weight:
+        w = weight.latest
+        assert w is not None
+        lines.append(
+            f"  Weight: {w.value_numeric:.1f} {w.canonical_unit}"
+            f" (as of {w.measured_at.strftime('%Y-%m-%d')})"
+        )
+        if weight.avg_7d is not None:
+            lines.append(f"    7d avg: {weight.avg_7d:.1f} {w.canonical_unit}")
+        if weight.avg_30d is not None:
+            lines.append(f"    30d avg: {weight.avg_30d:.1f} {w.canonical_unit}")
+
+    if has_sleep:
+        total_asleep = sum(
+            (s.total_asleep_seconds or 0)
+            for summary in sleep.summaries
+            for s in summary.sessions
+        )
+        avg_score_vals = [
+            s.sleep_score
+            for summary in sleep.summaries
+            for s in summary.sessions
+            if s.sleep_score is not None
+        ]
+        lines.append(
+            f"  Sleep (7d): {sleep.nights_with_data} nights, "
+            f"{total_asleep / 3600:.1f}h total asleep"
+        )
+        if avg_score_vals:
+            avg_score = sum(avg_score_vals) / len(avg_score_vals)
+            lines.append(f"    avg sleep score: {avg_score:.0f}")
+
+    return "\n".join(lines)
+
 
 async def _format_fitness_block(
     user_id: UUID,
@@ -1316,9 +1423,14 @@ def _render_solo_with_counts(
     elif hc.partner_pregnancy_state is not None:
         lines += ["", "## Partner pregnancy", hc.partner_pregnancy_state]
 
-    # ── Fitness adherence (Hector only) ─────────────────────────────
+    # ── Fitness adherence + Health summaries (Hector only) ──────────
+    fitness_parts: list[str] = []
     if hc.fitness_block:
-        lines += ["", "## Fitness", hc.fitness_block]
+        fitness_parts.append(hc.fitness_block)
+    if hc.health_block:
+        fitness_parts.append(hc.health_block)
+    if fitness_parts:
+        lines += ["", "## Fitness", "\n".join(fitness_parts)]
 
     # Cross-topic peek for solo
     if hc.cross_topic_peek:
@@ -1558,6 +1670,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         pregnancy_state=hc.pregnancy_state,
         partner_pregnancy_state=hc.partner_pregnancy_state,
         fitness_block=hc.fitness_block,
+        health_block=hc.health_block,
         upcoming_items=hc.upcoming_items,
         compass_snapshot=hc.compass_snapshot,
         bot_id=hc.bot_id,

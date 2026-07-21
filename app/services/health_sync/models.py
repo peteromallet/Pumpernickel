@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from enum import Enum
+from enum import Enum, IntEnum
 import json
 from typing import Any, Iterable, Mapping
 from uuid import UUID
@@ -435,6 +435,102 @@ class HealthSyncOutcome:
             raise ValueError("completed outcomes must not include an error")
 
 
+class WithingsMeasureType(IntEnum):
+    """Canonical Withings measure type constants.
+
+    Only types requested by the live adapter meastypes parameter (1, 6, 8,
+    76, 88) are guaranteed to appear in source_metadata measures.  Other
+    known types are listed for completeness but are not fetches by default.
+    """
+
+    WEIGHT_KG = 1
+    FAT_RATIO_PCT = 6
+    FAT_MASS_WEIGHT_KG = 8
+    MUSCLE_MASS_KG = 76
+    BONE_MASS_KG = 88
+
+    # Known but not in the default meastypes fetch set.
+    DIASTOLIC_BP_MMHG = 9
+    SYSTOLIC_BP_MMHG = 10
+    HEART_RATE_BPM = 11
+    SPO2_PCT = 54
+
+
+# Canonical metric name and unit per Withings measure type.
+# Only types in the default fetch set are mapped here.  Absence of a
+# type key in this map means "do not produce a normalized row."
+WITHINGS_METRIC_MAP: dict[int, tuple[str, str]] = {
+    WithingsMeasureType.WEIGHT_KG: ("weight", "kg"),
+    WithingsMeasureType.FAT_RATIO_PCT: ("fat_ratio", "percent"),
+    WithingsMeasureType.FAT_MASS_WEIGHT_KG: ("fat_mass", "kg"),
+    WithingsMeasureType.MUSCLE_MASS_KG: ("muscle_mass", "kg"),
+    WithingsMeasureType.BONE_MASS_KG: ("bone_mass", "kg"),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedMeasurement:
+    """A single decoded measurement row ready for persistence.
+
+    This is the pure domain shape produced by the normalization layer.
+    It carries enough context for upsert and attribution without
+    coupling to any particular storage engine.
+    """
+
+    metric: str
+    measured_at: datetime
+    value_numeric: float
+    canonical_unit: str
+    source_timezone: str | None = None
+    source_offset_seconds: int | None = None
+    source_device_id: str | None = None
+    source_device_model: str | None = None
+    attribution: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metric", _require_text(self.metric, field_name="metric"))
+        object.__setattr__(self, "measured_at", _normalize_datetime(self.measured_at))
+        object.__setattr__(self, "canonical_unit", _require_text(self.canonical_unit, field_name="canonical_unit"))
+        object.__setattr__(self, "attribution", dict(self.attribution))
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedSleep:
+    """A single normalized sleep summary row ready for persistence.
+
+    This carries the decoded fields extracted from a Withings sleep
+    summary source record.  Detail (stage-timeline) records are
+    intentionally excluded — only summary records produce rows in
+    ``health_normalized_sleep``.
+    """
+
+    started_at: datetime
+    ended_at: datetime
+    local_sleep_date: date
+    local_timezone: str | None = None
+    local_offset_seconds: int | None = None
+    completeness_state: str = "partial"
+    total_in_bed_seconds: int | None = None
+    total_asleep_seconds: int | None = None
+    awake_seconds: int | None = None
+    light_sleep_seconds: int | None = None
+    deep_sleep_seconds: int | None = None
+    rem_sleep_seconds: int | None = None
+    sleep_latency_seconds: int | None = None
+    wake_after_sleep_onset_seconds: int | None = None
+    wakeups: int | None = None
+    sleep_score: int | None = None
+    source_device_id: str | None = None
+    source_device_model: str | None = None
+    attribution: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "started_at", _normalize_datetime(self.started_at))
+        object.__setattr__(self, "ended_at", _normalize_datetime(self.ended_at))
+        object.__setattr__(self, "completeness_state", _require_text(self.completeness_state, field_name="completeness_state"))
+        object.__setattr__(self, "attribution", dict(self.attribution))
+
+
 __all__ = [
     "DEFAULT_CURSOR_OVERLAP",
     "HealthDirtyState",
@@ -451,7 +547,11 @@ __all__ = [
     "HealthSyncOutcome",
     "HealthSyncStatus",
     "HealthTombstone",
+    "NormalizedMeasurement",
+    "NormalizedSleep",
+    "WITHINGS_METRIC_MAP",
     "WITHINGS_PROVIDER_CAPABILITIES",
+    "WithingsMeasureType",
     "build_fallback_external_id",
     "resolve_external_id",
 ]

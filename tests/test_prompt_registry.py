@@ -51,6 +51,7 @@ def test_slots_for_filters_by_audience() -> None:
     assert "adherence_board_rules" in hector_names
     assert "knowledge_primitives_rules" in hector_names
     assert "commitment_flow_rules" in hector_names
+    assert "health_read_guidance" in hector_names
     assert "scheduling" in hector_names
     assert "reminders_bundling" in hector_names
     assert "partner_nudge" in hector_names

@@ -117,6 +117,13 @@ from tool_schemas import (
     GetAdherenceOutput,
     CommitmentAdherence,
     AdherenceSlot,
+    # health read tools
+    GetWeightTrendInput,
+    GetWeightTrendOutput,
+    WeightTrendPoint,
+    GetSleepSummaryInput,
+    GetSleepSummaryOutput,
+    SleepDaySummaryRow,
     # plan tools
     ReadConversationPlanInput,
     ReadConversationPlanOutput,
@@ -3317,6 +3324,185 @@ def _check_hector_read_scope(ctx: TurnContext) -> None:
             f"({sorted(_COMMITMENT_TOPIC_SLUGS)}), "
             f"got primary_topic_slug={ctx.primary_topic_slug!r}"
         )
+
+
+# ── Health read tools ──────────────────────────────────────────────────────
+
+
+_HEALTH_BOT_IDS: frozenset[str] = frozenset({"hector", "habits"})
+_HEALTH_TOPIC_SLUGS: frozenset[str] = frozenset({"fitness", "habits"})
+
+
+def _check_health_read_scope(ctx: TurnContext) -> None:
+    """Enforce that only Hector/Habits bots on fitness/habits topics can call
+    health read tools.
+
+    Rejects if any scope value (bot_id, primary_topic_id, primary_topic_slug,
+    user.id) is None, or if the (bot_id, topic_slug) pair is not in the
+    health-tracking set.
+    """
+    if ctx.bot_id is None:
+        raise ValueError(
+            "health read tools require ctx.bot_id (got None)"
+        )
+    if ctx.primary_topic_id is None:
+        raise ValueError(
+            "health read tools require ctx.primary_topic_id (got None)"
+        )
+    if ctx.primary_topic_slug is None:
+        raise ValueError(
+            "health read tools require ctx.primary_topic_slug (got None)"
+        )
+    if ctx.user.id is None:
+        raise ValueError(
+            "health read tools require ctx.user.id (got None)"
+        )
+    if ctx.bot_id not in _HEALTH_BOT_IDS:
+        raise ValueError(
+            f"Health read tools are restricted to "
+            f"{sorted(_HEALTH_BOT_IDS)}, got bot_id={ctx.bot_id!r}"
+        )
+    if ctx.primary_topic_slug not in _HEALTH_TOPIC_SLUGS:
+        raise ValueError(
+            f"Health read tools require a health topic "
+            f"({sorted(_HEALTH_TOPIC_SLUGS)}), "
+            f"got primary_topic_slug={ctx.primary_topic_slug!r}"
+        )
+
+
+async def _fetch_health_connection(
+    ctx: TurnContext,
+) -> dict[str, Any] | None:
+    """Return the user's active Withings connection row, or None."""
+    row = await ctx.pool.fetchrow(
+        """
+        SELECT id, last_success_at
+        FROM mediator.health_connections
+        WHERE user_id = $1
+          AND provider = 'withings'
+          AND deleted_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        ctx.user.id,
+    )
+    if row is None:
+        return None
+    return {"id": row["id"], "last_success_at": row["last_success_at"]}
+
+
+async def get_weight_trend(
+    ctx: TurnContext, args: "GetWeightTrendInput",
+) -> "GetWeightTrendOutput":
+    """Return compact weight trend: latest reading + 7d/30d aggregates.
+
+    Scoped to the current user.  Returns empty output (all fields None/zero)
+    when no weight data or no health connection exists.
+    """
+    _check_health_read_scope(ctx)
+
+    from app.services.health_sync.read_models import (  # noqa: PLC0415
+        get_weight,
+        get_connection_freshness,
+    )
+
+    conn = await _fetch_health_connection(ctx)
+
+    # Connection freshness
+    connection_fresh = False
+    last_sync_at: str | None = None
+    if conn is not None:
+        freshness = await get_connection_freshness(
+            connection_id=conn["id"],
+            user_id=ctx.user.id,
+            pool=ctx.pool,
+        )
+        connection_fresh = freshness.is_fresh
+        if freshness.last_success_at is not None:
+            last_sync_at = freshness.last_success_at.isoformat()
+
+    # Weight data
+    result = await get_weight(user_id=ctx.user.id, pool=ctx.pool)
+
+    latest: WeightTrendPoint | None = None
+    if result.latest is not None:
+        latest = WeightTrendPoint(
+            measured_at=result.latest.measured_at.isoformat(),
+            value_numeric=result.latest.value_numeric,
+            canonical_unit=result.latest.canonical_unit,
+        )
+
+    return GetWeightTrendOutput(
+        latest=latest,
+        avg_7d=result.avg_7d,
+        min_7d=result.min_7d,
+        max_7d=result.max_7d,
+        avg_30d=result.avg_30d,
+        reading_count_7d=len(result.readings_7d),
+        reading_count_30d=len(result.readings_30d),
+        connection_fresh=connection_fresh,
+        last_sync_at=last_sync_at,
+    )
+
+
+async def get_sleep_summary(
+    ctx: TurnContext, args: "GetSleepSummaryInput",
+) -> "GetSleepSummaryOutput":
+    """Return compact 7-day rolling sleep summary.
+
+    Scoped to the current user.  Returns empty output (empty summaries,
+    zero nights) when no sleep data or no health connection exists.
+    """
+    _check_health_read_scope(ctx)
+
+    from app.services.health_sync.read_models import (  # noqa: PLC0415
+        get_sleep_rolling_7d,
+        get_connection_freshness,
+    )
+
+    conn = await _fetch_health_connection(ctx)
+
+    # Connection freshness
+    connection_fresh = False
+    last_sync_at: str | None = None
+    if conn is not None:
+        freshness = await get_connection_freshness(
+            connection_id=conn["id"],
+            user_id=ctx.user.id,
+            pool=ctx.pool,
+        )
+        connection_fresh = freshness.is_fresh
+        if freshness.last_success_at is not None:
+            last_sync_at = freshness.last_success_at.isoformat()
+
+    # Sleep data
+    result = await get_sleep_rolling_7d(user_id=ctx.user.id, pool=ctx.pool)
+
+    summaries: list[SleepDaySummaryRow] = []
+    for s in result.summaries:
+        asleep_hours: float | None = None
+        if s.total_asleep_seconds is not None:
+            asleep_hours = round(s.total_asleep_seconds / 3600.0, 1)
+        in_bed_hours: float | None = None
+        if s.total_in_bed_seconds is not None:
+            in_bed_hours = round(s.total_in_bed_seconds / 3600.0, 1)
+
+        summaries.append(
+            SleepDaySummaryRow(
+                local_sleep_date=str(s.local_sleep_date),
+                session_count=s.session_count,
+                total_asleep_hours=asleep_hours,
+                total_in_bed_hours=in_bed_hours,
+                avg_sleep_score=s.avg_sleep_score,
+            )
+        )
+
+    return GetSleepSummaryOutput(
+        summaries=summaries,
+        nights_with_data=result.nights_with_data,
+        connection_fresh=connection_fresh,
+        last_sync_at=last_sync_at,
+    )
 
 
 # ── Conversation-plan read tools ───────────────────────────────────────────
