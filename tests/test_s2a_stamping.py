@@ -14,6 +14,7 @@ import subprocess
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -96,7 +97,9 @@ print(hashlib.sha1(payload.encode()).hexdigest()[:12])
 """
         result = subprocess.run(
             [sys.executable, "-c", code],
-            capture_output=True, text=True, cwd="/Users/peteromalley/Documents/Veas",
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parents[1],
         )
         subprocess_version = result.stdout.strip()
         assert subprocess_version == expected, (

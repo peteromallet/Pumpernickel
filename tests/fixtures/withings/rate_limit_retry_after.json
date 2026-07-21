@@ -1,0 +1,26 @@
+{
+  "scenario_id": "rate_limit_retry_after",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/measure",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getmeas",
+      "lastupdate": 1784505600
+    }
+  },
+  "response": {
+    "status_code": 429,
+    "headers": {
+      "Content-Type": "application/json",
+      "Retry-After": "120"
+    },
+    "json": {
+      "status": 601,
+      "error": "rate_limit"
+    }
+  }
+}

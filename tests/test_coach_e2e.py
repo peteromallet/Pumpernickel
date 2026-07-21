@@ -191,6 +191,8 @@ def _seed_message(pool, user, content, charge="routine"):
     pool.messages[msg_id] = {
         "id": msg_id,
         "direction": "inbound",
+        "bot_id": "coach",
+        "topic_id": CAREER_TOPIC_ID,
         "sender_id": user.id,
         "recipient_id": None,
         "content": content,

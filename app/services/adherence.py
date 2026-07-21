@@ -1,10 +1,16 @@
-"""Pure-Python adherence computation for commitments.
+"""Pure-Python adherence computation for commitments — CANONICAL implementation.
 
 Provides compute_adherence(commitment, events, today, tz) -> AdherenceBoard
 that classifies every expected slot in the current Monday-start week as one of:
 done, missed, excused, unknown, or pending.
 
 unknown is computed only — it is NEVER persisted as an event row.
+
+Type-safety invariant: only events with an explicit adherence_status in
+('done', 'missed', 'excused') AND a matching commitment_id can classify a
+slot.  Numeric-only, weight, sleep, or generic measurement events can NEVER
+satisfy a commitment — the unsafe fallback that treated any event with
+value_numeric as 'done' has been removed.
 """
 
 from __future__ import annotations
@@ -62,14 +68,27 @@ def iter_week_dates(today: date, tz: ZoneInfo | None = None) -> list[date]:
     return [monday + timedelta(days=i) for i in range(7)]
 
 
-def _event_map(events: list[dict[str, Any]], tz: ZoneInfo) -> dict[date, dict[str, Any]]:
+def _event_map(
+    events: list[dict[str, Any]],
+    tz: ZoneInfo,
+    commitment_id: str | None = None,
+) -> dict[date, dict[str, Any]]:
     """Index events by their observed_at date in the commitment's timezone.
 
     Only the most recent event per date is kept (sorted by observed_at desc).
     When an event has adherence_status, it wins over a measurement-only event.
+
+    If commitment_id is provided, only events matching that commitment_id are
+    included.  This enforces the type-safety invariant that a weight, sleep, or
+    generic measurement event attached to a different commitment cannot satisfy
+    a workout slot.
     """
     by_date: dict[date, dict[str, Any]] = {}
     for evt in events:
+        # Filter by commitment_id when specified
+        if commitment_id is not None and str(evt.get("commitment_id", "")) != commitment_id:
+            continue
+
         obs = evt.get("observed_at")
         if isinstance(obs, str):
             obs = datetime.fromisoformat(obs.replace("Z", "+00:00"))
@@ -162,7 +181,7 @@ def compute_adherence(
         # 1. Map events to their observed_at date (one per day).
         # 2. Fill remaining slots in date order up to target_count.
         tc = target_count or 1
-        event_map = _event_map(events, tz)
+        event_map = _event_map(events, tz, commitment_id)
         used_dates: set[date] = set()
 
         # First pass: events that match this commitment's observed_at dates
@@ -179,7 +198,7 @@ def compute_adherence(
         expected_dates = sorted(used_dates)[:tc]
 
     # Match events to slots
-    event_map = _event_map(events, tz)
+    event_map = _event_map(events, tz, commitment_id)
     board = AdherenceBoard(
         commitment_id=commitment_id,
         label=label,
@@ -194,25 +213,18 @@ def compute_adherence(
             # Past slot
             if evt is not None and evt.get("adherence_status") in ("done", "missed", "excused"):
                 status: SlotStatus = evt["adherence_status"]  # type: ignore[assignment]
-            elif evt is not None and evt.get("value_numeric") is not None:
-                # Measurement-only event — treat as done if it exists
-                status = "done"
             else:
                 status = "unknown"  # Computed only — NEVER persisted
         elif d == today:
-            # Today: can be done/missed/excused if event exists, else pending
+            # Today: can be done/missed/excused if adherence event exists, else pending
             if evt is not None and evt.get("adherence_status") in ("done", "missed", "excused"):
                 status = evt["adherence_status"]  # type: ignore[assignment]
-            elif evt is not None and evt.get("value_numeric") is not None:
-                status = "done"
             else:
                 status = "pending"
         else:
             # Future slot
             if evt is not None and evt.get("adherence_status") in ("done", "missed", "excused"):
                 status = evt["adherence_status"]  # type: ignore[assignment]
-            elif evt is not None and evt.get("value_numeric") is not None:
-                status = "done"
             else:
                 status = "pending"
 

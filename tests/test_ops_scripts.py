@@ -34,12 +34,18 @@ def test_backfill_embeddings_requires_direct_non_pooler_url() -> None:
         )
         == "postgresql://user:pass@db.example.com:5432/postgres"
     )
+    session_pooler_url = (
+        "postgresql://user:pass@aws-0-eu.pooler.supabase.com:5432/postgres"
+    )
+    assert (
+        direct_database_url_from_env({"DIRECT_DATABASE_URL": session_pooler_url})
+        == session_pooler_url
+    )
 
     for url in (
         "",
-        "postgresql://user:pass@aws-0-eu.pooler.supabase.com:5432/postgres",
         "postgresql://user:pass@db.example.com:6543/postgres",
-        "postgresql://user:pass@pgbouncer.example.com:5432/postgres",
+        "postgresql://user:pass@pgbouncer.example.com:6432/postgres",
     ):
         try:
             direct_database_url_from_env({"DIRECT_DATABASE_URL": url})

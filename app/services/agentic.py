@@ -1854,6 +1854,7 @@ async def _run_agentic(
     final_output_message_id: UUID | None = None
     tool_call_count = 0
     reasoning = ""
+    claimed_message_ids: list[UUID] = []
 
     # ── Hot-context build + atomic claim+open ───────────────────────
     # Hot context and prompt_snapshot are computed before the write
@@ -1937,7 +1938,6 @@ async def _run_agentic(
         # messages by the claim CTE (in-flight ownership); the legacy
         # UPDATE messages SET handled_by_turn_id is gone per the
         # column-semantics contract (handled_by_turn_id is terminal-only).
-        claimed_message_ids: list[UUID] = []
         if triggering_message_ids:
             async with active_pool.acquire() as claim_conn:
                 async with claim_conn.transaction():

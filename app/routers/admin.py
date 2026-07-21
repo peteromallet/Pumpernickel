@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import secrets
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -65,6 +66,7 @@ def _page(title: str, body: str) -> str:
             ("evals", "Evals"),
             ("audit", "Audit"),
             ("user-bot-pauses", "Pauses"),
+            ("health", "Health"),
         ]
     )
     return f"""<!doctype html>
@@ -99,6 +101,7 @@ async def admin_page(_: None = Depends(authenticate_admin)) -> str:
             ("spend", "Spend"),
             ("evals", "Evals"),
             ("audit", "Audit"),
+            ("health", "Health Sync"),
         ]
     ) + "</ul>"
     return _page("Admin", links)
@@ -419,3 +422,183 @@ async def audit(pool: Any = Depends(get_pool), _: None = Depends(authenticate_ad
     if target_type == "escalation":
         rows = [row for row in rows if any(call.get("tool_name") == "escalate_to_partner" for call in row.get("tool_calls", []))]
     return _page("Audit", _table(rows, ["turn_id", "started_at", "triggering_content", "final_outbound_content", "reasoning", "tool_calls"]))
+
+
+_HEALTH_STALE_THRESHOLD = timedelta(hours=24)
+
+
+def _stale_class(last_success_at: datetime | None) -> str:
+    if last_success_at is None:
+        return "never_synced"
+    if last_success_at.tzinfo is None:
+        last_success_at = last_success_at.replace(tzinfo=UTC)
+    age = datetime.now(UTC) - last_success_at
+    return "stale" if age > _HEALTH_STALE_THRESHOLD else "fresh"
+
+
+@router.get("/admin/health", response_class=HTMLResponse)
+async def health_diagnostics(
+    pool: Any = Depends(get_pool),
+    _: None = Depends(authenticate_admin),
+) -> str:
+    settings = get_settings()
+
+    # ── Configuration section ──────────────────────────────────────────
+    config_rows = [
+        {"flag": "health_sync_enabled", "value": str(settings.health_sync_enabled)},
+        {"flag": "health_sync_measurements_enabled", "value": str(settings.health_sync_measurements_enabled)},
+        {"flag": "health_sync_workouts_enabled", "value": str(settings.health_sync_workouts_enabled)},
+        {"flag": "health_sync_sleep_enabled", "value": str(settings.health_sync_sleep_enabled)},
+        {"flag": "health_workout_projection_enabled", "value": str(settings.health_workout_projection_enabled)},
+        {"flag": "health_sync_poll_interval_s", "value": str(settings.health_sync_poll_interval_s)},
+        {"flag": "health_sync_batch_size", "value": str(settings.health_sync_batch_size)},
+        {"flag": "health_sync_stale_threshold_hours", "value": "24"},
+    ]
+    config_table = _table(config_rows, ["flag", "value"])
+
+    # ── Connections ────────────────────────────────────────────────────
+    connections = await _fetch(
+        pool,
+        """\
+        SELECT id, user_id, provider, external_user_id, status, granted_scopes,
+               last_success_at, last_error_at, last_error_code, disconnected_at,
+               revoked_at, deleted_at, updated_at, created_at
+        FROM mediator.health_connections
+        WHERE provider = $1
+          AND deleted_at IS NULL
+        ORDER BY updated_at ASC, id ASC
+        LIMIT $2
+        """,
+        "withings",
+        200,
+    )
+
+    # ── Summary counts (computed in Python, not via aggregate SQL) ─────
+    total_connections = len(connections)
+    status_counts: dict[str, int] = {}
+    stale_count = 0
+    fresh_count = 0
+    never_synced_count = 0
+
+    for conn in connections:
+        status_counts[conn.get("status", "unknown")] = (
+            status_counts.get(conn.get("status", "unknown"), 0) + 1
+        )
+        sc = _stale_class(conn.get("last_success_at"))
+        if sc == "stale":
+            stale_count += 1
+        elif sc == "fresh":
+            fresh_count += 1
+        else:
+            never_synced_count += 1
+
+    # ── Sync runs (best-effort; FakePool may not support this) ─────────
+    run_summary: list[dict[str, Any]] = []
+    run_count_msg = "N/A"
+    try:
+        run_rows = await _fetch(
+            pool,
+            """\
+            SELECT status, COUNT(*)::text AS count
+            FROM mediator.health_sync_runs
+            WHERE provider = 'withings'
+            GROUP BY status
+            ORDER BY status
+            """,
+        )
+        run_summary = [dict(r) for r in run_rows]
+        run_count_msg = str(sum(int(r.get("count", 0)) for r in run_summary))
+    except Exception:
+        run_count_msg = "N/A (requires live DB)"
+
+    # ── Projections (best-effort; FakePool may not support this) ────────
+    proj_summary: list[dict[str, Any]] = []
+    proj_count_msg = "N/A"
+    try:
+        proj_rows = await _fetch(
+            pool,
+            """\
+            SELECT projection_status, COUNT(*)::text AS count
+            FROM mediator.health_source_to_event_projections
+            GROUP BY projection_status
+            ORDER BY projection_status
+            """,
+        )
+        proj_summary = [dict(r) for r in proj_rows]
+        proj_count_msg = str(sum(int(r.get("count", 0)) for r in proj_summary))
+    except Exception:
+        proj_count_msg = "N/A (requires live DB)"
+
+    # ── Build response ─────────────────────────────────────────────────
+    summary_rows = [
+        {"metric": "total_connections", "value": str(total_connections)},
+        {"metric": "status_breakdown", "value": json.dumps(status_counts)},
+        {"metric": "fresh_connections", "value": str(fresh_count)},
+        {"metric": "stale_connections", "value": str(stale_count)},
+        {"metric": "never_synced_connections", "value": str(never_synced_count)},
+        {"metric": "total_sync_runs", "value": run_count_msg},
+        {"metric": "total_projections", "value": proj_count_msg},
+    ]
+    summary_table = _table(summary_rows, ["metric", "value"])
+
+    # ── Connection detail table (metadata-only, explicitly narrow) ─────
+    conn_columns = [
+        "id",
+        "user_id",
+        "status",
+        "granted_scopes",
+        "stale_class",
+        "last_success_at",
+        "last_error_at",
+        "last_error_code",
+        "updated_at",
+    ]
+    conn_rows: list[dict[str, Any]] = []
+    for conn in connections:
+        conn_rows.append(
+            {
+                "id": conn.get("id"),
+                "user_id": conn.get("user_id"),
+                "status": conn.get("status"),
+                "granted_scopes": conn.get("granted_scopes"),
+                "stale_class": _stale_class(conn.get("last_success_at")),
+                "last_success_at": _iso(conn.get("last_success_at")),
+                "last_error_at": _iso(conn.get("last_error_at")),
+                "last_error_code": conn.get("last_error_code"),
+                "updated_at": _iso(conn.get("updated_at")),
+            }
+        )
+    conn_table = _table(conn_rows, conn_columns)
+
+    # ── Sync run detail ────────────────────────────────────────────────
+    run_detail = ""
+    if run_summary:
+        run_detail = f"<h2>Sync Run Summary</h2>{_table(run_summary, ['status', 'count'])}"
+    else:
+        run_detail = "<h2>Sync Run Summary</h2><p>No sync run data available (requires live database).</p>"
+
+    # ── Projection detail ──────────────────────────────────────────────
+    proj_detail = ""
+    if proj_summary:
+        proj_detail = f"<h2>Projection Summary</h2>{_table(proj_summary, ['projection_status', 'count'])}"
+    else:
+        proj_detail = "<h2>Projection Summary</h2><p>No projection data available (requires live database).</p>"
+
+    body = (
+        f"<h2>Configuration</h2>{config_table}"
+        f"<h2>Summary</h2>{summary_table}"
+        f"<h2>Connections</h2>{conn_table}"
+        f"{run_detail}"
+        f"{proj_detail}"
+    )
+    return _page("Health Sync Diagnostics", body)
+
+
+def _iso(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.isoformat() + "Z"
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return str(value)

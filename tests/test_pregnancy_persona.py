@@ -123,7 +123,7 @@ class TestBuildTanteRosiSpec:
         assert "end_pregnancy" in spec.tool_allowlist
 
     def test_excludes_coach_exclusions(self):
-        """The 8 coach-excluded tools must be absent from Rosi's allowlist."""
+        """Bridge, status, and legacy activity tools stay absent from Rosi."""
         from app.bots.tante_rosi import build_tante_rosi_spec
 
         spec = build_tante_rosi_spec()
@@ -135,12 +135,12 @@ class TestBuildTanteRosiSpec:
             "send_bridge_candidate",
             "list_bridge_candidates",
             "escalate_to_partner",
-            "search_messages",
             "recent_activity",
         ):
             assert excluded not in spec.tool_allowlist, (
                 f"{excluded} should be excluded from Rosi allowlist"
             )
+        assert "search_messages" in spec.tool_allowlist
 
     def test_renders_system_prompt_through_spec(self):
         """BotSpec.render_system_prompt should work for the Tante Rosi spec."""

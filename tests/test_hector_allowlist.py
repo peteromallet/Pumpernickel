@@ -1,9 +1,9 @@
 """Allowlist tests for the Hector fitness bot.
 
 Mirrors test_pregnancy_allowlist.py.  Verifies:
-- Hector's tool_allowlist contains all 7 commitment/event tools.
+- Hector's tool_allowlist contains all 7 commitment/event tools + 3 health read tools.
 - Coach, Tante Rosi, and Mediator allowlists do NOT contain any
-  commitment/event tools.
+  commitment/event or health read tools.
 - BOT_EXCLUSIVE_TOOLS filter removes Hector-only tools for non-Hector bots.
 - to_anthropic_tools() never receives Hector-exclusive tool names for
   non-Hector bots.
@@ -20,7 +20,7 @@ import pytest
 
 
 class TestHectorAllowlist:
-    """Hector's tool_allowlist — all 7 commitment/event tools present."""
+    """Hector's tool_allowlist — all 10 Hector tools present."""
 
     @pytest.fixture(autouse=True)
     def _register_staging(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,8 +30,8 @@ class TestHectorAllowlist:
         _reg._STAGING_BOTS_REGISTERED = False
         _reg._maybe_register_staging_bots()
 
-    def test_contains_all_seven_commitment_event_tools(self):
-        """All seven commitment/event tools must be in Hector's allowlist."""
+    def test_contains_all_hector_tools(self):
+        """All 10 Hector tools (7 commitment/event + 3 health read) must be in the allowlist."""
         from app.bots.registry import get_bot_spec
 
         spec = get_bot_spec("hector")
@@ -45,11 +45,24 @@ class TestHectorAllowlist:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         for tool_name in hector_tools:
             assert tool_name in spec.tool_allowlist, (
                 f"{tool_name} must be in Hector's allowlist"
             )
+
+    def test_workout_summary_in_hector_allowlist(self):
+        """get_workout_summary specifically must be in Hector's allowlist."""
+        from app.bots.registry import get_bot_spec
+
+        spec = get_bot_spec("hector")
+        assert spec.tool_allowlist is not None
+        assert "get_workout_summary" in spec.tool_allowlist, (
+            "get_workout_summary must be in Hector's allowlist"
+        )
 
     def test_excludes_pregnancy_tools(self):
         """Hector must not have pregnancy tools."""
@@ -103,7 +116,7 @@ class TestCoachAllowlist:
         _reg._maybe_register_staging_bots()
 
     def test_coach_lacks_commitment_event_tools(self):
-        """Coach must not have any commitment/event tools."""
+        """Coach must not have any commitment/event or health read tools."""
         from app.bots.registry import get_bot_spec
 
         spec = get_bot_spec("coach")
@@ -117,6 +130,9 @@ class TestCoachAllowlist:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         found = spec.tool_allowlist & hector_tools
         assert not found, (
@@ -141,7 +157,7 @@ class TestTanteRosiAllowlist:
         _reg._maybe_register_staging_bots()
 
     def test_tante_rosi_lacks_commitment_event_tools(self):
-        """Tante Rosi must not have any commitment/event tools."""
+        """Tante Rosi must not have any commitment/event or health read tools."""
         from app.bots.registry import get_bot_spec
 
         spec = get_bot_spec("tante_rosi")
@@ -155,6 +171,9 @@ class TestTanteRosiAllowlist:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         found = spec.tool_allowlist & hector_tools
         assert not found, (
@@ -171,7 +190,7 @@ class TestMediatorAllowlist:
     """Mediator's tool_allowlist must NOT contain commitment/event tools."""
 
     def test_mediator_lacks_commitment_event_tools(self):
-        """Mediator must not have any commitment/event tools (allowlist is None
+        """Mediator must not have any commitment/event or health read tools (allowlist is None
         meaning all non-exclusive tools, but BOT_EXCLUSIVE_TOOLS removes them)."""
         from app.bots.registry import get_bot_spec
 
@@ -188,6 +207,9 @@ class TestMediatorAllowlist:
                 "list_commitments",
                 "list_events",
                 "get_adherence",
+                "get_weight_trend",
+                "get_sleep_summary",
+                "get_workout_summary",
             }
             found = spec.tool_allowlist & hector_tools
             assert not found, (
@@ -214,7 +236,7 @@ class TestBotExclusiveToolsFilter:
         _reg._maybe_register_staging_bots()
 
     def test_hector_gets_hector_tools_from_step_allowed(self):
-        """_step_allowed() for Hector includes commitment/event tools."""
+        """_step_allowed() for Hector includes commitment/event + health read tools."""
         from uuid import uuid4
 
         from app.models.user import User
@@ -223,7 +245,7 @@ class TestBotExclusiveToolsFilter:
         from app.bots.registry import get_bot_spec
 
         user = User(
-            id=uuid4(), name="Test", phone="+15555550100", timezone="UTC"
+            id=uuid4(), name="Test", phone="+155****0100", timezone="UTC"
         )
         spec = get_bot_spec("hector")
         ctx = TurnContext(
@@ -248,6 +270,9 @@ class TestBotExclusiveToolsFilter:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         present = allowed & hector_tools
         assert present == hector_tools, (
@@ -255,7 +280,7 @@ class TestBotExclusiveToolsFilter:
         )
 
     def test_coach_step_allowed_excludes_hector_tools(self):
-        """_step_allowed() for Coach removes Hector-exclusive tools."""
+        """_step_allowed() for Coach removes all Hector-exclusive tools."""
         from uuid import uuid4
 
         from app.models.user import User
@@ -264,7 +289,7 @@ class TestBotExclusiveToolsFilter:
         from app.bots.registry import get_bot_spec
 
         user = User(
-            id=uuid4(), name="Test", phone="+15555550100", timezone="UTC"
+            id=uuid4(), name="Test", phone="+155****0100", timezone="UTC"
         )
         spec = get_bot_spec("coach")
         ctx = TurnContext(
@@ -289,6 +314,9 @@ class TestBotExclusiveToolsFilter:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         found = allowed & hector_tools
         assert not found, (
@@ -296,7 +324,7 @@ class TestBotExclusiveToolsFilter:
         )
 
     def test_tante_rosi_step_allowed_excludes_hector_tools(self):
-        """_step_allowed() for Tante Rosi removes Hector-exclusive tools."""
+        """_step_allowed() for Tante Rosi removes all Hector-exclusive tools."""
         from uuid import uuid4
 
         from app.models.user import User
@@ -305,7 +333,7 @@ class TestBotExclusiveToolsFilter:
         from app.bots.registry import get_bot_spec
 
         user = User(
-            id=uuid4(), name="Test", phone="+15555550100", timezone="UTC"
+            id=uuid4(), name="Test", phone="+155****0100", timezone="UTC"
         )
         spec = get_bot_spec("tante_rosi")
         ctx = TurnContext(
@@ -330,6 +358,9 @@ class TestBotExclusiveToolsFilter:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         found = allowed & hector_tools
         assert not found, (
@@ -337,7 +368,7 @@ class TestBotExclusiveToolsFilter:
         )
 
     def test_mediator_step_allowed_excludes_hector_tools(self):
-        """_step_allowed() for Mediator removes Hector-exclusive tools even
+        """_step_allowed() for Mediator removes all Hector-exclusive tools even
         though Mediator's tool_allowlist is None (meaning all tools)."""
         from uuid import uuid4
 
@@ -346,7 +377,7 @@ class TestBotExclusiveToolsFilter:
         from app.services.tools.registry import _step_allowed
 
         user = User(
-            id=uuid4(), name="Test", phone="+15555550100", timezone="UTC"
+            id=uuid4(), name="Test", phone="+155****0100", timezone="UTC"
         )
         ctx = TurnContext(
             turn_id=uuid4(),
@@ -370,6 +401,9 @@ class TestBotExclusiveToolsFilter:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         found = allowed & hector_tools
         assert not found, (
@@ -386,7 +420,7 @@ class TestAnthropicToolsExclusion:
     """to_anthropic_tools() should never include Hector tools for non-Hector bots."""
 
     def test_hector_tools_not_in_to_anthropic_for_coach(self):
-        """Coach's to_anthropic_tools output must exclude Hector-only tools."""
+        """Coach's to_anthropic_tools output must exclude all Hector-only tools."""
         from app.services.tools.registry import TOOL_DISPATCH, to_anthropic_tools
 
         # Simulate what Coach would get: all tools minus Hector exclusives
@@ -398,6 +432,9 @@ class TestAnthropicToolsExclusion:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         tools = to_anthropic_tools(coach_allowed)
         tool_names = {t["name"] for t in tools}
@@ -410,6 +447,9 @@ class TestAnthropicToolsExclusion:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         found = tool_names & hector_tools
         assert not found, (
@@ -417,7 +457,7 @@ class TestAnthropicToolsExclusion:
         )
 
     def test_hector_tools_in_to_anthropic_for_hector(self):
-        """Hector's to_anthropic_tools output must INCLUDE Hector-only tools."""
+        """Hector's to_anthropic_tools output must INCLUDE all Hector-only tools."""
         from app.services.tools.registry import TOOL_DISPATCH, to_anthropic_tools
 
         hector_allowed = set(TOOL_DISPATCH.keys())  # Hector gets everything it wants
@@ -432,6 +472,9 @@ class TestAnthropicToolsExclusion:
             "list_commitments",
             "list_events",
             "get_adherence",
+            "get_weight_trend",
+            "get_sleep_summary",
+            "get_workout_summary",
         }
         present = tool_names & hector_tools
         assert present == hector_tools, (

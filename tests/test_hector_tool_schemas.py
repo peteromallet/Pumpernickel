@@ -74,12 +74,12 @@ class TestHectorToolSchemas:
             )
 
     def test_correct_tool_count(self):
-        """Hector must have at least the 7 tools (plus the standard set)."""
+        """Hector must have at least the 10 tools (7 commitment/event + 3 health read)."""
         allowed = _get_hector_allowlist()
-        assert len(allowed) >= 7, (
-            f"hector tool_allowlist has only {len(allowed)} tools, expected >= 7"
+        assert len(allowed) >= 10, (
+            f"hector tool_allowlist has only {len(allowed)} tools, expected >= 10"
         )
         hector_only_in_allowlist = HECTOR_ONLY_TOOLS & allowed
-        assert len(hector_only_in_allowlist) == 7, (
-            f"Expected all 7 Hector tools in allowlist, got {len(hector_only_in_allowlist)}"
+        assert len(hector_only_in_allowlist) == 10, (
+            f"Expected all 10 Hector tools in allowlist, got {len(hector_only_in_allowlist)}"
         )

@@ -1,0 +1,73 @@
+{
+  "scenario_id": "measurements_page_2",
+  "origin": "synthetic",
+  "request": {
+    "method": "POST",
+    "path": "/measure",
+    "headers": {
+      "Authorization": "Bearer synthetic-access-token-v2"
+    },
+    "form": {
+      "action": "getmeas",
+      "lastupdate": 1784505600,
+      "offset": 100,
+      "meastypes": "1,6,8,76,88"
+    }
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "json": {
+      "status": 0,
+      "body": {
+        "updatetime": 1784511300,
+        "timezone": "America/New_York",
+        "measuregrps": [
+          {
+            "grpid": 9001002,
+            "attrib": 0,
+            "date": 1784510100,
+            "created": 1784510160,
+            "modified": 1784510220,
+            "category": 1,
+            "deviceid": "synthetic-scale-device-01",
+            "hash_deviceid": "synthetic-scale-hash-01",
+            "measures": [
+              {
+                "value": 70480,
+                "type": 1,
+                "unit": -3,
+                "algo": 0,
+                "fm": 0,
+                "position": 0
+              },
+              {
+                "value": 210,
+                "type": 6,
+                "unit": -1,
+                "algo": 0,
+                "fm": 0,
+                "position": 0
+              },
+              {
+                "value": 5430,
+                "type": 88,
+                "unit": -3,
+                "algo": 0,
+                "fm": 0,
+                "position": 0
+              }
+            ],
+            "model": "Body Comp",
+            "model_id": 18,
+            "comment": ""
+          }
+        ],
+        "more": 0,
+        "offset": 0
+      }
+    }
+  }
+}

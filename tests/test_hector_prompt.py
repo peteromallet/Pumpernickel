@@ -193,3 +193,105 @@ class TestHectorPersistenceGuidance:
         assert "durable fitness state" in rendered
         assert "read before durable writes" in rendered
         assert "prefer updating" in rendered
+
+
+class TestHealthReadGuidanceWorkoutBoundaries:
+    """The health_read_guidance slot must encode hard boundaries about
+    imported workouts — they never create or satisfy commitments."""
+
+    def test_prompt_has_health_data_reads_section(self):
+        prompt = _render()
+        assert "# Health Data Reads" in prompt or "health data reads" in prompt.lower(), (
+            "Prompt must include health data reads guidance section"
+        )
+
+    def test_workout_reads_never_for_commitment_satisfaction(self):
+        """Boundary 1: imported workouts never satisfy commitments."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert "never for commitment satisfaction" in lower, (
+            "Must state that weight/sleep/workout data does NOT satisfy commitments"
+        )
+        assert "do not satisfy" in lower or "does not satisfy" in lower, (
+            "Must explicitly state data doesn't satisfy workout commitments"
+        )
+
+    def test_workout_reads_never_for_commitment_creation(self):
+        """Boundary 2: do not create commitments from health data."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert "never for commitment creation" in lower, (
+            "Must state not to create commitments from health data"
+        )
+        assert "do not create commitments" in lower, (
+            "Must contain explicit 'do not create commitments' directive"
+        )
+
+    def test_workout_reads_never_for_medical_interpretation(self):
+        """Boundary 3: never for medical interpretation."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert "never for medical interpretation" in lower, (
+            "Must state not to medically interpret health data"
+        )
+
+    def test_workout_reads_never_infer_missed_or_excused(self):
+        """Boundary 4: never infer missed/excused from workout data."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert "never infer missed" in lower or "never infer missed or excused" in lower, (
+            "Must state not to infer missed/excused adherence from workout data"
+        )
+        assert "solely by" in lower or "only by" in lower, (
+            "Must state adherence is determined solely by explicit events"
+        )
+
+    def test_imported_workouts_do_not_create_commitments(self):
+        """The prompt must explicitly state imported workouts are not commitments."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert (
+            "do not create commitments" in lower
+            and "imported" in lower
+        ) or "do not create commitments" in lower, (
+            "Prompt must state imported workouts don't create commitments"
+        )
+
+    def test_device_workouts_are_informational_context(self):
+        """Imported/device workouts are context, not commitment completions."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert "informational context" in lower, (
+            "Prompt must state imported workouts are informational context"
+        )
+
+    def test_prompt_has_compact_summary_language(self):
+        """Prompt describes workout reads as compact aggregates, not raw data."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert "compact" in lower, (
+            "Prompt must describe workout data as compact summaries"
+        )
+        assert "never raw" in lower or "never raw workout" in lower, (
+            "Prompt must state workout reads are never raw data"
+        )
+
+    def test_prompt_explicitly_excludes_device_ids_and_heart_rate(self):
+        """Prompt must state that device IDs and heart-rate detail are excluded."""
+        prompt = _render()
+        lower = prompt.lower()
+        assert "device" in lower, (
+            "Prompt must mention device data exclusion"
+        )
+        assert "heart" in lower and "rate" in lower, (
+            "Prompt must mention heart-rate detail exclusion"
+        )
+
+    def test_no_language_implying_device_workouts_create_commitments(self):
+        """Prompt must not imply that synced/imported workouts create commitments."""
+        prompt = _render()
+        lower = prompt.lower()
+        # These phrases must NOT appear
+        assert "create commitments from your workouts" not in lower
+        assert "automatically create commitments" not in lower
+        assert "workouts will be tracked as commitments" not in lower

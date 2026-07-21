@@ -84,6 +84,7 @@ SECTION_ORDER: list[SectionStep] = [
     SectionStep(kind="slot", name="adherence_board_rules", order=740),
     SectionStep(kind="slot", name="knowledge_primitives_rules", order=760),
     SectionStep(kind="slot", name="commitment_flow_rules", order=780),
+    SectionStep(kind="slot", name="health_read_guidance", order=790),
     SectionStep(kind="slot", name="scheduling", order=800),
     SectionStep(kind="slot", name="reminders_bundling", order=850),
     SectionStep(kind="slot", name="partner_nudge", order=900),

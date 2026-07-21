@@ -26,6 +26,7 @@ def _make_minimal_hc(
     *,
     bot_id: str = "coach",
     fitness_block: str | None = None,
+    workout_block: str | None = None,
     topic_status: dict | None = None,
     pregnancy_state: str | None = None,
     partner_pregnancy_state: str | None = None,
@@ -61,6 +62,7 @@ def _make_minimal_hc(
             "messages": [],
         },
         fitness_block=fitness_block,
+        workout_block=workout_block,
         topic_status=topic_status,
         pregnancy_state=pregnancy_state,
         partner_pregnancy_state=partner_pregnancy_state,
@@ -256,5 +258,100 @@ class TestFitnessBlockCopyConstructor:
 
     def test_copy_constructor_preserves_null_fitness_block(self):
         hc = _make_minimal_hc(bot_id="hector", fitness_block=None)
+        rendered = render_hot_context_solo(hc)
+        assert "## Fitness" not in rendered
+
+
+class TestWorkoutBlockSnapshotRendering:
+    """Snapshot tests verify workout_block content appears/omits correctly."""
+
+    def test_workout_block_alone_renders_in_fitness_section(self):
+        """When only workout_block is set (no fitness_block), it appears under ## Fitness."""
+        wb = "Recent workouts (7d):\n  2026-07-20: 1 workout(s) — running, 30min total"
+        hc = _make_minimal_hc(bot_id="hector", workout_block=wb)
+        rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+        assert "## Fitness" in rendered
+        assert "Recent workouts (7d):" in rendered
+        assert "running" in rendered
+        assert "30min total" in rendered
+
+    def test_workout_and_fitness_block_both_render(self):
+        """When both blocks are set, both appear under ## Fitness."""
+        fb = _sample_fitness_block()
+        wb = "Recent workouts (7d):\n  2026-07-20: 1 workout(s) — running, 30min total"
+        hc = _make_minimal_hc(
+            bot_id="hector", fitness_block=fb, workout_block=wb
+        )
+        rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+        assert "## Fitness" in rendered
+        assert "Current focus: morning workout" in rendered  # from fitness_block
+        assert "Recent workouts (7d):" in rendered  # from workout_block
+
+    def test_workout_block_null_omits_workout_text(self):
+        """When workout_block is None, no workout summary text appears."""
+        fb = _sample_fitness_block()
+        hc = _make_minimal_hc(
+            bot_id="hector", fitness_block=fb, workout_block=None
+        )
+        rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+        assert "## Fitness" in rendered  # fitness_block still present
+        assert "Recent workouts (7d)" not in rendered
+
+    def test_workout_block_empty_string_omitted(self):
+        """Empty workout_block should not produce content."""
+        hc = _make_minimal_hc(bot_id="hector", workout_block="")
+        rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+        assert "## Fitness" not in rendered  # no fitness_block either
+        assert "Recent workouts (7d)" not in rendered
+
+    def test_workout_block_content_excludes_device_data(self):
+        """Snapshot: no device IDs, heart-rate, or raw data in rendered workout block."""
+        wb = "Recent workouts (7d):\n  2026-07-20: 2 workout(s) — running, cycling, 60min total (1 projected)"
+        hc = _make_minimal_hc(bot_id="hector", workout_block=wb)
+        rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+        assert "## Fitness" in rendered
+        assert "Recent workouts (7d):" in rendered
+        assert "projected" in rendered
+        # Must NOT contain sensitive data
+        assert "withings" not in rendered.lower()
+        assert "scanwatch" not in rendered.lower()
+        assert "bpm" not in rendered.lower()
+        assert "device" not in rendered.lower()
+        assert "heart" not in rendered.lower()
+
+    def test_workout_block_does_not_mention_commitments(self):
+        """workout_block is informational only — no commitment language."""
+        wb = "Recent workouts (7d):\n  2026-07-20: 1 workout(s) — strength, 60min total"
+        hc = _make_minimal_hc(bot_id="hector", workout_block=wb)
+        rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+        assert "commitment" not in rendered.lower()
+        assert "missed" not in rendered.lower()
+        assert "excused" not in rendered.lower()
+        assert "create" not in rendered.lower()
+
+    def test_non_hector_fitness_section_only_if_blocks_set(self):
+        """Non-Hector bots' render still shows ## Fitness if blocks are set
+        (the gate is on the build side, not render side). This test confirms
+        the render path, while integration tests confirm build_hot_context_solo
+        never sets workout_block for non-Hector."""
+        for bot_id in ("coach", "mediator", "tante_rosi"):
+            hc = _make_minimal_hc(bot_id=bot_id, workout_block=None, fitness_block=None)
+            rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+            assert "## Fitness" not in rendered, (
+                f"{bot_id} should not render ## Fitness when no blocks are set"
+            )
+            assert "Recent workouts (7d)" not in rendered
+
+    def test_copy_constructor_preserves_workout_block(self):
+        """render_hot_context_solo (truncation path) must preserve workout_block."""
+        wb = "Recent workouts (7d):\n  2026-07-20: 1 workout(s) — yoga, 45min total"
+        hc = _make_minimal_hc(bot_id="hector", workout_block=wb)
+        rendered = render_hot_context_solo(hc)
+        assert "## Fitness" in rendered
+        assert "Recent workouts (7d):" in rendered
+        assert "yoga" in rendered
+
+    def test_copy_constructor_preserves_null_workout_block(self):
+        hc = _make_minimal_hc(bot_id="hector", workout_block=None)
         rendered = render_hot_context_solo(hc)
         assert "## Fitness" not in rendered

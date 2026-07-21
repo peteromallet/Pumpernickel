@@ -1,0 +1,13 @@
+{
+  "scenario_id": "sleep_tombstones",
+  "origin": "synthetic",
+  "resource_type": "sleep",
+  "tombstones": [
+    {
+      "external_id": "sleep_summary:9203001",
+      "deleted_at": "2026-07-20T08:00:00Z",
+      "provider_revision": "synthetic-sleep-delete-rev-1",
+      "reason": "user_deleted_sleep"
+    }
+  ]
+}

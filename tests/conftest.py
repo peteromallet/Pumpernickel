@@ -1,6 +1,8 @@
+import json
+import copy
+import os
 import sys
 import types
-import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -52,6 +54,42 @@ REQUIRED_ENV = {
     "DEFAULT_USER_TIMEZONE": "UTC",
 }
 
+SCRUB_ENV_KEYS = {
+    "DATA_ENCRYPTION_KEY",
+    "DEEPSEEK_API_KEY",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_BOT_USER_ID",
+    "HEALTH_SYNC_ENABLED",
+    "HEALTH_SYNC_MEASUREMENTS_ENABLED",
+    "HEALTH_SYNC_SLEEP_ENABLED",
+    "HEALTH_SYNC_WORKOUTS_ENABLED",
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+    "WITHINGS_ACCESS_TOKEN",
+    "WITHINGS_CALLBACK_URL",
+    "WITHINGS_CLIENT_ID",
+    "WITHINGS_CLIENT_SECRET",
+    "WITHINGS_REFRESH_TOKEN",
+}
+SCRUB_ENV_PREFIXES = (
+    "DISCORD_BOT_TOKEN_",
+    "DISCORD_BOT_USER_ID_",
+)
+
+
+def _apply_test_env(
+    monkeypatch: pytest.MonkeyPatch, *, include_required_env: bool
+) -> None:
+    for key in SCRUB_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    for key in tuple(os.environ):
+        if key.startswith(SCRUB_ENV_PREFIXES):
+            monkeypatch.delenv(key, raising=False)
+    env_values = REQUIRED_ENV if include_required_env else REQUIRED_ENV
+    for key, value in env_values.items():
+        monkeypatch.setenv(key, value)
+
 
 @pytest.fixture
 def anyio_backend() -> str:
@@ -75,10 +113,23 @@ def _seed_relationship_topic_id() -> None:
 
 @pytest.fixture
 def app_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key, value in REQUIRED_ENV.items():
-        monkeypatch.setenv(key, value)
+    _apply_test_env(monkeypatch, include_required_env=True)
     get_settings.cache_clear()
     yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _stable_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import agentic, hooks
+
+    _apply_test_env(monkeypatch, include_required_env=False)
+    agentic.set_pool(None)
+    hooks.set_pool(None)
+    get_settings.cache_clear()
+    yield
+    agentic.set_pool(None)
+    hooks.set_pool(None)
     get_settings.cache_clear()
 
 
@@ -119,6 +170,7 @@ class FakeTransactionContext:
         self.pool = pool
 
     async def __aenter__(self) -> None:
+        self.pool._push_health_transaction_snapshot()
         self.pool.transaction_depth += 1
         self.pool.transaction_entries += 1
         self.pool.connection_events.append(
@@ -130,6 +182,10 @@ class FakeTransactionContext:
         self.pool.connection_events.append(
             ("transaction_exit", self.pool.transaction_depth, "", ())
         )
+        if exc_type is None:
+            self.pool._commit_health_transaction_snapshot()
+        else:
+            self.pool._rollback_health_transaction_snapshot()
         self.pool.transaction_depth -= 1
         return False
 
@@ -209,6 +265,19 @@ class FakePool:
         self.commitments: dict[UUID, dict[str, Any]] = {}
         self.events: dict[UUID, dict[str, Any]] = {}
         self.fetch_sqls: list[str] = []
+        self.health_connections: dict[UUID, dict[str, Any]] = {}
+        self.health_connections_by_user_provider: dict[tuple[UUID, str], UUID] = {}
+        self.health_connections_by_provider_external_user: dict[tuple[str, str], UUID] = {}
+        self.health_source_records: dict[UUID, dict[str, Any]] = {}
+        self.health_source_records_by_key: dict[tuple[UUID, str, str], UUID] = {}
+        self.health_webhook_receipts: dict[UUID, dict[str, Any]] = {}
+        self.health_webhook_receipts_by_payload: dict[tuple[str, str], UUID] = {}
+        self.health_dirty_categories: dict[UUID, dict[str, Any]] = {}
+        self.health_normalized_measurements: dict[UUID, dict[str, Any]] = {}
+        self.health_normalized_sleep: dict[UUID, dict[str, Any]] = {}
+        self.health_normalized_workouts: dict[UUID, dict[str, Any]] = {}
+        self.health_source_to_event_projections: dict[UUID, dict[str, Any]] = {}
+        self._health_transaction_snapshots: list[dict[str, Any]] = []
 
     def _canonical_searchable_text(self, row: dict[str, Any]) -> str:
         if "canonical_text" in row:
@@ -900,8 +969,1248 @@ class FakePool:
         """Next channels query will raise UndefinedTableError."""
         self._raise_undefined_table_on_channels = True
 
+    def _push_health_transaction_snapshot(self) -> None:
+        self._health_transaction_snapshots.append(
+            {
+                "health_connections": copy.deepcopy(self.health_connections),
+                "health_connections_by_user_provider": copy.deepcopy(
+                    self.health_connections_by_user_provider
+                ),
+                "health_connections_by_provider_external_user": copy.deepcopy(
+                    self.health_connections_by_provider_external_user
+                ),
+                "health_source_records": copy.deepcopy(self.health_source_records),
+                "health_source_records_by_key": copy.deepcopy(
+                    self.health_source_records_by_key
+                ),
+                "health_webhook_receipts": copy.deepcopy(
+                    self.health_webhook_receipts
+                ),
+                "health_webhook_receipts_by_payload": copy.deepcopy(
+                    self.health_webhook_receipts_by_payload
+                ),
+                "health_dirty_categories": copy.deepcopy(
+                    self.health_dirty_categories
+                ),
+                "health_normalized_measurements": copy.deepcopy(
+                    self.health_normalized_measurements
+                ),
+                "health_normalized_sleep": copy.deepcopy(
+                    self.health_normalized_sleep
+                ),
+                "health_normalized_workouts": copy.deepcopy(
+                    self.health_normalized_workouts
+                ),
+                "health_source_to_event_projections": copy.deepcopy(
+                    self.health_source_to_event_projections
+                ),
+            }
+        )
+
+    def _commit_health_transaction_snapshot(self) -> None:
+        if self._health_transaction_snapshots:
+            self._health_transaction_snapshots.pop()
+
+    def _rollback_health_transaction_snapshot(self) -> None:
+        if not self._health_transaction_snapshots:
+            return
+        snapshot = self._health_transaction_snapshots.pop()
+        self.health_connections = snapshot["health_connections"]
+        self.health_connections_by_user_provider = snapshot[
+            "health_connections_by_user_provider"
+        ]
+        self.health_connections_by_provider_external_user = snapshot[
+            "health_connections_by_provider_external_user"
+        ]
+        self.health_source_records = snapshot["health_source_records"]
+        self.health_source_records_by_key = snapshot[
+            "health_source_records_by_key"
+        ]
+        self.health_webhook_receipts = snapshot["health_webhook_receipts"]
+        self.health_webhook_receipts_by_payload = snapshot[
+            "health_webhook_receipts_by_payload"
+        ]
+        self.health_dirty_categories = snapshot["health_dirty_categories"]
+        self.health_normalized_measurements = snapshot["health_normalized_measurements"]
+        self.health_normalized_sleep = snapshot["health_normalized_sleep"]
+        self.health_normalized_workouts = snapshot["health_normalized_workouts"]
+        self.health_source_to_event_projections = snapshot[
+            "health_source_to_event_projections"
+        ]
+
+    def seed_health_connection(
+        self,
+        *,
+        user_id: UUID,
+        provider: str = "withings",
+        external_user_id: str | None = None,
+        status: str = "active",
+        granted_scopes: list[str] | None = None,
+        cursor_state: dict[str, Any] | None = None,
+        updated_at: datetime | None = None,
+        access_token_encrypted: bytes | None = None,
+        refresh_token_encrypted: bytes | None = None,
+    ) -> UUID:
+        now = updated_at or datetime.now(UTC)
+        connection_id = uuid4()
+        row = {
+            "id": connection_id,
+            "user_id": user_id,
+            "provider": provider,
+            "external_user_id": external_user_id,
+            "status": status,
+            "granted_scopes": list(granted_scopes or []),
+            "granted_at": now,
+            "consented_measurements_at": None,
+            "consented_workouts_at": None,
+            "consented_sleep_at": None,
+            "access_token_encrypted": access_token_encrypted,
+            "refresh_token_encrypted": refresh_token_encrypted,
+            "access_token_expires_at": None,
+            "refresh_token_expires_at": None,
+            "refresh_token_rotated_at": None,
+            "cursor_state": dict(cursor_state or {}),
+            "last_success_at": None,
+            "last_error_at": None,
+            "last_error_code": None,
+            "last_error_detail": None,
+            "disconnected_at": None,
+            "revoked_at": None,
+            "deleted_at": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.health_connections[connection_id] = row
+        self.health_connections_by_user_provider[(user_id, provider)] = connection_id
+        if external_user_id is not None:
+            self.health_connections_by_provider_external_user[
+                (provider, external_user_id)
+            ] = connection_id
+        return connection_id
+
+    def _health_fetchrow(self, compact: str, *args: Any) -> dict[str, Any] | None:
+        if compact.startswith("INSERT INTO mediator.health_connections"):
+            return self._health_upsert_connection(*args)
+        if (
+            compact.startswith("SELECT id FROM mediator.health_connections")
+            and "WHERE user_id = $1" in compact
+        ):
+            result = self._health_connection_for_user(*args)
+            if result is None:
+                return None
+            return {"id": result["id"]}
+        if (
+            compact.startswith("SELECT id, status, granted_scopes")
+            and "FROM mediator.health_connections" in compact
+            and "WHERE user_id = $1" in compact
+        ):
+            return self._health_connection_for_user(*args)
+        if (
+            compact.startswith("SELECT id, user_id, provider, external_user_id, status")
+            and "cursor_state" in compact
+            and "external_user_id = $2" in compact
+            and "FROM mediator.health_connections" in compact
+        ):
+            provider, external_user_id = args
+            connection_id = self.health_connections_by_provider_external_user.get(
+                (provider, external_user_id)
+            )
+            if connection_id is None:
+                return None
+            row = self.health_connections.get(connection_id)
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            return {
+                "id": row["id"],
+                "user_id": row["user_id"],
+                "provider": row["provider"],
+                "external_user_id": row.get("external_user_id"),
+                "status": row["status"],
+                "granted_scopes": list(row.get("granted_scopes") or []),
+                "cursor_state": dict(row.get("cursor_state") or {}),
+                "updated_at": row["updated_at"],
+            }
+        if compact.startswith(
+            "SELECT id, user_id, provider, external_user_id, status, granted_scopes"
+        ) and "FROM mediator.health_connections" in compact:
+            row = self.health_connections.get(args[0])
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            return dict(row)
+        if compact.startswith(
+            "SELECT cursor_state, updated_at FROM mediator.health_connections"
+        ):
+            row = self.health_connections.get(args[0])
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            return {
+                "cursor_state": dict(row.get("cursor_state") or {}),
+                "updated_at": row["updated_at"],
+            }
+        if compact.startswith("UPDATE mediator.health_connections SET cursor_state = $2"):
+            connection_id, cursor_state, updated_at = args
+            row = self.health_connections.get(connection_id)
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            row["cursor_state"] = dict(cursor_state or {})
+            row["updated_at"] = updated_at
+            return {
+                "cursor_state": dict(row["cursor_state"]),
+                "updated_at": row["updated_at"],
+            }
+        if compact.startswith("UPDATE mediator.health_connections SET last_success_at = $2"):
+            return self._health_record_sync_success(*args)
+        if compact.startswith("UPDATE mediator.health_connections SET last_error_at = $2"):
+            return self._health_record_sync_error(*args)
+        if compact.startswith("UPDATE mediator.health_connections SET status = 'disconnected'"):
+            return self._health_disconnect_connection(*args)
+        if compact.startswith("UPDATE mediator.health_connections SET status = 'deleted'"):
+            return self._health_delete_connection(*args)
+        if compact.startswith("SELECT id, connection_id, user_id, provider, provider_user_id, resource_type"):
+            provider, payload_hash = args
+            receipt_id = self.health_webhook_receipts_by_payload.get((provider, payload_hash))
+            if receipt_id is None:
+                return None
+            return dict(self.health_webhook_receipts[receipt_id])
+        if compact.startswith("INSERT INTO mediator.health_webhook_receipts"):
+            return self._health_insert_webhook_receipt(*args)
+        if compact.startswith("INSERT INTO mediator.health_dirty_categories"):
+            return self._health_mark_dirty(*args)
+        if compact.startswith("UPDATE mediator.health_dirty_categories SET cleared_at = $2"):
+            return self._health_clear_dirty(*args)
+        if compact.startswith("INSERT INTO mediator.health_source_records"):
+            return self._health_upsert_source_record(*args)
+        if compact.startswith("INSERT INTO mediator.health_normalized_measurements"):
+            return self._health_insert_normalized_measurement(*args)
+        if compact.startswith("INSERT INTO mediator.health_normalized_sleep"):
+            return self._health_insert_normalized_sleep(*args)
+        if compact.startswith("INSERT INTO mediator.health_normalized_workouts"):
+            return self._health_insert_normalized_workout(*args)
+        if compact.startswith("INSERT INTO mediator.health_source_to_event_projections"):
+            return self._health_insert_projection(*args)
+        if compact.startswith("INSERT INTO mediator.events") and "RETURNING id, commitment_id, metric_key, adherence_status, observed_at" in compact:
+            return self._health_insert_projection_event(*args)
+        if compact.startswith("SELECT last_success_at FROM mediator.health_connections"):
+            row = self.health_connections.get(args[0])
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            if row.get("user_id") != args[1]:
+                return None
+            return {"last_success_at": row.get("last_success_at")}
+        if compact.startswith("SELECT last_success_at, provider FROM mediator.health_connections"):
+            row = self.health_connections.get(args[0])
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            if row.get("user_id") != args[1]:
+                return None
+            return {
+                "last_success_at": row.get("last_success_at"),
+                "provider": row.get("provider", "withings"),
+            }
+        if (
+            compact.startswith("SELECT metric, measured_at, value_numeric, canonical_unit,")
+            and "FROM mediator.health_normalized_measurements" in compact
+            and "LIMIT 1" in compact
+        ):
+            user_id = args[0]
+            rows = [
+                r for r in self.health_normalized_measurements.values()
+                if r["user_id"] == user_id and r["metric"] == "weight"
+            ]
+            if not rows:
+                return None
+            rows.sort(key=lambda r: (r["measured_at"], str(r["id"])), reverse=True)
+            return dict(rows[0])
+        # ── Projection ledger SELECT / UPDATE (RETURNING) ──────────────────
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "projection_status IN ('pending', 'projected')" in compact
+            and "FOR UPDATE" in compact
+        ):
+            return self._health_find_active_projection_for_update(*args)
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "projection_status IN ('pending', 'projected')" in compact
+            and "FOR UPDATE" not in compact
+        ):
+            return self._health_find_active_projection(*args)
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "event_id = $1" in compact
+            and "LIMIT 1" in compact
+        ):
+            return self._health_find_projection_by_event(*args)
+        if compact.startswith(
+            "UPDATE mediator.health_source_to_event_projections SET projection_status = 'superseded'"
+        ):
+            return self._health_supersede_projection(*args)
+        if compact.startswith(
+            "UPDATE mediator.health_source_to_event_projections SET projection_status = 'removed'"
+        ):
+            return self._health_remove_projection(*args)
+        if compact.startswith(
+            "UPDATE mediator.health_source_to_event_projections SET event_id = NULL"
+        ):
+            return self._health_detach_projection_event(*args)
+        return None
+
+    def _health_fetch(self, compact: str, *args: Any) -> list[dict[str, Any]] | None:
+        if compact.startswith("WITH claimable_dirty AS"):
+            return self._health_claim_dirty(*args)
+        if (
+            compact.startswith("SELECT id, user_id, provider, external_user_id, status, granted_scopes")
+            and "FROM mediator.health_connections" in compact
+            and "WHERE provider = $1" in compact
+        ):
+            return self._health_list_connections(*args)
+        if (
+            compact.startswith("SELECT metric, measured_at, value_numeric, canonical_unit,")
+            and "FROM mediator.health_normalized_measurements" in compact
+            and "measured_at >= $2" in compact
+        ):
+            user_id, cutoff = args
+            rows = [
+                dict(r) for r in self.health_normalized_measurements.values()
+                if r["user_id"] == user_id
+                and r["metric"] == "weight"
+                and r["measured_at"] >= cutoff
+            ]
+            rows.sort(key=lambda r: (r["measured_at"], str(r["id"])), reverse=True)
+            return rows
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_sleep_date, local_timezone,")
+            and "FROM mediator.health_normalized_sleep" in compact
+            and "local_sleep_date = $2" in compact
+            and "local_sleep_date <=" not in compact
+        ):
+            user_id, local_date = args
+            rows = [
+                dict(r) for r in self.health_normalized_sleep.values()
+                if r["user_id"] == user_id
+                and r["local_sleep_date"] == local_date
+            ]
+            rows.sort(key=lambda r: (r["started_at"], str(r["id"])))
+            return rows
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_sleep_date, local_timezone,")
+            and "FROM mediator.health_normalized_sleep" in compact
+            and "local_sleep_date >= $2" in compact
+            and "local_sleep_date <= $3" in compact
+        ):
+            user_id, date_from, date_to = args
+            rows = [
+                dict(r) for r in self.health_normalized_sleep.values()
+                if r["user_id"] == user_id
+                and r["local_sleep_date"] >= date_from
+                and r["local_sleep_date"] <= date_to
+            ]
+            rows.sort(key=lambda r: (r["local_sleep_date"], r["started_at"], str(r["id"])))
+            return rows
+        # ── Workout read-model queries ──────────────────────────────────────
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_timezone, local_offset_seconds,")
+            and "FROM mediator.health_normalized_workouts" in compact
+            and "ORDER BY started_at DESC" in compact
+            and "LIMIT $2" in compact
+        ):
+            user_id, limit_val = args
+            rows = [
+                dict(r) for r in self.health_normalized_workouts.values()
+                if r["user_id"] == user_id
+            ]
+            rows.sort(key=lambda r: (r["started_at"], str(r["id"])), reverse=True)
+            return rows[: int(limit_val)]
+        if (
+            compact.startswith("SELECT started_at, ended_at, local_timezone, local_offset_seconds,")
+            and "FROM mediator.health_normalized_workouts" in compact
+            and "started_at >= $2" in compact
+            and "started_at < $3" in compact
+            and "ORDER BY started_at" in compact
+        ):
+            user_id, range_start, range_end = args
+            rows = [
+                dict(r) for r in self.health_normalized_workouts.values()
+                if r["user_id"] == user_id
+                and r["started_at"] >= range_start
+                and r["started_at"] < range_end
+            ]
+            rows.sort(key=lambda r: (r["started_at"], str(r["id"])))
+            return rows
+        if (
+            "FROM mediator.health_source_to_event_projections" in compact
+            and "source_record_id = ANY($1::uuid[])" in compact
+            and "user_id = $2" in compact
+            and "ORDER BY source_record_id, projection_version DESC" in compact
+        ):
+            source_ids, user_id = args
+            allowed = set(source_ids or [])
+            rows = [
+                dict(r) for r in self.health_source_to_event_projections.values()
+                if r["user_id"] == user_id
+                and r["source_record_id"] in allowed
+            ]
+            rows.sort(
+                key=lambda r: (
+                    str(r["source_record_id"]),
+                    -r.get("projection_version", 0),
+                )
+            )
+            return rows
+        return None
+
+    def _health_execute(self, compact: str, *args: Any) -> str | None:
+        # ── Connection-scoped deletes (delete_connection_data orchestrator).
+        # Every statement is double-scoped by connection_id AND user_id.
+        if (
+            compact.startswith("DELETE FROM mediator.events WHERE user_id = $2")
+            and "mediator.health_source_to_event_projections" in compact
+        ):
+            return self._health_delete_connection_projection_owned_events(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_source_to_event_projections WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_projection_ledger(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_dirty_categories WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_dirty_categories(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_webhook_receipts WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_webhook_receipts(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_source_records WHERE connection_id = $1"
+        ):
+            return self._health_delete_source_records(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_normalized_measurements WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_normalized(
+                self.health_normalized_measurements, *args
+            )
+        if compact.startswith(
+            "DELETE FROM mediator.health_normalized_sleep WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_normalized(
+                self.health_normalized_sleep, *args
+            )
+        if compact.startswith(
+            "DELETE FROM mediator.health_normalized_workouts WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_normalized(
+                self.health_normalized_workouts, *args
+            )
+        # ── Single-record deletes (tombstone reversal path) ─────────────────
+        if compact.startswith("DELETE FROM mediator.health_normalized_measurements"):
+            return self._health_delete_normalized_measurements(*args)
+        if compact.startswith("DELETE FROM mediator.health_normalized_sleep"):
+            return self._health_delete_normalized_sleep(*args)
+        if compact.startswith("DELETE FROM mediator.health_normalized_workouts"):
+            return self._health_delete_normalized_workouts(*args)
+        return None
+
+    def _health_upsert_connection(self, *args: Any) -> dict[str, Any]:
+        (
+            user_id,
+            provider,
+            external_user_id,
+            granted_scopes,
+            granted_at,
+            consented_measurements_at,
+            consented_workouts_at,
+            consented_sleep_at,
+            access_token_encrypted,
+            refresh_token_encrypted,
+            access_token_expires_at,
+            refresh_token_expires_at,
+            refresh_token_rotated_at,
+            updated_at,
+        ) = args
+        connection_id = self.health_connections_by_user_provider.get((user_id, provider))
+        if connection_id is None:
+            connection_id = uuid4()
+            row = {
+                "id": connection_id,
+                "user_id": user_id,
+                "provider": provider,
+                "external_user_id": external_user_id,
+                "status": "active",
+                "granted_scopes": list(granted_scopes),
+                "granted_at": granted_at,
+                "consented_measurements_at": consented_measurements_at,
+                "consented_workouts_at": consented_workouts_at,
+                "consented_sleep_at": consented_sleep_at,
+                "access_token_encrypted": access_token_encrypted,
+                "refresh_token_encrypted": refresh_token_encrypted,
+                "access_token_expires_at": access_token_expires_at,
+                "refresh_token_expires_at": refresh_token_expires_at,
+                "refresh_token_rotated_at": refresh_token_rotated_at,
+                "cursor_state": {},
+                "last_success_at": None,
+                "last_error_at": None,
+                "last_error_code": None,
+                "last_error_detail": None,
+                "disconnected_at": None,
+                "revoked_at": None,
+                "deleted_at": None,
+                "created_at": updated_at,
+                "updated_at": updated_at,
+            }
+            self.health_connections[connection_id] = row
+            self.health_connections_by_user_provider[(user_id, provider)] = connection_id
+        else:
+            row = self.health_connections[connection_id]
+            previous_external_user = row.get("external_user_id")
+            if previous_external_user:
+                self.health_connections_by_provider_external_user.pop(
+                    (provider, previous_external_user),
+                    None,
+                )
+            row.update(
+                {
+                    "external_user_id": external_user_id,
+                    "status": "active",
+                    "granted_scopes": list(granted_scopes),
+                    "granted_at": row.get("granted_at") or granted_at,
+                    "consented_measurements_at": row.get("consented_measurements_at")
+                    or consented_measurements_at,
+                    "consented_workouts_at": row.get("consented_workouts_at")
+                    or consented_workouts_at,
+                    "consented_sleep_at": row.get("consented_sleep_at")
+                    or consented_sleep_at,
+                    "access_token_encrypted": access_token_encrypted,
+                    "refresh_token_encrypted": refresh_token_encrypted,
+                    "access_token_expires_at": access_token_expires_at,
+                    "refresh_token_expires_at": refresh_token_expires_at,
+                    "refresh_token_rotated_at": refresh_token_rotated_at,
+                    "last_error_at": None,
+                    "last_error_code": None,
+                    "last_error_detail": None,
+                    "disconnected_at": None,
+                    "revoked_at": None,
+                    "deleted_at": None,
+                    "updated_at": updated_at,
+                }
+            )
+        if external_user_id is not None:
+            self.health_connections_by_provider_external_user[
+                (provider, external_user_id)
+            ] = connection_id
+        return dict(self.health_connections[connection_id])
+
+    def _health_connection_for_user(self, *args: Any) -> dict[str, Any] | None:
+        (user_id,) = args
+        rows = [
+            row
+            for row in self.health_connections.values()
+            if row.get("user_id") == user_id
+            and row.get("provider") == "withings"
+            and row.get("deleted_at") is None
+        ]
+        if not rows:
+            return None
+        row = sorted(rows, key=lambda item: (item["updated_at"], item["id"]), reverse=True)[0]
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "granted_scopes": list(row.get("granted_scopes") or []),
+            "granted_at": row.get("granted_at"),
+            "last_success_at": row.get("last_success_at"),
+            "last_error_at": row.get("last_error_at"),
+            "last_error_code": row.get("last_error_code"),
+            "disconnected_at": row.get("disconnected_at"),
+            "revoked_at": row.get("revoked_at"),
+            "deleted_at": row.get("deleted_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _health_insert_webhook_receipt(self, *args: Any) -> dict[str, Any] | None:
+        (
+            connection_id,
+            user_id,
+            provider,
+            provider_user_id,
+            resource_type,
+            payload_hash,
+            content_type,
+            status,
+            note,
+            received_at,
+            processed_at,
+        ) = args
+        payload_key = (provider, payload_hash)
+        if payload_key in self.health_webhook_receipts_by_payload:
+            return None
+        receipt_id = uuid4()
+        row = {
+            "id": receipt_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "provider": provider,
+            "provider_user_id": provider_user_id,
+            "resource_type": resource_type,
+            "payload_hash": payload_hash,
+            "content_type": content_type,
+            "status": status,
+            "error_code": None,
+            "note": note,
+            "received_at": received_at,
+            "processed_at": processed_at,
+        }
+        self.health_webhook_receipts[receipt_id] = row
+        self.health_webhook_receipts_by_payload[payload_key] = receipt_id
+        return dict(row)
+
+    def _health_mark_dirty(self, *args: Any) -> dict[str, Any]:
+        (
+            connection_id,
+            user_id,
+            provider,
+            resource_type,
+            reason,
+            source_receipt_id,
+            marked_at,
+        ) = args
+        existing = next(
+            (
+                row
+                for row in self.health_dirty_categories.values()
+                if row["connection_id"] == connection_id
+                and row["resource_type"] == resource_type
+                and row.get("cleared_at") is None
+            ),
+            None,
+        )
+        if existing is None:
+            dirty_id = uuid4()
+            row = {
+                "id": dirty_id,
+                "connection_id": connection_id,
+                "user_id": user_id,
+                "provider": provider,
+                "resource_type": resource_type,
+                "reason": reason,
+                "source_receipt_id": source_receipt_id,
+                "attempts": 0,
+                "marked_at": marked_at,
+                "claimed_at": None,
+                "claimed_by": None,
+                "cleared_at": None,
+            }
+            self.health_dirty_categories[dirty_id] = row
+            return dict(row)
+        existing.update(
+            {
+                "reason": reason,
+                "source_receipt_id": source_receipt_id,
+                "marked_at": max(existing["marked_at"], marked_at),
+                "claimed_at": None,
+                "claimed_by": None,
+            }
+        )
+        return dict(existing)
+
+    def _health_claim_dirty(self, *args: Any) -> list[dict[str, Any]]:
+        claimed_by, stale_before, limit, claimed_at = args
+        candidates = [
+            row
+            for row in self.health_dirty_categories.values()
+            if row.get("cleared_at") is None
+            and (
+                row.get("claimed_at") is None
+                or row["claimed_at"] < stale_before
+            )
+        ]
+        candidates.sort(key=lambda row: (row["marked_at"], row["id"]))
+        claimed_rows: list[dict[str, Any]] = []
+        for row in candidates[:limit]:
+            row["claimed_at"] = claimed_at
+            row["claimed_by"] = claimed_by
+            row["attempts"] += 1
+            claimed_rows.append(dict(row))
+        return claimed_rows
+
+    def _health_clear_dirty(self, *args: Any) -> dict[str, Any] | None:
+        dirty_id, cleared_at = args
+        row = self.health_dirty_categories.get(dirty_id)
+        if row is None:
+            return None
+        row["cleared_at"] = cleared_at
+        return dict(row)
+
+    def _health_record_sync_success(self, *args: Any) -> dict[str, Any] | None:
+        connection_id, synced_at = args
+        row = self.health_connections.get(connection_id)
+        if row is None or row.get("deleted_at") is not None:
+            return None
+        row["last_success_at"] = synced_at
+        row["last_error_at"] = None
+        row["last_error_code"] = None
+        row["last_error_detail"] = None
+        row["updated_at"] = synced_at
+        return dict(row)
+
+    def _health_record_sync_error(self, *args: Any) -> dict[str, Any] | None:
+        connection_id, errored_at, error_code, error_detail = args
+        row = self.health_connections.get(connection_id)
+        if row is None or row.get("deleted_at") is not None:
+            return None
+        row["last_error_at"] = errored_at
+        row["last_error_code"] = error_code
+        row["last_error_detail"] = error_detail
+        row["updated_at"] = errored_at
+        return dict(row)
+
+    def _health_disconnect_connection(self, *args: Any) -> dict[str, Any] | None:
+        (connection_id,) = args
+        row = self.health_connections.get(connection_id)
+        if row is None or row.get("deleted_at") is not None:
+            return None
+        timestamp = datetime.now(UTC)
+        row.update(
+            {
+                "status": "disconnected",
+                "access_token_encrypted": None,
+                "refresh_token_encrypted": None,
+                "access_token_expires_at": None,
+                "refresh_token_expires_at": None,
+                "disconnected_at": row.get("disconnected_at") or timestamp,
+                "revoked_at": row.get("revoked_at") or timestamp,
+                "updated_at": timestamp,
+            }
+        )
+        return {
+            "status": row["status"],
+            "granted_scopes": list(row.get("granted_scopes") or []),
+            "granted_at": row.get("granted_at"),
+            "last_success_at": row.get("last_success_at"),
+            "last_error_at": row.get("last_error_at"),
+            "last_error_code": row.get("last_error_code"),
+            "disconnected_at": row.get("disconnected_at"),
+            "revoked_at": row.get("revoked_at"),
+            "deleted_at": row.get("deleted_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _health_delete_connection(self, *args: Any) -> dict[str, Any] | None:
+        connection_id, user_id, deleted_at = args
+        row = self.health_connections.get(connection_id)
+        if (
+            row is None
+            or row.get("deleted_at") is not None
+            or row.get("user_id") != user_id
+        ):
+            return None
+        timestamp = deleted_at or datetime.now(UTC)
+        row.update(
+            {
+                "status": "deleted",
+                "access_token_encrypted": None,
+                "refresh_token_encrypted": None,
+                "access_token_expires_at": None,
+                "refresh_token_expires_at": None,
+                "refresh_token_rotated_at": None,
+                "deleted_at": row.get("deleted_at") or timestamp,
+                "revoked_at": row.get("revoked_at") or timestamp,
+                "updated_at": timestamp,
+            }
+        )
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "provider": row["provider"],
+            "external_user_id": row.get("external_user_id"),
+            "status": row["status"],
+            "granted_scopes": list(row.get("granted_scopes") or []),
+            "cursor_state": dict(row.get("cursor_state") or {}),
+            "updated_at": row["updated_at"],
+            "deleted_at": row["deleted_at"],
+            "revoked_at": row["revoked_at"],
+        }
+
+    def _health_list_connections(self, *args: Any) -> list[dict[str, Any]]:
+        provider, limit = args
+        rows = [
+            dict(row)
+            for row in self.health_connections.values()
+            if row.get("provider") == provider and row.get("deleted_at") is None
+        ]
+        rows.sort(key=lambda row: (row["updated_at"], row["id"]))
+        return rows[:limit]
+
+    def _health_delete_source_records(self, *args: Any) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            record_id
+            for record_id, row in self.health_source_records.items()
+            if row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+        ]
+        for record_id in record_ids:
+            row = self.health_source_records.pop(record_id)
+            key = (row["connection_id"], row["resource_type"], row["external_id"])
+            self.health_source_records_by_key.pop(key, None)
+        return f"DELETE {len(record_ids)}"
+
+    # ── Connection-scoped delete helpers (delete_connection_data) ────────────
+
+    def _health_delete_connection_normalized(
+        self, store: dict[Any, dict[str, Any]], *args: Any
+    ) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in store.items()
+            if row["connection_id"] == connection_id and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            store.pop(rid)
+        return f"DELETE {len(record_ids)}"
+
+    def _health_delete_connection_projection_owned_events(self, *args: Any) -> str:
+        connection_id, user_id = args
+        event_ids = {
+            row["event_id"]
+            for row in self.health_source_to_event_projections.values()
+            if row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+            and row.get("event_id") is not None
+        }
+        deleted = 0
+        for event_id in list(event_ids):
+            row = self.events.get(event_id)
+            if row is not None and row.get("user_id") == user_id:
+                del self.events[event_id]
+                deleted += 1
+        return f"DELETE {deleted}"
+
+    def _health_delete_connection_projection_ledger(self, *args: Any) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in self.health_source_to_event_projections.items()
+            if row["connection_id"] == connection_id and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_source_to_event_projections.pop(rid)
+        return f"DELETE {len(record_ids)}"
+
+    def _health_delete_connection_dirty_categories(self, *args: Any) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in self.health_dirty_categories.items()
+            if row["connection_id"] == connection_id and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_dirty_categories.pop(rid)
+        return f"DELETE {len(record_ids)}"
+
+    def _health_delete_connection_webhook_receipts(self, *args: Any) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in self.health_webhook_receipts.items()
+            if row.get("connection_id") == connection_id
+            and row.get("user_id") == user_id
+        ]
+        for rid in record_ids:
+            row = self.health_webhook_receipts.pop(rid)
+            payload_key = (row.get("provider"), row.get("payload_hash"))
+            self.health_webhook_receipts_by_payload.pop(payload_key, None)
+        return f"DELETE {len(record_ids)}"
+
+    def _health_delete_normalized_measurements(self, *args: Any) -> str:
+        source_record_id, connection_id, user_id = args
+        deleted = 0
+        record_ids = [
+            rid for rid, row in self.health_normalized_measurements.items()
+            if row["source_record_id"] == source_record_id
+            and row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_normalized_measurements.pop(rid)
+            deleted += 1
+        return f"DELETE {deleted}"
+
+    def _health_delete_normalized_sleep(self, *args: Any) -> str:
+        source_record_id, connection_id, user_id = args
+        deleted = 0
+        record_ids = [
+            rid for rid, row in self.health_normalized_sleep.items()
+            if row["source_record_id"] == source_record_id
+            and row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_normalized_sleep.pop(rid)
+            deleted += 1
+        return f"DELETE {deleted}"
+
+    def _health_insert_normalized_measurement(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id, connection_id, user_id, metric,
+            measured_at, value_numeric, canonical_unit,
+            source_unit, source_device_id, source_device_model, attribution,
+        ) = args
+        row_id = uuid4()
+        now = datetime.now(UTC)
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "metric": metric,
+            "measured_at": measured_at,
+            "value_numeric": value_numeric,
+            "canonical_unit": canonical_unit,
+            "source_unit": source_unit,
+            "source_device_id": source_device_id,
+            "source_device_model": source_device_model,
+            "attribution": dict(attribution or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.health_normalized_measurements[row_id] = row
+        return dict(row)
+
+    def _health_insert_normalized_sleep(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id, connection_id, user_id,
+            started_at, ended_at, local_sleep_date,
+            local_timezone, local_offset_seconds, completeness_state,
+            total_in_bed_seconds, total_asleep_seconds, awake_seconds,
+            light_sleep_seconds, deep_sleep_seconds, rem_sleep_seconds,
+            sleep_latency_seconds, wake_after_sleep_onset_seconds,
+            wakeups, sleep_score,
+            source_device_id, source_device_model, attribution,
+        ) = args
+        row_id = uuid4()
+        now = datetime.now(UTC)
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "local_sleep_date": local_sleep_date,
+            "local_timezone": local_timezone,
+            "local_offset_seconds": local_offset_seconds,
+            "completeness_state": completeness_state,
+            "total_in_bed_seconds": total_in_bed_seconds,
+            "total_asleep_seconds": total_asleep_seconds,
+            "awake_seconds": awake_seconds,
+            "light_sleep_seconds": light_sleep_seconds,
+            "deep_sleep_seconds": deep_sleep_seconds,
+            "rem_sleep_seconds": rem_sleep_seconds,
+            "sleep_latency_seconds": sleep_latency_seconds,
+            "wake_after_sleep_onset_seconds": wake_after_sleep_onset_seconds,
+            "wakeups": wakeups,
+            "sleep_score": sleep_score,
+            "source_device_id": source_device_id,
+            "source_device_model": source_device_model,
+            "attribution": dict(attribution or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.health_normalized_sleep[row_id] = row
+        return dict(row)
+
+    def _health_insert_normalized_workout(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id, connection_id, user_id,
+            started_at, ended_at,
+            local_timezone, local_offset_seconds, workout_type,
+            duration_seconds, pause_duration_seconds,
+            distance_meters, steps, energy_kcal,
+            elevation_gain_meters, average_heart_rate_bpm, max_heart_rate_bpm,
+            source_device_id, source_device_model, attribution,
+        ) = args
+        row_id = uuid4()
+        now = datetime.now(UTC)
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "local_timezone": local_timezone,
+            "local_offset_seconds": local_offset_seconds,
+            "workout_type": workout_type,
+            "duration_seconds": duration_seconds,
+            "pause_duration_seconds": pause_duration_seconds,
+            "distance_meters": distance_meters,
+            "steps": steps,
+            "energy_kcal": energy_kcal,
+            "elevation_gain_meters": elevation_gain_meters,
+            "average_heart_rate_bpm": average_heart_rate_bpm,
+            "max_heart_rate_bpm": max_heart_rate_bpm,
+            "source_device_id": source_device_id,
+            "source_device_model": source_device_model,
+            "attribution": dict(attribution or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.health_normalized_workouts[row_id] = row
+        return dict(row)
+
+    def _health_delete_normalized_workouts(self, *args: Any) -> str:
+        source_record_id, connection_id, user_id = args
+        deleted = 0
+        record_ids = [
+            rid for rid, row in self.health_normalized_workouts.items()
+            if row["source_record_id"] == source_record_id
+            and row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_normalized_workouts.pop(rid)
+            deleted += 1
+        return f"DELETE {deleted}"
+
+    # ── Projection ledger handlers ──────────────────────────────────────────
+
+    def _health_find_active_projection(self, *args: Any) -> dict[str, Any] | None:
+        source_record_id, user_id = args
+        for row in self.health_source_to_event_projections.values():
+            if (
+                row["source_record_id"] == source_record_id
+                and row["user_id"] == user_id
+                and row["projection_status"] in ("pending", "projected")
+            ):
+                return dict(row)
+        return None
+
+    def _health_find_active_projection_for_update(self, *args: Any) -> dict[str, Any] | None:
+        return self._health_find_active_projection(*args)
+
+    def _health_find_projection_by_event(self, *args: Any) -> dict[str, Any] | None:
+        (event_id,) = args
+        for row in self.health_source_to_event_projections.values():
+            if row.get("event_id") == event_id:
+                return dict(row)
+        return None
+
+    def _health_insert_projection(self, *args: Any) -> dict[str, Any]:
+        (
+            source_record_id,
+            connection_id,
+            user_id,
+            event_id,
+            commitment_id,
+            projection_version,
+            projection_status,
+            match_rule,
+            note,
+            decision_reason,
+            matched_local_date,
+            supersedes_projection_id,
+            projected_at,
+        ) = args
+        now_val = projected_at or datetime.now(UTC)
+        row_id = uuid4()
+        row = {
+            "id": row_id,
+            "source_record_id": source_record_id,
+            "connection_id": connection_id,
+            "user_id": user_id,
+            "event_id": event_id,
+            "commitment_id": commitment_id,
+            "projection_version": projection_version,
+            "projection_status": projection_status,
+            "match_rule": match_rule,
+            "note": note,
+            "decision_reason": decision_reason,
+            "matched_local_date": matched_local_date,
+            "supersedes_projection_id": supersedes_projection_id,
+            "projected_at": now_val,
+            "removed_at": None,
+            "created_at": now_val,
+            "updated_at": now_val,
+        }
+        self.health_source_to_event_projections[row_id] = row
+        return dict(row)
+
+    def _health_supersede_projection(self, *args: Any) -> dict[str, Any] | None:
+        projection_id, removed_at, user_id = args
+        row = self.health_source_to_event_projections.get(projection_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        row["projection_status"] = "superseded"
+        row["removed_at"] = removed_at
+        row["updated_at"] = removed_at
+        return dict(row)
+
+    def _health_remove_projection(self, *args: Any) -> dict[str, Any] | None:
+        projection_id, removed_at, user_id = args
+        row = self.health_source_to_event_projections.get(projection_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        row["projection_status"] = "removed"
+        row["event_id"] = None
+        row["removed_at"] = removed_at
+        row["updated_at"] = removed_at
+        return dict(row)
+
+    def _health_detach_projection_event(self, *args: Any) -> dict[str, Any] | None:
+        projection_id, updated_at, user_id = args
+        row = self.health_source_to_event_projections.get(projection_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        row["event_id"] = None
+        row["updated_at"] = updated_at
+        return {"id": row["id"]}
+
+    def _health_insert_projection_event(self, *args: Any) -> dict[str, Any]:
+        (
+            commitment_id,
+            user_id,
+            topic_id,
+            bot_id,
+            metric_key,
+            adherence_status,
+            value_numeric,
+            value_text,
+            unit,
+            observed_at,
+            note,
+            source_message_ids,
+        ) = args
+        row_id = uuid4()
+        row = {
+            "id": row_id,
+            "commitment_id": commitment_id,
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "bot_id": bot_id,
+            "metric_key": metric_key,
+            "adherence_status": adherence_status,
+            "value_numeric": value_numeric,
+            "value_text": value_text,
+            "unit": unit,
+            "observed_at": observed_at,
+            "note": note,
+            "source_message_ids": list(source_message_ids or []),
+            "created_at": observed_at,
+        }
+        self.events[row_id] = row
+        return {
+            "id": row_id,
+            "commitment_id": commitment_id,
+            "metric_key": metric_key,
+            "adherence_status": adherence_status,
+            "observed_at": observed_at,
+        }
+
+    def _health_delete_projection_event(self, *args: Any) -> dict[str, Any] | None:
+        event_id, user_id = args
+        row = self.events.get(event_id)
+        if row is None or row["user_id"] != user_id:
+            return None
+        del self.events[event_id]
+        return {"id": event_id}
+
+    def _health_upsert_source_record(self, *args: Any) -> dict[str, Any]:
+        (
+            connection_id,
+            user_id,
+            provider,
+            resource_type,
+            external_id,
+            source_created_at,
+            source_modified_at,
+            observed_at,
+            starts_at,
+            ends_at,
+            source_timezone,
+            source_offset_seconds,
+            source_device_id,
+            source_device_model,
+            payload_hash,
+            provider_revision,
+            source_metadata,
+            attribution,
+            is_deleted,
+            deleted_at,
+            imported_at,
+            updated_at,
+        ) = args
+        key = (connection_id, resource_type, external_id)
+        record_id = self.health_source_records_by_key.get(key)
+        if record_id is None:
+            record_id = uuid4()
+            row = {
+                "id": record_id,
+                "connection_id": connection_id,
+                "user_id": user_id,
+                "provider": provider,
+                "resource_type": resource_type,
+                "external_id": external_id,
+                "source_created_at": source_created_at,
+                "source_modified_at": source_modified_at,
+                "observed_at": observed_at,
+                "starts_at": starts_at,
+                "ends_at": ends_at,
+                "source_timezone": source_timezone,
+                "source_offset_seconds": source_offset_seconds,
+                "source_device_id": source_device_id,
+                "source_device_model": source_device_model,
+                "payload_hash": payload_hash,
+                "provider_revision": provider_revision,
+                "revision_count": 1,
+                "source_metadata": dict(source_metadata or {}),
+                "attribution": dict(attribution or {}),
+                "is_deleted": is_deleted,
+                "deleted_at": deleted_at,
+                "imported_at": imported_at,
+                "updated_at": updated_at,
+            }
+            self.health_source_records[record_id] = row
+            self.health_source_records_by_key[key] = record_id
+            return dict(row)
+        row = self.health_source_records[record_id]
+        changed = (
+            row.get("payload_hash") != payload_hash
+            or row.get("provider_revision") != provider_revision
+            or row.get("source_modified_at") != source_modified_at
+            or bool(row.get("is_deleted")) != bool(is_deleted)
+            or row.get("deleted_at") != deleted_at
+        )
+        row.update(
+            {
+                "user_id": user_id,
+                "provider": provider,
+                "resource_type": resource_type,
+                "external_id": external_id,
+                "source_created_at": source_created_at,
+                "source_modified_at": source_modified_at,
+                "observed_at": observed_at,
+                "starts_at": starts_at,
+                "ends_at": ends_at,
+                "source_timezone": source_timezone,
+                "source_offset_seconds": source_offset_seconds,
+                "source_device_id": source_device_id,
+                "source_device_model": source_device_model,
+                "payload_hash": payload_hash,
+                "provider_revision": provider_revision,
+                "source_metadata": dict(source_metadata or {}),
+                "attribution": dict(attribution or {}),
+                "is_deleted": is_deleted,
+                "deleted_at": deleted_at,
+                "updated_at": updated_at,
+            }
+        )
+        if changed:
+            row["revision_count"] += 1
+        return dict(row)
+
     async def fetchrow(self, sql: str, *args):
         compact = " ".join(sql.split())
+        if "mediator.health_" in compact:
+            return self._health_fetchrow(compact, *args)
         if (
             compact.startswith("SELECT m.message_id,")
             and "FROM mediator.v_searchable_messages m" in compact
@@ -935,6 +2244,26 @@ class FakePool:
                 "id": row["id"],
                 "deleted_at": row.get("deleted_at"),
                 "search_suppressed_at": row.get("search_suppressed_at"),
+            }
+        if compact.startswith(
+            "SELECT t.id, t.title, t.description, t.status, t.recorded_by_bot_id,"
+        ) and "FROM themes t WHERE t.id = $1" in compact:
+            row = self.themes.get(args[0])
+            if row is None:
+                return None
+            has_active_topic = any(
+                topic_row.get("artifact_table") == "themes"
+                and topic_row.get("artifact_id") == row["id"]
+                and topic_row.get("status", "active") == "active"
+                for topic_row in self.artifact_topics_rows
+            ) or ("themes", row["id"]) in self.artifact_topics
+            return {
+                "id": row["id"],
+                "title": row.get("title"),
+                "description": row.get("description"),
+                "status": row.get("status"),
+                "recorded_by_bot_id": row.get("recorded_by_bot_id"),
+                "_has_active_topic": has_active_topic,
             }
         if compact.startswith("SELECT id, source_type, source_id, message_id, job_kind") and "FROM mediator.embed_jobs" in compact:
             source_type, source_id, job_kind, content_hash_value = args
@@ -2989,6 +4318,12 @@ class FakePool:
                 "scheduled_for": row["scheduled_for"],
                 "context": row["context"],
             }
+        # ── Projection: delete projection-owned event ────────────────────────
+        if (
+            "DELETE FROM mediator.events" in compact
+            and "RETURNING id" in compact
+        ):
+            return self._health_delete_projection_event(*args)
         raise AssertionError(f"unhandled fetchrow SQL: {compact}")
 
     async def fetchval(self, sql: str, *args):
@@ -3195,6 +4530,9 @@ class FakePool:
     async def fetch(self, sql: str, *args):
         compact = " ".join(sql.split())
         self.fetch_sqls.append(compact)
+        health_rows = self._health_fetch(compact, *args)
+        if health_rows is not None:
+            return health_rows
         if (
             compact.startswith("SELECT m.message_id,")
             and "FROM mediator.v_searchable_messages m" in compact
@@ -4827,6 +6165,10 @@ class FakePool:
 
     async def execute(self, sql: str, *args) -> str:
         compact = " ".join(sql.split())
+        if "mediator.health_" in compact:
+            handled = self._health_execute(compact, *args)
+            if handled is not None:
+                return handled
         if compact.startswith("SET LOCAL hnsw.ef_search"):
             return "SET"
         if compact.startswith("INSERT INTO mediator.message_embeddings") or compact.startswith(
