@@ -164,6 +164,11 @@ class TestHectorBotSpec:
         spec = self._get_spec()
         assert spec.cross_topic_policy == "peek"
 
+    def test_provider_chain_is_deepseek_with_anthropic_fallback(self):
+        """Hector must not inherit a changing platform-wide provider default."""
+        spec = self._get_spec()
+        assert spec.provider_chain == ("deepseek", "anthropic")
+
     def test_allowlist_contains_all_7_commitment_event_tools(self):
         spec = self._get_spec()
         assert spec.tool_allowlist is not None

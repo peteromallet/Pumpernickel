@@ -173,6 +173,10 @@ def build_hector_spec() -> BotSpec:
         ),
         write_scopes=WriteScopes(topics=frozenset({"own"})),
         cross_topic_policy="peek",
+        # Hector's production model is DeepSeek. Keep this explicit instead
+        # of inheriting BotSpec's platform-wide default: changing that default
+        # must not silently reroute fitness turns to a different provider.
+        provider_chain=("deepseek", "anthropic"),
         tool_allowlist=(
             frozenset(TOOL_DISPATCH.keys()) - _COACH_EXCLUSIONS
         ) | _HECTOR_ADDITIONS,

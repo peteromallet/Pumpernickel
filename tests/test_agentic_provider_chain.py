@@ -7,7 +7,6 @@ client doubles — no real httpx, no real LLM API calls (per SD-008).
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
@@ -215,6 +214,70 @@ def test_resolve_provider_chain_anthropic_only_unchanged(app_env):
         provider_chain = ("anthropic",)
 
     assert _resolve_provider_chain(_Spec(), user, settings) == ("anthropic",)
+
+
+async def test_hector_resolved_chain_runs_deepseek_tool_loop(
+    app_env, monkeypatch
+):
+    """Hector uses its explicit primary while preserving multi-turn tools."""
+    from app.bots.hector import build_hector_spec
+    from app.config import get_settings
+
+    ctx = _ctx(bot_id="hector")
+    spec = build_hector_spec()
+    chain = _resolve_provider_chain(spec, ctx.user, get_settings())
+    deepseek = _ScriptedClient([
+        SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id="toolu_hector_1",
+                    name="list_commitments",
+                    input={},
+                )
+            ],
+            stop_reason="tool_use",
+            usage=SimpleNamespace(**USAGE),
+        ),
+        _response("Your plan is still on track."),
+    ])
+    anthropic_client = _ScriptedClient([])
+    _patch_clients(monkeypatch, deepseek=deepseek, anthropic=anthropic_client)
+
+    calls: list[str] = []
+
+    async def fake_call_tool(name, args, ctx):  # noqa: ARG001
+        calls.append(name)
+        return {"commitments": []}
+
+    monkeypatch.setattr(agentic, "call_tool", fake_call_tool)
+
+    text, messages, tool_count = await run_step(
+        None,
+        ctx,
+        "system",
+        "context",
+        {"list_commitments"},
+        [{"role": "user", "content": "What is my plan?"}],
+        provider_chain=chain,
+    )
+
+    assert chain == ("deepseek", "anthropic")
+    assert text == "Your plan is still on track."
+    assert calls == ["list_commitments"]
+    assert tool_count == 1
+    assert len(deepseek.messages.calls) == 2
+    assert len(anthropic_client.messages.calls) == 0
+    assert any(
+        block.get("type") == "tool_result"
+        for message in messages
+        if message.get("role") == "user"
+        for block in (
+            message.get("content")
+            if isinstance(message.get("content"), list)
+            else []
+        )
+    )
 
 
 # ── _create_message_with_retry: chain behaviour ─────────────────────────────
