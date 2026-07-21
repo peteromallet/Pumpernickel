@@ -78,6 +78,35 @@ class _FakeSettings:
     ) -> None:
         self.reflection_finalization_worker_poll_interval_s = poll_interval
         self.reflection_finalization_worker_batch_size = batch_size
+        self.embedding_model = "test-reflection-model"
+        self.embedding_dimension = 384
+
+
+def _embedding_repair_row(
+    *,
+    entry_id: UUID | None = None,
+    plaintext: str = "A repaired reflection",
+    embedded_content_hash: str | None = None,
+    embedded_model: str | None = None,
+    embedded_dimension: int | None = None,
+    job_content_hash: str | None = None,
+    job_model: str | None = None,
+    job_dimension: int | None = None,
+    job_id: UUID | None = None,
+    job_status: str | None = None,
+) -> dict:
+    return {
+        "id": entry_id or _uid(),
+        "plaintext_searchable": plaintext,
+        "embedded_content_hash": embedded_content_hash,
+        "embedded_model": embedded_model,
+        "embedded_dimension": embedded_dimension,
+        "job_content_hash": job_content_hash,
+        "job_model": job_model,
+        "job_dimension": job_dimension,
+        "job_id": job_id,
+        "job_status": job_status,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -161,6 +190,159 @@ class TestEnsureUtc:
         dt = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
         result = _ensure_utc(dt)
         assert result == dt
+
+
+class TestProcessedEmbeddingRepair:
+    """The production worker heals best-effort completion enqueue gaps."""
+
+    async def test_failed_enqueue_is_retried_on_later_tick(self) -> None:
+        row = _embedding_repair_row()
+        pool = AsyncMock()
+        worker = ReflectionFinalizationWorker(pool, settings=_FakeSettings())
+
+        with (
+            patch.object(
+                worker,
+                "_find_due_sessions",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                worker,
+                "_collect_retried_sessions",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                worker,
+                "_fetch_embedding_repair_page",
+                new_callable=AsyncMock,
+                side_effect=[[row], [], [row]],
+            ) as fetch_page,
+            patch(
+                "app.services.reflections_finalization_worker."
+                "enqueue_reflection_embed",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("queue unavailable"), None],
+            ) as enqueue,
+        ):
+            await worker.run_once(now=_utc_now())
+            await worker.run_once(now=_utc_now())
+
+        assert enqueue.await_count == 2
+        assert fetch_page.await_count == 3
+        assert fetch_page.await_args_list[1].kwargs["after_entry_id"] == row["id"]
+        assert fetch_page.await_args_list[2].kwargs["after_entry_id"] is None
+
+    async def test_matching_embedding_or_job_is_current_only_for_contract(self) -> None:
+        from app.services.embeddings import content_hash
+
+        settings = _FakeSettings()
+        plaintext = "Already covered"
+        expected_hash = content_hash(plaintext)
+        rows = [
+            _embedding_repair_row(
+                plaintext=plaintext,
+                embedded_content_hash=expected_hash,
+                embedded_model=settings.embedding_model,
+                embedded_dimension=settings.embedding_dimension,
+            ),
+            _embedding_repair_row(
+                plaintext=plaintext,
+                job_content_hash=expected_hash,
+                job_model=settings.embedding_model,
+                job_dimension=settings.embedding_dimension,
+            ),
+            _embedding_repair_row(
+                plaintext=plaintext,
+                embedded_content_hash=expected_hash,
+                embedded_model="old-model",
+                embedded_dimension=settings.embedding_dimension,
+            ),
+        ]
+        worker = ReflectionFinalizationWorker(AsyncMock(), settings=settings)
+
+        with (
+            patch.object(
+                worker,
+                "_fetch_embedding_repair_page",
+                new_callable=AsyncMock,
+                return_value=rows,
+            ),
+            patch(
+                "app.services.reflections_finalization_worker."
+                "enqueue_reflection_embed",
+                new_callable=AsyncMock,
+            ) as enqueue,
+        ):
+            attempted = await worker._repair_processed_embeddings()
+
+        assert attempted == 1
+        enqueue.assert_awaited_once_with(
+            worker._pool,
+            entry_id=rows[2]["id"],
+            plaintext_searchable=plaintext,
+        )
+
+    async def test_stale_pending_job_is_superseded_before_reenqueue(self) -> None:
+        from app.services.embeddings import content_hash
+
+        settings = _FakeSettings()
+        plaintext = "Needs the newly configured model"
+        job_id = _uid()
+        row = _embedding_repair_row(
+            plaintext=plaintext,
+            job_content_hash=content_hash(plaintext),
+            job_model="old-model",
+            job_dimension=settings.embedding_dimension,
+            job_id=job_id,
+            job_status="pending",
+        )
+        pool = AsyncMock()
+        worker = ReflectionFinalizationWorker(pool, settings=settings)
+
+        with (
+            patch.object(
+                worker,
+                "_fetch_embedding_repair_page",
+                new_callable=AsyncMock,
+                return_value=[row],
+            ),
+            patch(
+                "app.services.reflections_finalization_worker."
+                "enqueue_reflection_embed",
+                new_callable=AsyncMock,
+            ) as enqueue,
+        ):
+            attempted = await worker._repair_processed_embeddings()
+
+        assert attempted == 1
+        update_sql = pool.execute.await_args.args[0]
+        assert "status = 'superseded'" in update_sql
+        assert pool.execute.await_args.args[1] == job_id
+        enqueue.assert_awaited_once()
+
+    async def test_repair_query_is_bounded_to_processed_current_entries(self) -> None:
+        cursor = _uid()
+        pool = AsyncMock()
+        pool.fetch.return_value = []
+        worker = ReflectionFinalizationWorker(
+            pool,
+            settings=_FakeSettings(batch_size=7),
+        )
+
+        rows = await worker._fetch_embedding_repair_page(
+            after_entry_id=cursor,
+        )
+
+        assert rows == []
+        sql, passed_cursor, limit = pool.fetch.await_args.args
+        assert "rs.status = 'processed'" in sql
+        assert "successor.supersedes_entry_id = re.id" in sql
+        assert "status IN ('pending', 'processing')" in sql
+        assert "LIMIT $2" in sql
+        assert passed_cursor == cursor
+        assert limit == 7
 
 
 # ═══════════════════════════════════════════════════════════════════════════

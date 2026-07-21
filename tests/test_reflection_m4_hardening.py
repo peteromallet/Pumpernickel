@@ -613,10 +613,197 @@ class TestCompleteSessionIdempotency:
             None,  # UPDATE WHERE status='finalizing' → no row matched
             {"id": sid, "user_id": str(uid), "status": "processed"},  # current check
         ]
+        pool.fetch.return_value = []
 
         store = ReflectionStore(pool)
         result = await store.complete_session(session_id=sid, user_id=uid)
         assert result is not None
+
+    async def test_transition_sets_processed_metadata_and_enqueues_embedding(
+        self,
+    ) -> None:
+        """Claim-free worker completion matches the normal processed lifecycle."""
+        sid = _uid()
+        uid = _uid()
+        entry_id = _uid()
+        processed_row = _session_row(
+            session_id=sid,
+            user_id=uid,
+            status="processed",
+            finalized_at=_now(),
+        )
+        processed_row["processed_at"] = _now()
+        pool = AsyncMock()
+        pool.fetchrow.return_value = processed_row
+        pool.fetch.return_value = [
+            {"id": entry_id, "plaintext_searchable": "A reflection summary"}
+        ]
+
+        with patch(
+            "app.services.message_embedding_lifecycle.enqueue_reflection_embed",
+            new_callable=AsyncMock,
+        ) as enqueue:
+            result = await ReflectionStore(pool).complete_session(
+                session_id=sid,
+                user_id=uid,
+            )
+
+        update_sql = pool.fetchrow.await_args.args[0]
+        assert "processed_at = COALESCE(processed_at" in update_sql
+        assert "claimed_by = NULL" in update_sql
+        assert "failure_class = NULL" in update_sql
+        assert result is not None
+        assert result.status == "processed"
+        enqueue.assert_awaited_once_with(
+            pool,
+            entry_id=entry_id,
+            plaintext_searchable="A reflection summary",
+        )
+
+    async def test_already_processed_retries_embedding_enqueue(self) -> None:
+        """An idempotent completion retry repairs a missed best-effort enqueue."""
+        sid = _uid()
+        uid = _uid()
+        entry_id = _uid()
+        processed_row = _session_row(
+            session_id=sid,
+            user_id=uid,
+            status="processed",
+            finalized_at=_now(),
+        )
+        processed_row["processed_at"] = _now()
+        pool = AsyncMock()
+        pool.fetchrow.side_effect = [None, processed_row]
+        pool.fetch.return_value = [
+            {"id": entry_id, "plaintext_searchable": "A reflection summary"}
+        ]
+
+        with patch(
+            "app.services.message_embedding_lifecycle.enqueue_reflection_embed",
+            new_callable=AsyncMock,
+        ) as enqueue:
+            result = await ReflectionStore(pool).complete_session(
+                session_id=sid,
+                user_id=uid,
+            )
+
+        assert result is not None
+        assert result.status == "processed"
+        enqueue.assert_awaited_once()
+
+    async def test_already_processed_skips_current_embedding(self) -> None:
+        """Completion retries do not enqueue an already-current embedding."""
+        from app.config import get_settings
+        from app.services.embeddings import content_hash
+
+        sid = _uid()
+        uid = _uid()
+        entry_id = _uid()
+        plaintext = "A reflection summary"
+        processed_row = _session_row(
+            session_id=sid,
+            user_id=uid,
+            status="processed",
+            finalized_at=_now(),
+        )
+        processed_row["processed_at"] = _now()
+        pool = AsyncMock()
+        pool.fetchrow.side_effect = [None, processed_row]
+        pool.fetch.return_value = [
+            {
+                "id": entry_id,
+                "plaintext_searchable": plaintext,
+                "embedded_content_hash": content_hash(plaintext),
+                "embedded_model": get_settings().embedding_model,
+                "embedded_dimension": get_settings().embedding_dimension,
+            }
+        ]
+
+        with patch(
+            "app.services.message_embedding_lifecycle.enqueue_reflection_embed",
+            new_callable=AsyncMock,
+        ) as enqueue:
+            result = await ReflectionStore(pool).complete_session(
+                session_id=sid,
+                user_id=uid,
+            )
+
+        assert result is not None
+        assert result.status == "processed"
+        enqueue.assert_not_awaited()
+
+    async def test_processed_session_wrong_user_does_not_return_row(self) -> None:
+        """Idempotent completion still enforces session ownership."""
+        sid = _uid()
+        owner_id = _uid()
+        caller_id = _uid()
+        processed_row = _session_row(
+            session_id=sid,
+            user_id=owner_id,
+            status="processed",
+            finalized_at=_now(),
+        )
+        pool = AsyncMock()
+        pool.fetchrow.side_effect = [None, processed_row]
+
+        with pytest.raises(SessionNotFoundError, match="not found for user"):
+            await ReflectionStore(pool).complete_session(
+                session_id=sid,
+                user_id=caller_id,
+            )
+
+
+class TestTerminalIdleDeadlineConstraint:
+    """Terminal transitions satisfy the 0066 idle-deadline CHECK."""
+
+    async def test_finalize_clears_idle_finalize_at(self) -> None:
+        sid = _uid()
+        uid = _uid()
+        row = _session_row(
+            session_id=sid,
+            user_id=uid,
+            status="finalizing",
+            finalized_at=_now(),
+            idle_finalize_at=None,
+        )
+        pool = AsyncMock()
+        pool.fetchrow.return_value = row
+
+        result = await ReflectionStore(pool).finalize_session(
+            user_id=uid,
+            session_id=sid,
+        )
+
+        sql = pool.fetchrow.await_args.args[0]
+        assert "status = 'finalizing'" in sql
+        assert "idle_finalize_at = NULL" in sql
+        assert len(pool.fetchrow.await_args.args) == 4
+        assert result.status == "finalizing"
+        assert result.idle_finalize_at is None
+
+    async def test_abandon_clears_idle_finalize_at(self) -> None:
+        sid = _uid()
+        uid = _uid()
+        row = _session_row(
+            session_id=sid,
+            user_id=uid,
+            status="abandoned",
+            abandoned_at=_now(),
+            idle_finalize_at=None,
+        )
+        pool = AsyncMock()
+        pool.fetchrow.return_value = row
+
+        result = await ReflectionStore(pool).abandon_session(
+            user_id=uid,
+            session_id=sid,
+        )
+
+        sql = pool.fetchrow.await_args.args[0]
+        assert "status = 'abandoned'" in sql
+        assert "idle_finalize_at = NULL" in sql
+        assert result.status == "abandoned"
+        assert result.idle_finalize_at is None
 
     async def test_not_finalizing_not_processed_raises(self) -> None:
         """If session is in a non-finalizing, non-processed state, raises ValueError."""

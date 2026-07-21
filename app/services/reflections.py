@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from app.config import get_settings
 from app.services.reflection_redaction import redact_for_log_extra
 
 logger = logging.getLogger(__name__)
@@ -915,7 +916,7 @@ class ReflectionStore:
             UPDATE mediator.reflection_sessions
             SET status = 'finalizing',
                 finalized_at = $3,
-                idle_finalize_at = COALESCE($4, idle_finalize_at),
+                idle_finalize_at = NULL,
                 updated_at = $3
             WHERE id = $1
               AND user_id = $2
@@ -925,7 +926,6 @@ class ReflectionStore:
             session_id,
             user_id,
             now,
-            idle_finalize_at,
         )
 
         if row is None:
@@ -1070,6 +1070,61 @@ class ReflectionStore:
 
     # ── mark_session_processed ──────────────────────────────────────────
 
+    async def _enqueue_current_entry_embeddings(self, session_id: UUID) -> None:
+        """Best-effort embedding repair for a processed session.
+
+        Entries whose current plaintext is already represented by a matching
+        persisted embedding are skipped.  Missing or stale embeddings are
+        handed to the existing idempotent job enqueue path.
+        """
+        try:
+            from app.services.message_embedding_lifecycle import (
+                enqueue_reflection_embed,
+            )
+            from app.services.embeddings import content_hash
+
+            settings = get_settings()
+
+            entries = await self._pool.fetch(
+                f"""
+                SELECT re.id,
+                       re.plaintext_searchable,
+                       ce.content_hash AS embedded_content_hash,
+                       ce.model AS embedded_model,
+                       ce.dimension AS embedded_dimension
+                FROM mediator.reflection_entries re
+                LEFT JOIN mediator.content_embeddings ce
+                  ON ce.source_type = 'reflection'
+                 AND ce.source_id = re.id
+                WHERE re.session_id = $1
+                  AND {_current_entry_condition('re')}
+                  AND plaintext_searchable IS NOT NULL
+                  AND btrim(plaintext_searchable) <> ''
+                """,
+                session_id,
+            )
+            for entry_row in entries:
+                plaintext = entry_row["plaintext_searchable"]
+                get = _row_getter(entry_row)
+                if (
+                    get("embedded_content_hash") == content_hash(plaintext)
+                    and get("embedded_model") == settings.embedding_model
+                    and get("embedded_dimension") == settings.embedding_dimension
+                ):
+                    continue
+                await enqueue_reflection_embed(
+                    self._pool,
+                    entry_id=entry_row["id"],
+                    plaintext_searchable=plaintext,
+                )
+        except Exception:
+            logger.warning(
+                "failed to enqueue reflection embeds for session=%s",
+                session_id,
+                exc_info=True,
+                extra=redact_for_log_extra({"session_id": str(session_id)}),
+            )
+
     async def mark_session_processed(
         self,
         *,
@@ -1119,39 +1174,7 @@ class ReflectionStore:
 
         session = ReflectionSession.from_row(row)
 
-        # ── Embedding lifecycle: enqueue for all current entries ──
-        try:
-            from app.services.message_embedding_lifecycle import (
-                enqueue_reflection_embed,
-            )
-
-            entries = await self._pool.fetch(
-                f"""
-                SELECT re.id, re.plaintext_searchable
-                FROM mediator.reflection_entries re
-                WHERE re.session_id = $1
-                  AND {_current_entry_condition('re')}
-                  AND plaintext_searchable IS NOT NULL
-                  AND btrim(plaintext_searchable) <> ''
-                """,
-                session_id,
-            )
-            for entry_row in entries:
-                await enqueue_reflection_embed(
-                    self._pool,
-                    entry_id=entry_row["id"],
-                    plaintext_searchable=entry_row["plaintext_searchable"],
-                )
-        except Exception:
-            logger.warning(
-                "mark_session_processed: failed to enqueue reflection embeds "
-                "for session=%s",
-                session_id,
-                exc_info=True,
-                extra=redact_for_log_extra(
-                    {"session_id": str(session_id)}
-                ),
-            )
+        await self._enqueue_current_entry_embeddings(session_id)
 
         return session
 
@@ -1181,6 +1204,12 @@ class ReflectionStore:
             """
             UPDATE mediator.reflection_sessions
             SET status = 'processed',
+                processed_at = COALESCE(processed_at, $3),
+                claimed_by = NULL,
+                claimed_at = NULL,
+                failure_class = NULL,
+                failure_reason = NULL,
+                last_error = NULL,
                 updated_at = $3
             WHERE id = $1
               AND user_id = $2
@@ -1196,7 +1225,7 @@ class ReflectionStore:
             # Check if it's already processed (idempotent).
             current = await self._pool.fetchrow(
                 """
-                SELECT id, status, user_id
+                SELECT *
                 FROM mediator.reflection_sessions
                 WHERE id = $1
                 """,
@@ -1206,27 +1235,31 @@ class ReflectionStore:
                 raise SessionNotFoundError(
                     f"Session {session_id} not found"
                 )
+            if str(current["user_id"]) != str(user_id):
+                raise SessionNotFoundError(
+                    f"Session {session_id} not found for user {user_id}"
+                )
             if current["status"] == "processed":
                 logger.debug(
                     "complete_session: session=%s already processed (idempotent)",
                     session_id,
                 )
-                return ReflectionSession.from_row(current)
+                session = ReflectionSession.from_row(current)
+                await self._enqueue_current_entry_embeddings(session_id)
+                return session
             if current["status"] != "finalizing":
                 raise ValueError(
                     f"Session {session_id} has status {current['status']!r}, "
                     f"expected 'finalizing' or 'processed'"
-                )
-            if str(current["user_id"]) != str(user_id):
-                raise SessionNotFoundError(
-                    f"Session {session_id} not found for user {user_id}"
                 )
 
         logger.info(
             "complete_session: session=%s transitioned to processed",
             session_id,
         )
-        return ReflectionSession.from_row(row)
+        session = ReflectionSession.from_row(row)
+        await self._enqueue_current_entry_embeddings(session_id)
+        return session
 
     # ── mark_session_failed ─────────────────────────────────────────────
 
@@ -1437,6 +1470,7 @@ class ReflectionStore:
             UPDATE mediator.reflection_sessions
             SET status = 'abandoned',
                 abandoned_at = $3,
+                idle_finalize_at = NULL,
                 updated_at = $3
             WHERE id = $1
               AND user_id = $2

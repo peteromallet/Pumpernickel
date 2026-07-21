@@ -29,16 +29,20 @@ Architecture
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
 from app.reflections.classifier import ClassificationResult, classify_message
+from app.reflections.finalization import FinalizationEngine
 from app.reflections.session_manager import (
     ActiveSessionSnapshot,
     SessionManager,
 )
-from app.services.reflections import ReflectionStore
+from app.services.reflections import (
+    ReflectionStore,
+    SessionFinalizeConflictError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +68,9 @@ async def capture_burst_for_reflection(
 
     1. Fetches message content from the database for every message in the
        burst.
-    2. Classifies each message using the locked precedence policy in
-       ``classify_message()``.
-    3. Checks for an active collecting session via ``ReflectionStore``.
+    2. Checks for an active collecting session via ``ReflectionStore``.
+    3. Classifies each message using that session context and the locked
+       precedence policy in ``classify_message()``.
     4. Uses ``SessionManager.evaluate_burst_attachment()`` to decide
        whether to open a new session, attach to an existing one, or skip.
     5. Persists the decision through ``ReflectionStore.open_or_attach_session()``.
@@ -85,12 +89,11 @@ async def capture_burst_for_reflection(
         return
 
     user_id: UUID = user.id
-    user_tz: str = getattr(user, "timezone", None) or "UTC"
 
     # ── Step 1: fetch message content ──────────────────────────────────
-    contents: list[tuple[UUID, str | None]] = []
+    message_rows: list[tuple[UUID, str | None, datetime | None]] = []
     try:
-        contents = await _fetch_message_contents(pool, message_ids)
+        message_rows = await _fetch_message_records(pool, message_ids)
     except Exception:
         logger.warning(
             "capture_burst_for_reflection: failed to fetch message contents; "
@@ -100,20 +103,25 @@ async def capture_burst_for_reflection(
         )
         return
 
-    if not contents:
+    if not message_rows:
         return
 
-    # ── Step 2: classify each message ───────────────────────────────────
-    classifications: list[tuple[UUID, ClassificationResult]] = []
-    for mid, content in contents:
-        text = content or ""
-        cr = classify_message(
-            text,
-            active_session_exists=False,  # checked next step
-        )
-        classifications.append((mid, cr))
+    contents = [(mid, content) for mid, content, _sent_at in message_rows]
+    persisted_times = [
+        sent_at.replace(tzinfo=timezone.utc)
+        if sent_at.tzinfo is None
+        else sent_at.astimezone(timezone.utc)
+        for _mid, _content, sent_at in message_rows
+        if sent_at is not None
+    ]
+    earliest_message_at = min(persisted_times) if persisted_times else None
+    latest_message_at = (
+        max(persisted_times)
+        if persisted_times
+        else datetime.now(timezone.utc)
+    )
 
-    # ── Step 3: check for active collecting session ────────────────────
+    # ── Step 2: check for active collecting session ────────────────────
     active_session: ActiveSessionSnapshot | None = None
     try:
         store = ReflectionStore(pool)
@@ -124,6 +132,41 @@ async def capture_burst_for_reflection(
         )
         for s in sessions:
             if s.bot_id == bot_id:
+                idle_finalize_at = getattr(s, "idle_finalize_at", None)
+                if idle_finalize_at is not None and idle_finalize_at.tzinfo is None:
+                    idle_finalize_at = idle_finalize_at.replace(
+                        tzinfo=timezone.utc
+                    )
+                elif idle_finalize_at is not None:
+                    idle_finalize_at = idle_finalize_at.astimezone(timezone.utc)
+
+                if (
+                    earliest_message_at is not None
+                    and idle_finalize_at is not None
+                    and idle_finalize_at <= earliest_message_at
+                ):
+                    try:
+                        await store.finalize_session(
+                            user_id=user_id,
+                            session_id=s.id,
+                        )
+                    except SessionFinalizeConflictError:
+                        # Another worker already moved it out of collecting;
+                        # either way it must not influence this new burst.
+                        pass
+                    except Exception:
+                        logger.warning(
+                            "capture_burst_for_reflection: failed to close "
+                            "expired collecting session; skipping burst",
+                            exc_info=True,
+                            extra={
+                                "user_id": str(user_id),
+                                "bot_id": bot_id,
+                                "session_id": str(s.id),
+                            },
+                        )
+                        return
+                    break
                 active_session = ActiveSessionSnapshot(
                     session_id=s.id,
                     user_id=s.user_id,
@@ -141,6 +184,16 @@ async def capture_burst_for_reflection(
             exc_info=True,
             extra={"user_id": str(user_id), "bot_id": bot_id},
         )
+
+    # ── Step 3: classify each message with session context ─────────────
+    classifications: list[tuple[UUID, ClassificationResult]] = []
+    for mid, content in contents:
+        text = content or ""
+        cr = classify_message(
+            text,
+            active_session_exists=active_session is not None,
+        )
+        classifications.append((mid, cr))
 
     # ── Step 4: evaluate burst attachment ──────────────────────────────
     attachment = _session_manager.evaluate_burst_attachment(
@@ -192,6 +245,12 @@ async def capture_burst_for_reflection(
             classification_metadata=(
                 cr_for_session.metadata if cr_for_session else None
             ),
+            idle_finalize_at=(
+                latest_message_at
+                + timedelta(
+                    seconds=FinalizationEngine.DEFAULT_IDLE_TIMEOUT_SECONDS
+                )
+            ),
         )
         logger.info(
             "capture_burst_for_reflection: %s session for user=%s bot=%s "
@@ -222,13 +281,22 @@ async def _fetch_message_contents(
     Returns a list of ``(message_id, content)`` tuples.  Messages that
     cannot be found are omitted (no error is raised).
     """
+    rows = await _fetch_message_records(pool, message_ids)
+    return [(mid, content) for mid, content, _sent_at in rows]
+
+
+async def _fetch_message_records(
+    pool: Any,
+    message_ids: list[UUID],
+) -> list[tuple[UUID, str | None, datetime | None]]:
+    """Fetch content and persisted timestamps in canonical input order."""
     if not message_ids:
         return []
 
     # Build a parameterised query with ANY for performance.
     rows = await pool.fetch(
         """
-        SELECT id, content
+        SELECT id, content, sent_at
         FROM messages
         WHERE id = ANY($1::uuid[])
         """,
@@ -236,15 +304,16 @@ async def _fetch_message_contents(
     )
 
     # Build a lookup map, then preserve input order.
-    content_map: dict[UUID, str | None] = {}
+    content_map: dict[UUID, tuple[str | None, datetime | None]] = {}
     for row in rows:
         rid = row["id"]
         if isinstance(rid, UUID):
-            content_map[rid] = row.get("content")
+            content_map[rid] = (row.get("content"), row.get("sent_at"))
 
-    result: list[tuple[UUID, str | None]] = []
+    result: list[tuple[UUID, str | None, datetime | None]] = []
     for mid in message_ids:
         if mid in content_map:
-            result.append((mid, content_map[mid]))
+            content, sent_at = content_map[mid]
+            result.append((mid, content, sent_at))
 
     return result

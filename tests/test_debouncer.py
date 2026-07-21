@@ -215,12 +215,16 @@ async def test_paced_burst_preserves_high_safety_source_semantics(sources: list[
 
 async def test_paced_wait_reschedules_without_losing_message_ids() -> None:
     paced_calls = []
+    outcome_calls = []
 
     async def callback(message_ids, user, *, scope):
         paced_calls.append((message_ids, user))
 
     async def paced_answer(message_ids, user, decision, *, scope):
         paced_calls.append((message_ids, user, decision))
+
+    async def paced_ready(message_ids, user, *, scope):
+        outcome_calls.append((message_ids, user, scope))
 
     user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
     scope = make_resolved_scope(user_id=user.id)
@@ -233,6 +237,7 @@ async def test_paced_wait_reschedules_without_losing_message_ids() -> None:
         max_seconds=0.1,
         pacer=pacer,
         on_paced_answer=paced_answer,
+        on_paced_ready=paced_ready,
     )
     ids = [uuid4(), uuid4()]
 
@@ -241,7 +246,53 @@ async def test_paced_wait_reschedules_without_losing_message_ids() -> None:
     await asyncio.sleep(0.06)
 
     assert paced_calls == [(ids, user, second_decision)]
+    assert outcome_calls == [(ids, user, scope), (ids, user, scope)]
     assert [call[1] for call in pacer.calls] == [ids, ids]
+
+
+@pytest.mark.parametrize("action", ["answer", "react", "silence"])
+async def test_terminal_paced_ready_callback_runs_before_each_outcome(action: str) -> None:
+    outcome_calls = []
+    dispatch_order = []
+
+    async def callback(message_ids, user, *, scope):
+        raise AssertionError("paced callback should be used")
+
+    async def paced_answer(message_ids, user, decision, *, scope):
+        dispatch_order.append("answer")
+
+    async def paced_reaction(message_ids, user, decision, *, scope):
+        dispatch_order.append("react")
+
+    async def paced_ready(message_ids, user, *, scope):
+        outcome_calls.append((message_ids, user, scope))
+        dispatch_order.append("ready")
+
+    user = User(id=uuid4(), name="Maya", phone="15555550100", timezone="UTC")
+    scope = make_resolved_scope(user_id=user.id)
+    decision = PacingDecision(
+        action=action,
+        reason=action,
+        reaction="👍" if action == "react" else None,
+    )
+    coalescer = BurstCoalescer(
+        callback,
+        debounce_seconds=0.01,
+        max_seconds=0.1,
+        pacer=_FakePacer([decision]),
+        on_paced_answer=paced_answer,
+        on_paced_reaction=paced_reaction,
+        on_paced_ready=paced_ready,
+    )
+    message_id = uuid4()
+
+    await coalescer.add(user.id, message_id, user, scope=scope)
+    await asyncio.sleep(0.03)
+
+    assert outcome_calls == [([message_id], user, scope)]
+    assert dispatch_order == (
+        ["ready", action] if action in {"answer", "react"} else ["ready"]
+    )
 
 
 @pytest.mark.parametrize("action", ["react", "silence"])

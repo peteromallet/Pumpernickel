@@ -50,6 +50,7 @@ def test_configure_coalescer_keeps_legacy_path_for_non_discord(fake_pool, app_en
     assert coalescer.pacer is None
     assert coalescer.on_paced_answer is None
     assert coalescer.on_paced_reaction is None
+    assert coalescer.on_paced_ready is None
 
 
 def test_configure_coalescer_keeps_legacy_path_when_discord_pacing_disabled(fake_pool, app_env, monkeypatch):
@@ -63,6 +64,7 @@ def test_configure_coalescer_keeps_legacy_path_when_discord_pacing_disabled(fake
     assert coalescer.pacer is None
     assert coalescer.on_paced_answer is None
     assert coalescer.on_paced_reaction is None
+    assert coalescer.on_paced_ready is None
 
 
 async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
@@ -77,6 +79,7 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
 
     answer_calls = []
     reaction_calls = []
+    reflection_calls = []
     typing_calls = []
     thinking_calls = []
 
@@ -96,6 +99,16 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     async def fake_add_reaction(to, message_id, emoji, *, bot_id="mediator"):
         reaction_calls.append((to, message_id, emoji))
 
+    async def fake_capture_burst_for_reflection(
+        pool,
+        message_ids,
+        user,
+        *,
+        bot_id,
+        topic_id=None,
+    ):
+        reflection_calls.append((pool, message_ids, user, bot_id, topic_id))
+
     async def fake_send_typing(channel_id, *, bot_id="mediator"):
         return None
 
@@ -112,6 +125,11 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
         await stop_event.wait()
 
     monkeypatch.setattr(main, "run_agentic_turn_with_metadata", fake_run_agentic_turn_with_metadata)
+    monkeypatch.setattr(
+        main,
+        "capture_burst_for_reflection",
+        fake_capture_burst_for_reflection,
+    )
     monkeypatch.setattr(main.discord, "add_reaction", fake_add_reaction)
     monkeypatch.setattr(main.discord, "send_typing", fake_send_typing)
     monkeypatch.setattr(main.discord, "get_dm_channel_id", fake_get_dm_channel_id)
@@ -125,6 +143,7 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
     assert coalescer.debounce_seconds == settings.discord_pacing_burst_window_s
     assert coalescer.on_paced_answer is not None
     assert coalescer.on_paced_reaction is not None
+    assert coalescer.on_paced_ready is not None
     assert coalescer.on_live_typing is not None
     monkeypatch.setattr(mediator_pacer, "perform_send_typing", fake_perform_send_typing)
     monkeypatch.setattr(
@@ -146,6 +165,11 @@ async def test_configure_coalescer_attaches_discord_pacer_and_paced_callbacks(
         "whatsapp_message_id": "discord-message-1",
     }
     decision = PacingDecision(action="answer", reason="ready", signal_snapshot={"source": "live"})
+
+    await coalescer.on_paced_ready([message_id], user, scope=scope)
+    assert reflection_calls == [
+        (fake_pool, [message_id], user, scope.bot_id, scope.topic_id)
+    ]
 
     await coalescer.on_paced_answer([message_id], user, decision, scope=scope)
     assert len(answer_calls) == 1

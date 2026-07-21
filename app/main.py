@@ -224,6 +224,15 @@ def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> t
         async def on_paced_reaction(message_ids: list[UUID], user: User, decision: PacingDecision, *, scope: InboundScope) -> None:
             await _send_paced_reaction(pool, message_ids, user, decision, scope=scope)
 
+        async def on_paced_ready(message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
+            await capture_burst_for_reflection(
+                pool,
+                message_ids,
+                user,
+                bot_id=scope.bot_id,
+                topic_id=scope.topic_id,
+            )
+
         async def on_burst_complete(message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
             await capture_burst_for_reflection(
                 pool,
@@ -251,6 +260,7 @@ def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> t
                 pacer=pacer,
                 on_paced_answer=on_paced_answer,
                 on_paced_reaction=on_paced_reaction,
+                on_paced_ready=on_paced_ready,
                 on_live_typing=on_live_typing,
             ),
             pacer,

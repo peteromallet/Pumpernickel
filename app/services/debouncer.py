@@ -38,11 +38,13 @@ class BurstCoalescer:
         pacer: Any | None = None,
         on_paced_answer: Callable[..., Awaitable[None]] | None = None,
         on_paced_reaction: Callable[..., Awaitable[None]] | None = None,
+        on_paced_ready: Callable[..., Awaitable[None]] | None = None,
         on_live_typing: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self.on_burst_complete = on_burst_complete
         self.on_paced_answer = on_paced_answer
         self.on_paced_reaction = on_paced_reaction
+        self.on_paced_ready = on_paced_ready
         self.on_live_typing = on_live_typing
         self.pacer = pacer
         self.debounce_seconds = debounce_seconds
@@ -125,6 +127,11 @@ class BurstCoalescer:
             await self.on_burst_complete(message_ids, burst.user, scope=burst.scope)
             return
 
+        await self._call_paced_ready(
+            message_ids,
+            burst.user,
+            scope=burst.scope,
+        )
         decision = await self.pacer.decide_and_record(burst.user, message_ids, source=burst.source)
         if decision.action == "wait":
             # Re-store under the burst's original composite key so the wait-task
@@ -145,6 +152,29 @@ class BurstCoalescer:
             await self._mark_processed(message_ids, handling_result="silent", scope=burst.scope)
             return
         await self._call_paced_answer(message_ids, burst.user, decision, scope=burst.scope)
+
+    async def _call_paced_ready(
+        self,
+        message_ids: list[UUID],
+        user: User,
+        *,
+        scope: InboundScope,
+    ) -> None:
+        """Run a best-effort side effect before each paced evaluation."""
+        if self.on_paced_ready is None:
+            return
+        try:
+            await self.on_paced_ready(
+                message_ids,
+                user,
+                scope=scope,
+            )
+        except Exception:
+            logger.exception(
+                "paced ready callback failed for user_id=%s bot_id=%s",
+                user.id,
+                scope.bot_id,
+            )
 
     async def _stop_live_typing(self, user_id: UUID) -> None:
         stop_event = self._live_typing_stops.pop(user_id, None)

@@ -38,6 +38,12 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import Settings, get_settings
+from app.services.embeddings import (
+    DEFAULT_OPENAI_EMBEDDING_DIMENSION,
+    DEFAULT_OPENAI_EMBEDDING_MODEL,
+    content_hash,
+)
+from app.services.message_embedding_lifecycle import enqueue_reflection_embed
 from app.reflections.finalization import (
     FinalizationDecision,
     FinalizationEngine,
@@ -95,6 +101,7 @@ class ReflectionFinalizationWorker:
         self._settings = settings or get_settings()
         self._worker_id = worker_id or f"refl-finalize-{uuid4()}"
         self._engine = FinalizationEngine()
+        self._embedding_repair_cursor: Any | None = None
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -230,11 +237,23 @@ class ReflectionFinalizationWorker:
                     ),
                 )
 
-        if result.finalized or result.abandoned or retried:
+        # ── Phase 3: repair swallowed reflection embedding enqueues ─────
+        # Completion enqueue is deliberately best-effort.  This bounded,
+        # cursor-driven sweep makes that failure mode eventually consistent.
+        embedding_repairs = 0
+        try:
+            embedding_repairs = await self._repair_processed_embeddings()
+        except Exception:
+            logger.exception(
+                "reflection finalization worker: embedding repair sweep failed",
+                extra=redact_for_log_extra({"worker_id": self._worker_id}),
+            )
+
+        if result.finalized or result.abandoned or retried or embedding_repairs:
             logger.info(
                 "reflection finalization worker tick: scanned=%d finalized=%d "
                 "abandoned=%d skipped_active=%d skipped_idempotent=%d errors=%d "
-                "retried_recovered=%d (worker=%s)",
+                "retried_recovered=%d embedding_repairs=%d (worker=%s)",
                 result.scanned,
                 result.finalized,
                 result.abandoned,
@@ -242,6 +261,7 @@ class ReflectionFinalizationWorker:
                 result.skipped_idempotent,
                 result.errors,
                 len(retried),
+                embedding_repairs,
                 self._worker_id,
             )
 
@@ -487,6 +507,143 @@ class ReflectionFinalizationWorker:
                 session_id,
                 entry.id,
             )
+
+    # ── Embedding repair ───────────────────────────────────────────────
+
+    async def _repair_processed_embeddings(self) -> int:
+        """Re-enqueue bounded missing/stale processed reflection embeddings.
+
+        A matching persisted embedding or active embed/reembed job is current
+        only when hash, configured model, and configured dimension all match.
+        The in-process cursor prevents healthy early rows from starving later
+        gaps; reaching the end wraps to the beginning on the next query.
+        """
+        rows = await self._fetch_embedding_repair_page(
+            after_entry_id=self._embedding_repair_cursor,
+        )
+        if not rows and self._embedding_repair_cursor is not None:
+            self._embedding_repair_cursor = None
+            rows = await self._fetch_embedding_repair_page(after_entry_id=None)
+        if not rows:
+            return 0
+
+        model = getattr(
+            self._settings,
+            "embedding_model",
+            DEFAULT_OPENAI_EMBEDDING_MODEL,
+        )
+        dimension = getattr(
+            self._settings,
+            "embedding_dimension",
+            DEFAULT_OPENAI_EMBEDDING_DIMENSION,
+        )
+        attempted = 0
+        for row in rows:
+            get = row.get if isinstance(row, dict) else lambda key: row[key]
+            entry_id = get("id")
+            plaintext = get("plaintext_searchable")
+            expected_hash = content_hash(plaintext)
+            embedding_current = (
+                get("embedded_content_hash") == expected_hash
+                and get("embedded_model") == model
+                and get("embedded_dimension") == dimension
+            )
+            job_current = (
+                get("job_content_hash") == expected_hash
+                and get("job_model") == model
+                and get("job_dimension") == dimension
+            )
+            if not embedding_current and not job_current:
+                attempted += 1
+                try:
+                    if get("job_id") is not None and get("job_status") == "pending":
+                        await self._supersede_stale_pending_job(get("job_id"))
+                    await enqueue_reflection_embed(
+                        self._pool,
+                        entry_id=entry_id,
+                        plaintext_searchable=plaintext,
+                    )
+                except Exception:
+                    logger.warning(
+                        "reflection embedding repair enqueue failed for entry=%s",
+                        entry_id,
+                        exc_info=True,
+                        extra=redact_for_log_extra(
+                            {"entry_id": str(entry_id)}
+                        ),
+                    )
+
+        last = rows[-1]
+        last_get = last.get if isinstance(last, dict) else lambda key: last[key]
+        self._embedding_repair_cursor = last_get("id")
+        return attempted
+
+    async def _supersede_stale_pending_job(self, job_id: Any) -> None:
+        """Clear a stale pending job so model/dimension drift can re-enqueue."""
+        await self._pool.execute(
+            """
+            UPDATE mediator.embed_jobs
+            SET status = 'superseded',
+                last_error = 'superseded by reflection embedding repair',
+                locked_at = NULL,
+                locked_by = NULL,
+                completed_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+              AND source_type = 'reflection'
+              AND status = 'pending'
+            """,
+            job_id,
+        )
+
+    async def _fetch_embedding_repair_page(
+        self,
+        *,
+        after_entry_id: Any | None,
+    ) -> list[Any]:
+        rows = await self._pool.fetch(
+            """
+            SELECT re.id,
+                   re.plaintext_searchable,
+                   ce.content_hash AS embedded_content_hash,
+                   ce.model AS embedded_model,
+                   ce.dimension AS embedded_dimension,
+                   ej.content_hash AS job_content_hash,
+                   ej.model AS job_model,
+                   ej.dimension AS job_dimension,
+                   ej.id AS job_id,
+                   ej.status AS job_status
+            FROM mediator.reflection_entries re
+            JOIN mediator.reflection_sessions rs ON rs.id = re.session_id
+            LEFT JOIN mediator.content_embeddings ce
+              ON ce.source_type = 'reflection'
+             AND ce.source_id = re.id
+            LEFT JOIN LATERAL (
+                SELECT id, status, content_hash, model, dimension
+                FROM mediator.embed_jobs
+                WHERE source_type = 'reflection'
+                  AND source_id = re.id
+                  AND job_kind IN ('embed', 'reembed')
+                  AND status IN ('pending', 'processing')
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+            ) ej ON TRUE
+            WHERE rs.status = 'processed'
+              AND re.plaintext_searchable IS NOT NULL
+              AND btrim(re.plaintext_searchable) <> ''
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM mediator.reflection_entries successor
+                  WHERE successor.supersedes_entry_id = re.id
+              )
+              AND ($1::uuid IS NULL OR re.id > $1)
+            ORDER BY re.id
+            LIMIT $2
+            """,
+            after_entry_id,
+            self._batch_size,
+        )
+        return list(rows)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

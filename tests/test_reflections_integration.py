@@ -12,6 +12,7 @@ Proves that:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
@@ -39,9 +40,18 @@ class _FakeUser:
         self.timezone = timezone
 
 
-def _message_row(msg_id: UUID, content: str | None) -> dict:
+def _message_row(
+    msg_id: UUID,
+    content: str | None,
+    *,
+    sent_at: datetime | None = None,
+) -> dict:
     """Build a fake asyncpg Row-like dict for messages table."""
-    return {"id": msg_id, "content": content}
+    return {
+        "id": msg_id,
+        "content": content,
+        "sent_at": sent_at or datetime.now(timezone.utc),
+    }
 
 
 class _FakeSession:
@@ -57,6 +67,7 @@ class _FakeSession:
         topic_id: UUID | None = None,
         temporal_scope: str = "instant",
         phase: str = "freeform",
+        idle_finalize_at: datetime | None = None,
     ) -> None:
         self.id = session_id
         self.user_id = user_id
@@ -65,6 +76,7 @@ class _FakeSession:
         self.source_message_ids = list(source_message_ids or [])
         self.temporal_scope = temporal_scope
         self.phase = phase
+        self.idle_finalize_at = idle_finalize_at
 
 
 class _FakeReflectionStore:
@@ -84,6 +96,7 @@ class _FakeReflectionStore:
         self._open_raises = open_raises
         self.open_calls: list[dict] = []
         self.list_calls: list[dict] = []
+        self.finalize_calls: list[dict] = []
         self.list_sessions_raises: Exception | None = None
 
     async def list_sessions(self, *, user_id, statuses=None, limit=50):
@@ -108,6 +121,10 @@ class _FakeReflectionStore:
             temporal_scope=kwargs.get("temporal_scope", "instant"),
             phase=kwargs.get("phase", "freeform"),
         )
+
+    async def finalize_session(self, **kwargs):
+        self.finalize_calls.append(kwargs)
+        return None
 
     @property
     def open_called(self) -> bool:
@@ -298,6 +315,185 @@ class TestCaptureBurstForReflection:
         # The merged source IDs should include both mid1 and mid2
         assert mid1 in kwargs["source_message_ids"]
         assert mid2 in kwargs["source_message_ids"]
+
+    async def test_active_session_attaches_ambiguous_continuation(self):
+        """Active-session context turns an otherwise ambiguous continuation
+        into reflection evidence."""
+        user = _FakeUser()
+        existing_mid = _uid()
+        continuation_mid = _uid()
+        pool = AsyncMock()
+        pool.fetch.return_value = [
+            _message_row(
+                continuation_mid,
+                "And that's the part I can't quite put into words yet",
+            )
+        ]
+        fake_store = _FakeReflectionStore(
+            sessions=[
+                _FakeSession(
+                    _uid(),
+                    user.id,
+                    "test_bot",
+                    source_message_ids=[existing_mid],
+                )
+            ]
+        )
+
+        with patch(
+            "app.services.reflections_integration.ReflectionStore",
+            return_value=fake_store,
+        ):
+            await capture_burst_for_reflection(
+                pool,
+                [continuation_mid],
+                user,
+                bot_id="test_bot",
+            )
+
+        assert fake_store.open_called
+        assert fake_store.last_open_kwargs["source_message_ids"] == [
+            existing_mid,
+            continuation_mid,
+        ]
+
+    async def test_active_session_still_rejects_explicit_task(self):
+        """Negative task/logistics precedence remains stronger than the
+        active-session continuation signal."""
+        user = _FakeUser()
+        task_mid = _uid()
+        pool = AsyncMock()
+        pool.fetch.return_value = [
+            _message_row(task_mid, "Remind me to buy groceries tomorrow")
+        ]
+        fake_store = _FakeReflectionStore(
+            sessions=[_FakeSession(_uid(), user.id, "test_bot")]
+        )
+
+        with patch(
+            "app.services.reflections_integration.ReflectionStore",
+            return_value=fake_store,
+        ):
+            await capture_burst_for_reflection(
+                pool,
+                [task_mid],
+                user,
+                bot_id="test_bot",
+            )
+
+        assert not fake_store.open_called
+
+    async def test_expired_session_is_finalized_and_new_reflection_opens(self):
+        """A persisted burst after the old deadline cannot resurrect it."""
+        user = _FakeUser()
+        old_mid = _uid()
+        new_mid = _uid()
+        sent_at = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+        old_session = _FakeSession(
+            _uid(),
+            user.id,
+            "test_bot",
+            source_message_ids=[old_mid],
+            idle_finalize_at=sent_at - timedelta(seconds=1),
+        )
+        pool = AsyncMock()
+        pool.fetch.return_value = [
+            _message_row(
+                new_mid,
+                "Reflection: this new experience changed my perspective",
+                sent_at=sent_at,
+            )
+        ]
+        fake_store = _FakeReflectionStore(sessions=[old_session])
+
+        with patch(
+            "app.services.reflections_integration.ReflectionStore",
+            return_value=fake_store,
+        ):
+            await capture_burst_for_reflection(
+                pool,
+                [new_mid],
+                user,
+                bot_id="test_bot",
+            )
+
+        assert fake_store.finalize_calls == [
+            {"user_id": user.id, "session_id": old_session.id}
+        ]
+        assert fake_store.open_called
+        assert fake_store.last_open_kwargs["source_message_ids"] == [new_mid]
+
+    async def test_expired_session_does_not_promote_ambiguous_continuation(self):
+        """Expired collection context cannot turn ambiguous prose reflective."""
+        user = _FakeUser()
+        mid = _uid()
+        sent_at = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+        old_session = _FakeSession(
+            _uid(),
+            user.id,
+            "test_bot",
+            idle_finalize_at=sent_at - timedelta(minutes=1),
+        )
+        pool = AsyncMock()
+        pool.fetch.return_value = [
+            _message_row(
+                mid,
+                "And that's the part I can't put into words yet",
+                sent_at=sent_at,
+            )
+        ]
+        fake_store = _FakeReflectionStore(sessions=[old_session])
+
+        with patch(
+            "app.services.reflections_integration.ReflectionStore",
+            return_value=fake_store,
+        ):
+            await capture_burst_for_reflection(
+                pool,
+                [mid],
+                user,
+                bot_id="test_bot",
+            )
+
+        assert len(fake_store.finalize_calls) == 1
+        assert not fake_store.open_called
+
+    @pytest.mark.parametrize("has_active_session", [False, True])
+    async def test_each_attached_burst_refreshes_fifteen_minute_deadline(
+        self,
+        has_active_session: bool,
+    ):
+        """Opening and attaching both set the deadline from current activity."""
+        user = _FakeUser()
+        mid = _uid()
+        pool = AsyncMock()
+        message_sent_at = datetime(2026, 7, 21, 10, 30, tzinfo=timezone.utc)
+        pool.fetch.return_value = [
+            _message_row(
+                mid,
+                "Reflection: I learned something today",
+                sent_at=message_sent_at,
+            )
+        ]
+        sessions = (
+            [_FakeSession(_uid(), user.id, "test_bot")]
+            if has_active_session
+            else []
+        )
+        fake_store = _FakeReflectionStore(sessions=sessions)
+        with patch(
+            "app.services.reflections_integration.ReflectionStore",
+            return_value=fake_store,
+        ):
+            await capture_burst_for_reflection(
+                pool,
+                [mid],
+                user,
+                bot_id="test_bot",
+            )
+
+        deadline = fake_store.last_open_kwargs["idle_finalize_at"]
+        assert deadline == message_sent_at + timedelta(minutes=15)
 
     async def test_burst_with_mixed_content_opens_for_reflection_candidate(self):
         """A burst with one joke and one reflection: the reflection candidate
