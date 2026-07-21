@@ -352,6 +352,28 @@ def test_resync_scopes_to_authenticated_user(monkeypatch: pytest.MonkeyPatch) ->
         assert dirty["connection_id"] == pool._row["id"]
 
 
+def test_resync_queues_only_resources_covered_by_granted_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prime(monkeypatch, auth_enabled=True)
+    user_id = uuid4()
+    pool = HealthPool(user_id)
+    assert pool._row is not None
+    pool._row["granted_scopes"] = ["user.metrics"]
+    token = live_jwt.mint(user_id=str(user_id))
+
+    response = _client(pool).post(
+        "/api/health/devices/withings/resync",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["resource_types"] == ["measurement"]
+    assert [row["resource_type"] for row in pool._dirty_categories] == [
+        "measurement"
+    ]
+
+
 def test_resync_response_has_required_metadata_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     _prime(monkeypatch, auth_enabled=True)
     user_id = uuid4()

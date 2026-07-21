@@ -74,6 +74,22 @@ def _required_scopes(resource_types: tuple[HealthResourceType, ...]) -> list[str
     return sorted(scopes)
 
 
+def _granted_resource_types(
+    resource_types: tuple[HealthResourceType, ...],
+    granted_scopes: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> tuple[HealthResourceType, ...]:
+    granted = frozenset(granted_scopes)
+    if not granted:
+        return resource_types
+    return tuple(
+        resource_type
+        for resource_type in resource_types
+        if WITHINGS_PROVIDER_CAPABILITIES.category_for(
+            resource_type
+        ).required_scopes.issubset(granted)
+    )
+
+
 def _metadata_only_connection(row: Any) -> dict[str, Any]:
     if row is None:
         return {"status": "not_connected"}
@@ -187,7 +203,10 @@ async def withings_resync(
     row = await _fetch_connection(pool, user_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Withings connection not found")
-    resource_types = _selected_resource_types(None, settings)
+    resource_types = _granted_resource_types(
+        _selected_resource_types(None, settings),
+        row.get("granted_scopes") or [],
+    )
     repo = repository_for(pool)
     for resource_type in resource_types:
         await repo.mark_dirty(
