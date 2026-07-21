@@ -199,6 +199,56 @@ async def test_measurement_pagination_matches_fake_provider_without_live_network
     assert transport.requests[1].form["offset"] == "100"
 
 
+async def test_measurement_accepts_live_withings_modelid_spelling() -> None:
+    transport = FixtureTransport("measurements_page_1")
+    body = transport._fixtures[0]["response"]["json"]["body"]
+    for group in body["measuregrps"]:
+        group["modelid"] = group.pop("model_id")
+    provider = WithingsProvider(
+        client_id="synthetic-client-id",
+        client_secret="synthetic-client-secret",
+        transport=transport,
+    )
+    cursor = HealthSyncCursor(
+        resource_type=HealthResourceType.MEASUREMENT,
+        last_modified=_fixture_lastupdate("measurements_page_1"),
+    )
+
+    result = await provider.fetch_changes(
+        access_token="synthetic-access-token-v2",
+        resource_type=HealthResourceType.MEASUREMENT,
+        cursor=cursor,
+    )
+
+    assert result.records
+    assert all(record.source_metadata["model_id"] == 18 for record in result.records)
+
+
+async def test_measurement_accepts_null_live_withings_modelid() -> None:
+    transport = FixtureTransport("measurements_page_1")
+    body = transport._fixtures[0]["response"]["json"]["body"]
+    for group in body["measuregrps"]:
+        group.pop("model_id")
+        group["modelid"] = None
+    provider = WithingsProvider(
+        client_id="synthetic-client-id",
+        client_secret="synthetic-client-secret",
+        transport=transport,
+    )
+
+    result = await provider.fetch_changes(
+        access_token="synthetic-access-token-v2",
+        resource_type=HealthResourceType.MEASUREMENT,
+        cursor=HealthSyncCursor(
+            resource_type=HealthResourceType.MEASUREMENT,
+            last_modified=_fixture_lastupdate("measurements_page_1"),
+        ),
+    )
+
+    assert result.records
+    assert all(record.source_metadata["model_id"] is None for record in result.records)
+
+
 async def test_workout_and_sleep_normalization_match_fake_provider() -> None:
     transport = FixtureTransport("workouts_page_1", "sleep_summary_page_1", "sleep_detail_page_1")
     provider = WithingsProvider(

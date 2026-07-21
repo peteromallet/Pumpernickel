@@ -678,7 +678,11 @@ class WithingsProvider:
                 "date": int(payload["date"]),
                 "hash_deviceid": payload.get("hash_deviceid"),
                 "measures": [dict(item) for item in measures],
-                "model_id": int(payload["model_id"]),
+                # Withings' live API uses ``modelid`` while older fixtures and
+                # some documented payloads use ``model_id``.
+                "model_id": _optional_int(
+                    payload.get("modelid", payload.get("model_id"))
+                ),
             },
             attribution={"adapter": "withings"},
         )
