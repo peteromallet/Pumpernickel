@@ -1,5 +1,6 @@
 import json
 import copy
+import os
 import sys
 import types
 from datetime import UTC, datetime, timedelta
@@ -53,6 +54,42 @@ REQUIRED_ENV = {
     "DEFAULT_USER_TIMEZONE": "UTC",
 }
 
+SCRUB_ENV_KEYS = {
+    "DATA_ENCRYPTION_KEY",
+    "DEEPSEEK_API_KEY",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_BOT_USER_ID",
+    "HEALTH_SYNC_ENABLED",
+    "HEALTH_SYNC_MEASUREMENTS_ENABLED",
+    "HEALTH_SYNC_SLEEP_ENABLED",
+    "HEALTH_SYNC_WORKOUTS_ENABLED",
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+    "WITHINGS_ACCESS_TOKEN",
+    "WITHINGS_CALLBACK_URL",
+    "WITHINGS_CLIENT_ID",
+    "WITHINGS_CLIENT_SECRET",
+    "WITHINGS_REFRESH_TOKEN",
+}
+SCRUB_ENV_PREFIXES = (
+    "DISCORD_BOT_TOKEN_",
+    "DISCORD_BOT_USER_ID_",
+)
+
+
+def _apply_test_env(
+    monkeypatch: pytest.MonkeyPatch, *, include_required_env: bool
+) -> None:
+    for key in SCRUB_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    for key in tuple(os.environ):
+        if key.startswith(SCRUB_ENV_PREFIXES):
+            monkeypatch.delenv(key, raising=False)
+    env_values = REQUIRED_ENV if include_required_env else REQUIRED_ENV
+    for key, value in env_values.items():
+        monkeypatch.setenv(key, value)
+
 
 @pytest.fixture
 def anyio_backend() -> str:
@@ -76,10 +113,23 @@ def _seed_relationship_topic_id() -> None:
 
 @pytest.fixture
 def app_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key, value in REQUIRED_ENV.items():
-        monkeypatch.setenv(key, value)
+    _apply_test_env(monkeypatch, include_required_env=True)
     get_settings.cache_clear()
     yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _stable_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import agentic, hooks
+
+    _apply_test_env(monkeypatch, include_required_env=False)
+    agentic.set_pool(None)
+    hooks.set_pool(None)
+    get_settings.cache_clear()
+    yield
+    agentic.set_pool(None)
+    hooks.set_pool(None)
     get_settings.cache_clear()
 
 
@@ -1586,6 +1636,26 @@ class FakePool:
                 "id": row["id"],
                 "deleted_at": row.get("deleted_at"),
                 "search_suppressed_at": row.get("search_suppressed_at"),
+            }
+        if compact.startswith(
+            "SELECT t.id, t.title, t.description, t.status, t.recorded_by_bot_id,"
+        ) and "FROM themes t WHERE t.id = $1" in compact:
+            row = self.themes.get(args[0])
+            if row is None:
+                return None
+            has_active_topic = any(
+                topic_row.get("artifact_table") == "themes"
+                and topic_row.get("artifact_id") == row["id"]
+                and topic_row.get("status", "active") == "active"
+                for topic_row in self.artifact_topics_rows
+            ) or ("themes", row["id"]) in self.artifact_topics
+            return {
+                "id": row["id"],
+                "title": row.get("title"),
+                "description": row.get("description"),
+                "status": row.get("status"),
+                "recorded_by_bot_id": row.get("recorded_by_bot_id"),
+                "_has_active_topic": has_active_topic,
             }
         if compact.startswith("SELECT id, source_type, source_id, message_id, job_kind") and "FROM mediator.embed_jobs" in compact:
             source_type, source_id, job_kind, content_hash_value = args

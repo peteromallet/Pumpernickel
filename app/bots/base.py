@@ -64,7 +64,7 @@ class BotSpec:
     hot_context_builder_version: str = "1.0.0"
     tool_schema_version: str = "1.0.0"
     # Per-bot LLM provider chain (primary, fallbacks...).
-    provider_chain: tuple[str, ...] = ("deepseek", "anthropic")
+    provider_chain: tuple[str, ...] = ("anthropic",)
 
     def __post_init__(self) -> None:
         for entry in self.provider_chain:

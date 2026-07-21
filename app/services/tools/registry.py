@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from collections.abc import Awaitable, Callable
+import inspect
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -786,13 +787,22 @@ def to_anthropic_tools(allowed: set[str]) -> list[dict[str, Any]]:
     ]
 
 
+def _optional_ctx_attr(ctx: TurnContext, name: str) -> Any:
+    """Read optional context attrs without triggering MagicMock fallbacks."""
+    sentinel = object()
+    if inspect.getattr_static(ctx, name, sentinel) is sentinel:
+        return None
+    return getattr(ctx, name)
+
+
 def _step_allowed(ctx: TurnContext) -> set[str]:
     # When flat_allowed_tools is set (non-chat jobs like live_debrief),
     # it is authoritative instead of STEP_ALLOWED_TOOLS.  The flat set
     # still passes through bot_spec.tool_allowlist and BOT_EXCLUSIVE_TOOLS
     # so scope and exclusivity guards remain in effect.
-    if ctx.flat_allowed_tools is not None:
-        allowed = set(ctx.flat_allowed_tools) | ALWAYS_ALLOWED_TOOLS
+    flat_allowed_tools = _optional_ctx_attr(ctx, "flat_allowed_tools")
+    if flat_allowed_tools is not None:
+        allowed = set(flat_allowed_tools) | ALWAYS_ALLOWED_TOOLS
     else:
         allowed = (
             set(STEP_ALLOWED_TOOLS.get(ctx.current_step, set())) | ALWAYS_ALLOWED_TOOLS

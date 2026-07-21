@@ -73,6 +73,9 @@ class TrackingPool(FakePool):
             compact.startswith("SELECT id, sender_id")
             and "sent_at, content" in compact
             and "FROM messages" in compact
+        ) or (
+            compact.startswith("SELECT m.message_id AS id, m.sender_id, m.recipient_id")
+            and "FROM mediator.v_searchable_messages m" in compact
         ):
             self.mark("read:search_messages")
             rows = [

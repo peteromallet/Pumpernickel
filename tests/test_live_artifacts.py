@@ -39,6 +39,7 @@ from app.services.live.artifacts import (
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+_TEST_PLACEHOLDER_DATABASE_URL = "postgresql://user:pass@localhost:5432/db"
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +50,11 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 @pytest.fixture(name="_check_db_url")
 def _check_db_url_fixture() -> None:
     """Skip DB-gated tests when no database URL is configured."""
-    if not os.environ.get("DATABASE_URL") and not os.environ.get("EVAL_DATABASE_URL"):
+    database_url = os.environ.get("DATABASE_URL")
+    eval_database_url = os.environ.get("EVAL_DATABASE_URL")
+    if database_url == _TEST_PLACEHOLDER_DATABASE_URL:
+        database_url = None
+    if not database_url and not eval_database_url:
         pytest.skip("DATABASE_URL / EVAL_DATABASE_URL not set")
 
 
