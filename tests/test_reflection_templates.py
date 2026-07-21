@@ -40,13 +40,14 @@ class TestRegistry:
     def test_list_template_keys_returns_all_builtins(self):
         keys = list_template_keys()
         assert isinstance(keys, list)
-        # All 10 built-in template keys from reflection_templates.py
+        # All built-in template keys from reflection_templates.py.
         expected = {
             "checkpoint",
             "daily_close",
             "daily_open",
             "decision_debrief",
             "freeform",
+            "freeform_reflection",
             "monthly_close",
             "monthly_open",
             "weekly_close",
@@ -59,6 +60,7 @@ class TestRegistry:
 
     def test_template_is_registered_true_for_builtins(self):
         assert template_is_registered("freeform") is True
+        assert template_is_registered("freeform_reflection") is True
         assert template_is_registered("daily_open") is True
         assert template_is_registered("weekly_close") is True
 
@@ -77,6 +79,12 @@ class TestRegistry:
     def test_get_template_defaults_to_latest_with_version_none(self):
         tmpl = get_template("freeform")
         assert tmpl.key == "freeform"
+        assert tmpl.version == 1
+
+    def test_get_template_returns_freeform_reflection_alias(self):
+        tmpl = get_template("freeform_reflection")
+        assert isinstance(tmpl, ReflectionTemplate)
+        assert tmpl.key == "freeform_reflection"
         assert tmpl.version == 1
 
     # -- get_template (error paths) -------------------------------------------

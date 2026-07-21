@@ -412,6 +412,19 @@ register_template(
     )
 )
 
+# ``freeform_reflection`` is the persisted capture/normalizer key used across
+# the reflection pipeline. Keep it as a registered alias of ``freeform`` so
+# capture → normalization → entry validation does not fail at record time.
+register_template(
+    ReflectionTemplate(
+        key="freeform_reflection",
+        version=1,
+        allowed_temporal_scopes=frozenset({"instant", "day", "week", "month", "custom", "none"}),
+        allowed_phases=frozenset({"opening", "closing", "checkpoint", "prospective", "retrospective", "freeform"}),
+        validate_payload=_validate_template_data_is_dict,
+    )
+)
+
 # -- daily_open -------------------------------------------------------------
 
 register_template(

@@ -17,6 +17,7 @@ from app.models.user import claim_onboarding_welcome, upsert_user
 from app.services import routing, system_state
 from app.services.charge import classify_charge
 from app.services.crypto import encrypt_value
+from app.services.deletion import cleanup_deleted_reflection_state
 from app.services.message_embedding_lifecycle import (
     enqueue_message_embed,
     enqueue_message_embedding_drop,
@@ -126,6 +127,10 @@ async def _handle_delete(pool: Any, target_id: str) -> None:
     )
     if row is not None:
         await enqueue_message_embedding_drop(pool, message_id=row["id"])
+        await cleanup_deleted_reflection_state(
+            pool,
+            message_ids=[row["id"]],
+        )
 
 
 def _reaction_sentiment(emoji: str | None) -> str:

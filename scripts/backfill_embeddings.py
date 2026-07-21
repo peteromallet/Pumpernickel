@@ -175,7 +175,9 @@ def _refuses_pooler_url(url: str) -> str | None:
     if parsed.port == 6543:
         return "port 6543 is a Supabase transaction-pooler endpoint"
     host = (parsed.hostname or "").casefold()
-    if ("pooler" in host or "pgbouncer" in host) and parsed.port != 5432:
+    if "pgbouncer" in host:
+        return f"host {parsed.hostname!r} looks like a non-session pooler endpoint"
+    if "pooler" in host and parsed.port != 5432:
         return f"host {parsed.hostname!r} looks like a non-session pooler endpoint"
     return None
 

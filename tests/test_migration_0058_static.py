@@ -26,13 +26,17 @@ def _database_dsn(admin_dsn: str, db_name: str) -> str:
     return f"{head}/{db_name}"
 
 
-def test_0058_is_next_migration_number() -> None:
+def test_0058_files_exist_and_keep_sequence_position() -> None:
     numbered = sorted(
         path.name
         for path in MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")
         if not path.name.endswith(".down.sql")
     )
-    assert numbered[-1].startswith(f"{MIGRATION_NUMBER}_")
+    assert "0057_searchable_messages_render_metadata.sql" in numbered
+    assert f"{MIGRATION_NUMBER}_content_embeddings_unified_index.sql" in numbered
+    assert numbered.index("0057_searchable_messages_render_metadata.sql") < numbered.index(
+        f"{MIGRATION_NUMBER}_content_embeddings_unified_index.sql"
+    )
     assert sum(1 for name in numbered if name.startswith(f"{MIGRATION_NUMBER}_")) == 1
     assert UP_PATH.exists()
     assert DOWN_PATH.exists()

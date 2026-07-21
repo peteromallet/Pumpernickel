@@ -410,7 +410,11 @@ async def _fetch_reflections_digest(
         WHERE e.user_id = $1
           AND e.bot_id = $2
           AND e.topic_id = $3
-          AND e.supersedes_entry_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM mediator.reflection_entries successor
+              WHERE successor.supersedes_entry_id = e.id
+          )
           AND e.plaintext_searchable IS NOT NULL
           AND btrim(e.plaintext_searchable) <> ''
           AND s.status = 'processed'

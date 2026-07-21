@@ -9,13 +9,17 @@ UP_SQL = (MIGRATIONS_DIR / "0057_searchable_messages_render_metadata.sql").read_
 DOWN_SQL = (MIGRATIONS_DIR / "0057_searchable_messages_render_metadata.down.sql").read_text()
 
 
-def test_0057_is_next_migration_number() -> None:
+def test_0057_files_exist_and_keep_sequence_position() -> None:
     numbered = sorted(
         path.name
         for path in MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")
         if not path.name.endswith(".down.sql")
     )
-    assert numbered[-1].startswith("0057_")
+    assert "0056_retrieval_index.sql" in numbered
+    assert "0057_searchable_messages_render_metadata.sql" in numbered
+    assert numbered.index("0056_retrieval_index.sql") < numbered.index(
+        "0057_searchable_messages_render_metadata.sql"
+    )
     assert sum(1 for name in numbered if name.startswith("0057_")) == 1
 
 

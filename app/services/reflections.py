@@ -37,6 +37,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from app.services.reflection_redaction import redact_for_log_extra
+
 logger = logging.getLogger(__name__)
 
 # ── Public exception surface ────────────────────────────────────────────────
@@ -100,9 +102,47 @@ VALID_PHASES: frozenset[str] = frozenset(
     {"opening", "closing", "checkpoint", "prospective", "retrospective", "freeform"}
 )
 
-VALID_FAILURE_CLASSES: frozenset[str] = frozenset(
-    {"retryable_processor", "terminal_input", "terminal_internal", "stale_claim"}
+# ── Failure-class taxonomy (reflection sessions) ───────────────────────────
+#
+# The reflection pipeline has its OWN four-class failure taxonomy, distinct
+# from the message-level taxonomy in ``app/services/failure_policy.py``.
+# These two taxonomies are intentionally separate because they model
+# different failure domains:
+#
+#   Reflection taxonomy (this module)          Message taxonomy (failure_policy)
+#   ─────────────────────────────────          ────────────────────────────────
+#   retryable_processor  – transient proc err  retryable_pre_send
+#   terminal_input       – bad/missing input   terminal_post_send
+#   terminal_internal    – internal bug        infra_bug
+#   stale_claim          – claim timed out     model_provider_bad_request
+#                                              model_provider_timeout
+#                                              tool_validation_recoverable
+#                                              delivery_provider_failure
+#
+#   Storage: mediator.reflection_sessions      Storage: mediator.messages
+#   CHECK (migration 0063)                     CHECK (migration 0046)
+#   Retry via retry_session() → finalizing     Retry via FAILURE_POLICY +
+#                                              recovery sweep
+#
+# No cross-mapping is needed.  The admin listing surface and any future
+# retry/operator diagnostics that expose reflection failure_class MUST
+# use this taxonomy, not the message-level one.  Conversely, the
+# message-level recovery sweep MUST NOT inspect reflection_session
+# failure_class.
+#
+# Reconciliation decision (M4 / T8): keep both taxonomies independent.
+# Do not merge, do not create a third taxonomy, do not silently map
+# one onto the other.
+#
+# The canonical source of truth for both taxonomies is now
+# ``app/services/failure_class_reconciliation.py``, which also provides
+# domain classification, display formatting, and cross-taxonomy validation.
+from app.services.failure_class_reconciliation import (
+    REFLECTION_FAILURE_CLASSES,
+    validate_reflection_failure_class as _validate_failure_class,
 )
+
+VALID_FAILURE_CLASSES: frozenset[str] = REFLECTION_FAILURE_CLASSES
 
 VALID_DERIVATION_KINDS: frozenset[str] = frozenset(
     {"memory", "observation", "distillation", "orientation"}
@@ -212,8 +252,8 @@ class ReflectionEntry:
 
     Entries are append-only revisions.  Corrections create a new row with
     ``supersedes_entry_id`` pointing to the prior revision; the prior row
-    is never mutated.  Consumers should prefer the *current* revision, which
-    is the row where ``supersedes_entry_id IS NULL`` for a given session.
+    is never mutated.  Consumers should prefer the *current* revision: the
+    leaf row that is not referenced by any successor.
     """
 
     id: UUID
@@ -392,13 +432,8 @@ def _validate_phase(phase: str) -> str:
     return phase
 
 
-def _validate_failure_class(fc: str | None) -> str | None:
-    if fc is not None and fc not in VALID_FAILURE_CLASSES:
-        raise ValueError(
-            f"invalid failure_class {fc!r}; "
-            f"expected one of {sorted(VALID_FAILURE_CLASSES)}"
-        )
-    return fc
+# _validate_failure_class is now imported from
+# app.services.failure_class_reconciliation (see module-level import).
 
 
 def _validate_derivation_kind(kind: str) -> str:
@@ -434,6 +469,52 @@ def _validate_decision(decision: str) -> str:
     return decision
 
 
+def _session_source_alive_condition(session_alias: str) -> str:
+    return f"""
+        NOT EXISTS (
+            SELECT 1
+            FROM messages opened
+            WHERE opened.id = {session_alias}.opened_by_message_id
+              AND opened.deleted_at IS NOT NULL
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM unnest(COALESCE({session_alias}.source_message_ids, ARRAY[]::uuid[])) AS source_message_id
+            JOIN messages source_messages
+              ON source_messages.id = source_message_id
+            WHERE source_messages.deleted_at IS NOT NULL
+        )
+    """
+
+
+def _visible_entry_conditions(
+    entry_alias: str = "re",
+    session_alias: str = "rs",
+) -> list[str]:
+    return [
+        f"{entry_alias}.plaintext_searchable IS NOT NULL",
+        f"btrim({entry_alias}.plaintext_searchable) <> ''",
+        f"{session_alias}.status = 'processed'",
+        _session_source_alive_condition(session_alias),
+    ]
+
+
+def _current_entry_condition(entry_alias: str = "re") -> str:
+    """Return the append-only leaf predicate for a reflection revision.
+
+    ``supersedes_entry_id`` points from a newer revision to the revision it
+    replaces.  Therefore a current revision is an entry that no later row
+    references, not an entry whose own pointer is null.
+    """
+    return f"""
+        NOT EXISTS (
+            SELECT 1
+            FROM mediator.reflection_entries successor
+            WHERE successor.supersedes_entry_id = {entry_alias}.id
+        )
+    """
+
+
 # ── Store ───────────────────────────────────────────────────────────────────
 
 
@@ -455,14 +536,19 @@ class ReflectionStore:
         *,
         user_id: UUID,
         session_id: UUID,
+        visible_only: bool = False,
     ) -> ReflectionSession | None:
         """Fetch a single reflection session by ID, scoped to user_id."""
         _require_user_id(user_id)
+        visibility_clause = ""
+        if visible_only:
+            visibility_clause = f"\n              AND {_session_source_alive_condition('rs')}"
         row = await self._pool.fetchrow(
-            """
+            f"""
             SELECT *
-            FROM mediator.reflection_sessions
-            WHERE id = $1 AND user_id = $2
+            FROM mediator.reflection_sessions rs
+            WHERE rs.id = $1
+              AND rs.user_id = $2{visibility_clause}
             """,
             session_id,
             user_id,
@@ -1040,11 +1126,11 @@ class ReflectionStore:
             )
 
             entries = await self._pool.fetch(
-                """
-                SELECT id, plaintext_searchable
-                FROM mediator.reflection_entries
-                WHERE session_id = $1
-                  AND supersedes_entry_id IS NULL
+                f"""
+                SELECT re.id, re.plaintext_searchable
+                FROM mediator.reflection_entries re
+                WHERE re.session_id = $1
+                  AND {_current_entry_condition('re')}
                   AND plaintext_searchable IS NOT NULL
                   AND btrim(plaintext_searchable) <> ''
                 """,
@@ -1062,9 +1148,85 @@ class ReflectionStore:
                 "for session=%s",
                 session_id,
                 exc_info=True,
+                extra=redact_for_log_extra(
+                    {"session_id": str(session_id)}
+                ),
             )
 
         return session
+
+    # ── complete_session ────────────────────────────────────────────────
+
+    async def complete_session(
+        self,
+        *,
+        session_id: UUID,
+        user_id: UUID,
+    ) -> ReflectionSession | None:
+        """Transition a session from ``finalizing`` to ``processed``.
+
+        This is the claim-free completion path used by the finalization
+        worker.  Unlike :meth:`mark_session_processed`, it does not require
+        a ``claimed_by`` match — it guards on ``finalizing`` status and
+        ``user_id`` ownership instead.
+
+        Idempotent: if the session is already ``processed``, it returns
+        the current row without error.
+        """
+        _require_user_id(user_id)
+
+        now = datetime.now(timezone.utc)
+
+        row = await self._pool.fetchrow(
+            """
+            UPDATE mediator.reflection_sessions
+            SET status = 'processed',
+                updated_at = $3
+            WHERE id = $1
+              AND user_id = $2
+              AND status = 'finalizing'
+            RETURNING *
+            """,
+            session_id,
+            user_id,
+            now,
+        )
+
+        if row is None:
+            # Check if it's already processed (idempotent).
+            current = await self._pool.fetchrow(
+                """
+                SELECT id, status, user_id
+                FROM mediator.reflection_sessions
+                WHERE id = $1
+                """,
+                session_id,
+            )
+            if current is None:
+                raise SessionNotFoundError(
+                    f"Session {session_id} not found"
+                )
+            if current["status"] == "processed":
+                logger.debug(
+                    "complete_session: session=%s already processed (idempotent)",
+                    session_id,
+                )
+                return ReflectionSession.from_row(current)
+            if current["status"] != "finalizing":
+                raise ValueError(
+                    f"Session {session_id} has status {current['status']!r}, "
+                    f"expected 'finalizing' or 'processed'"
+                )
+            if str(current["user_id"]) != str(user_id):
+                raise SessionNotFoundError(
+                    f"Session {session_id} not found for user {user_id}"
+                )
+
+        logger.info(
+            "complete_session: session=%s transitioned to processed",
+            session_id,
+        )
+        return ReflectionSession.from_row(row)
 
     # ── mark_session_failed ─────────────────────────────────────────────
 
@@ -1200,7 +1362,12 @@ class ReflectionStore:
     ) -> list[ReflectionSession]:
         """Recover sessions whose claims have exceeded *stale_claim_seconds*.
 
-        Returns each stale session to ``finalizing`` and clears claim state.
+        Transitions stale claimed sessions to ``processing_failed`` with
+        ``failure_class = 'stale_claim'`` so they are visible in operator
+        dashboards and eligible for ``retry_session``.  Previously this
+        left sessions in ``finalizing`` with a failure_class set — an
+        inconsistent state that was invisible to retry/operator surfaces.
+
         This is a sweeper operation — it does not require a specific user_id.
 
         Sessions that have already exceeded retry limits should be handled
@@ -1225,7 +1392,8 @@ class ReflectionStore:
                 FOR UPDATE SKIP LOCKED
             )
             UPDATE mediator.reflection_sessions s
-            SET claimed_by   = NULL,
+            SET status        = 'processing_failed',
+                claimed_by   = NULL,
                 claimed_at   = NULL,
                 failure_class = 'stale_claim',
                 updated_at   = $1
@@ -1241,7 +1409,8 @@ class ReflectionStore:
         recovered = [ReflectionSession.from_row(r) for r in rows]
         if recovered:
             logger.info(
-                "recover_stale_claims: recovered %d stale claims",
+                "recover_stale_claims: recovered %d stale claims "
+                "(transitioned to processing_failed)",
                 len(recovered),
             )
         return recovered
@@ -1630,6 +1799,12 @@ class ReflectionStore:
                     "create_entry: failed to enqueue reflection embed for entry=%s",
                     entry.id,
                     exc_info=True,
+                    extra=redact_for_log_extra(
+                        {
+                            "entry_id": str(entry.id),
+                            "session_id": str(session_id),
+                        }
+                    ),
                 )
 
         return entry
@@ -1845,7 +2020,7 @@ class ReflectionStore:
 
         The prior entry's ``supersedes_entry_id`` remains unchanged, and its
         row is never touched.  Consumers looking for the current revision
-        should query ``WHERE supersedes_entry_id IS NULL``.
+        must select the leaf row that no successor references.
 
         Raises ``EntryNotFoundError`` if the superseded entry does not exist
         or is not owned by *user_id*.
@@ -1998,6 +2173,12 @@ class ReflectionStore:
                 entry.id,
                 supersedes_entry_id,
                 exc_info=True,
+                extra=redact_for_log_extra(
+                    {
+                        "entry_id": str(entry.id),
+                        "supersedes_entry_id": str(supersedes_entry_id),
+                    }
+                ),
             )
 
         return entry
@@ -2009,18 +2190,33 @@ class ReflectionStore:
         *,
         user_id: UUID,
         entry_id: UUID,
+        visible_only: bool = False,
     ) -> ReflectionEntry | None:
         """Fetch a single reflection entry by ID, scoped to *user_id*."""
         _require_user_id(user_id)
-        row = await self._pool.fetchrow(
-            """
-            SELECT *
-            FROM mediator.reflection_entries
-            WHERE id = $1 AND user_id = $2
-            """,
-            entry_id,
-            user_id,
-        )
+        if visible_only:
+            visible_where = " AND ".join(["re.id = $1", "re.user_id = $2", *_visible_entry_conditions()])
+            row = await self._pool.fetchrow(
+                f"""
+                SELECT re.*
+                FROM mediator.reflection_entries re
+                JOIN mediator.reflection_sessions rs
+                  ON rs.id = re.session_id
+                WHERE {visible_where}
+                """,
+                entry_id,
+                user_id,
+            )
+        else:
+            row = await self._pool.fetchrow(
+                """
+                SELECT *
+                FROM mediator.reflection_entries
+                WHERE id = $1 AND user_id = $2
+                """,
+                entry_id,
+                user_id,
+            )
         if row is None:
             return None
         return ReflectionEntry.from_row(row)
@@ -2032,23 +2228,45 @@ class ReflectionStore:
         *,
         user_id: UUID,
         session_id: UUID,
+        visible_only: bool = False,
     ) -> ReflectionEntry | None:
         """Fetch the current (un-superseded) entry for a session.
 
-        The current revision is the row where ``supersedes_entry_id IS NULL``.
+        The current revision is the leaf row that no successor references.
         """
         _require_user_id(user_id)
-        row = await self._pool.fetchrow(
-            """
-            SELECT *
-            FROM mediator.reflection_entries
-            WHERE session_id = $1
-              AND user_id = $2
-              AND supersedes_entry_id IS NULL
-            """,
-            session_id,
-            user_id,
-        )
+        if visible_only:
+            visible_where = " AND ".join(
+                [
+                    "re.session_id = $1",
+                    "re.user_id = $2",
+                    _current_entry_condition("re"),
+                    *_visible_entry_conditions(),
+                ]
+            )
+            row = await self._pool.fetchrow(
+                f"""
+                SELECT re.*
+                FROM mediator.reflection_entries re
+                JOIN mediator.reflection_sessions rs
+                  ON rs.id = re.session_id
+                WHERE {visible_where}
+                """,
+                session_id,
+                user_id,
+            )
+        else:
+            row = await self._pool.fetchrow(
+                f"""
+                SELECT re.*
+                FROM mediator.reflection_entries re
+                WHERE re.session_id = $1
+                  AND re.user_id = $2
+                  AND {_current_entry_condition('re')}
+                """,
+                session_id,
+                user_id,
+            )
         if row is None:
             return None
         return ReflectionEntry.from_row(row)
@@ -2064,6 +2282,7 @@ class ReflectionStore:
         topic_id: UUID | None = None,
         current_only: bool = True,
         limit: int = 50,
+        visible_only: bool = False,
     ) -> list[ReflectionEntry]:
         """List reflection entries scoped by user, bot, topic, and session.
 
@@ -2088,35 +2307,44 @@ class ReflectionStore:
         """
         _require_user_id(user_id)
 
-        conditions = ["user_id = $1"]
+        table_name = "mediator.reflection_entries re"
+        select_expr = "re.*"
+        conditions = ["re.user_id = $1"]
+        if visible_only:
+            table_name = "mediator.reflection_entries re JOIN mediator.reflection_sessions rs ON rs.id = re.session_id"
+            select_expr = "re.*"
+            conditions = ["re.user_id = $1", *_visible_entry_conditions()]
         params: list[Any] = [user_id]
         param_idx = 2
 
         if session_id is not None:
-            conditions.append(f"session_id = ${param_idx}")
+            field = "re.session_id"
+            conditions.append(f"{field} = ${param_idx}")
             params.append(session_id)
             param_idx += 1
 
         if bot_id is not None:
             _require_bot_id(bot_id)
-            conditions.append(f"bot_id = ${param_idx}")
+            field = "re.bot_id"
+            conditions.append(f"{field} = ${param_idx}")
             params.append(bot_id)
             param_idx += 1
 
         if topic_id is not None:
-            conditions.append(f"topic_id = ${param_idx}")
+            field = "re.topic_id"
+            conditions.append(f"{field} = ${param_idx}")
             params.append(topic_id)
             param_idx += 1
 
         if current_only:
-            conditions.append("supersedes_entry_id IS NULL")
+            conditions.append(_current_entry_condition("re"))
 
         where_clause = " AND ".join(conditions)
         sql = f"""
-            SELECT *
-            FROM mediator.reflection_entries
+            SELECT {select_expr}
+            FROM {table_name}
             WHERE {where_clause}
-            ORDER BY created_at DESC
+            ORDER BY re.created_at DESC
             LIMIT ${param_idx}
         """
         params.append(limit)
@@ -2245,10 +2473,14 @@ class ReflectionStore:
 
         # Verify the referenced entry exists and is owned by user_id.
         entry = await self._pool.fetchrow(
-            """
-            SELECT id, user_id, session_id
-            FROM mediator.reflection_entries
-            WHERE id = $1 AND user_id = $2
+            f"""
+            SELECT re.id, re.user_id, re.session_id
+            FROM mediator.reflection_entries re
+            JOIN mediator.reflection_sessions rs
+              ON rs.id = re.session_id
+            WHERE re.id = $1
+              AND re.user_id = $2
+              AND {' AND '.join(_visible_entry_conditions())}
             """,
             reflection_entry_id,
             user_id,
@@ -2263,7 +2495,7 @@ class ReflectionStore:
             eligibility_json = json.dumps(eligibility_reasons, sort_keys=True)
 
         now = datetime.now(timezone.utc)
-        support_ids = list(support_message_ids or [])
+        support_ids = list(supporting_message_ids or [])
 
         # If idempotency_key is provided, attempt INSERT and catch unique
         # violation to return the existing row.
@@ -2698,6 +2930,108 @@ class ReflectionStore:
             decision,
         )
         return ReflectionDerivation.from_row(row)
+
+
+# ── Admin / operator listing ────────────────────────────────────────────────
+
+
+async def admin_list_sessions(
+    pool: Any,
+    *,
+    status_filter: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return reflection sessions for the operator admin page.
+
+    Returns only redaction-safe metadata columns — no payload text,
+    encrypted bodies, or plaintext searchable content.  Each row is a
+    flat dict suitable for HTML table rendering.
+
+    Args:
+        pool: An asyncpg pool or pool-like object.
+        status_filter: Optional status to filter by (one of
+            ``VALID_STATUSES``).
+        limit: Maximum number of rows to return (default 100).
+
+    Returns:
+        A list of dicts, each representing one reflection session with
+        aggregated entry and derivation counts plus embedding-coverage
+        indicator.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    param_idx = 1
+
+    if status_filter is not None:
+        _validate_status(status_filter)
+        conditions.append(f"rs.status = ${param_idx}")
+        params.append(status_filter)
+        param_idx += 1
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+    sql = f"""
+        SELECT
+            rs.id,
+            rs.user_id,
+            rs.bot_id,
+            rs.topic_id,
+            rs.template_key,
+            rs.temporal_scope,
+            rs.phase,
+            rs.status,
+            rs.classification_source,
+            rs.classification_confidence,
+            rs.retry_count,
+            rs.failure_class,
+            rs.failure_reason,
+            rs.last_error,
+            rs.claimed_by,
+            rs.claimed_at,
+            rs.created_at,
+            rs.finalized_at,
+            rs.processed_at,
+            rs.abandoned_at,
+            rs.idle_finalize_at,
+            rs.updated_at,
+            rs.idempotency_key,
+            COALESCE(
+                (SELECT COUNT(*)
+                 FROM mediator.reflection_entries re
+                 WHERE re.session_id = rs.id
+                   AND {_current_entry_condition('re')}),
+                0
+            ) AS entry_count,
+            COALESCE(
+                (SELECT COUNT(*)
+                 FROM mediator.reflection_derivations rd
+                 WHERE rd.reflection_entry_id IN (
+                     SELECT re2.id
+                     FROM mediator.reflection_entries re2
+                     WHERE re2.session_id = rs.id
+                       AND {_current_entry_condition('re2')}
+                 )),
+                0
+            ) AS derivation_count,
+            EXISTS (
+                SELECT 1
+                FROM mediator.reflection_entries re3
+                WHERE re3.session_id = rs.id
+                  AND {_current_entry_condition('re3')}
+                  AND re3.plaintext_searchable IS NOT NULL
+                  AND btrim(re3.plaintext_searchable) <> ''
+            ) AS has_embeddable_entries
+        FROM mediator.reflection_sessions rs
+        {where_clause}
+          {"AND" if where_clause else "WHERE"} {_session_source_alive_condition("rs")}
+        ORDER BY rs.created_at DESC
+        LIMIT ${param_idx}
+    """
+    params.append(limit)
+    rows = await pool.fetch(sql, *params)
+    return [dict(row) for row in rows]
 
 
 # ── Module-level convenience ────────────────────────────────────────────────

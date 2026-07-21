@@ -72,8 +72,8 @@ async def normalize_and_create_entry(
     session's ``source_message_ids``, runs the bounded normalizer, maps the
     result to the envelope format, and calls ``ReflectionStore.create_entry()``.
 
-    **Idempotency**: if the session already has a current entry (revision ≥ 1
-    where ``supersedes_entry_id IS NULL``), this function returns the existing
+    **Idempotency**: if the session already has a current entry (revision ≥ 1,
+    meaning the leaf row that no successor references), this function returns the existing
     entry without creating a new revision.  This makes retry-after-failure
     safe.
 
@@ -255,6 +255,7 @@ async def _fetch_message_texts(
         SELECT id, content
         FROM messages
         WHERE id = ANY($1::uuid[])
+          AND deleted_at IS NULL
         """,
         message_ids,
     )

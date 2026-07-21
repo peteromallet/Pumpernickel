@@ -44,6 +44,7 @@ from app.reflections.finalization import (
     SessionState,
     build_session_state,
 )
+from app.services.reflection_redaction import redact_for_log_extra
 from app.services.reflections import ReflectionStore
 from app.services.reflections_normalization_bridge import (
     normalize_and_create_entry,
@@ -112,6 +113,9 @@ class ReflectionFinalizationWorker:
                 logger.exception(
                     "reflection finalization worker tick failed (worker=%s)",
                     self._worker_id,
+                    extra=redact_for_log_extra(
+                        {"worker_id": self._worker_id}
+                    ),
                 )
             await asyncio.sleep(self._poll_interval)
 
@@ -122,16 +126,21 @@ class ReflectionFinalizationWorker:
     ) -> FinalizationWorkerResult:
         """Execute one finalization scan.
 
-        Queries all collecting sessions whose idle deadline has passed,
-        evaluates each one through ``FinalizationEngine``, and executes
-        the resulting decisions.
+        Phase 1: Queries all collecting sessions whose idle deadline has
+        passed, evaluates each one through ``FinalizationEngine``, and
+        executes the resulting decisions.
+
+        Phase 2: Recovers ``finalizing`` sessions that lack entries (from
+        retry, worker interruption, or partial failure).  These are
+        re-normalized through ``normalize_and_create_entry`` whose
+        idempotency check prevents duplicate entries.
 
         Args:
             now: Reference datetime (injectable for tests).
         """
         now = _ensure_utc(now)
 
-        # ── Step 1: find sessions past their idle deadline ──────────────
+        # ── Phase 1: find sessions past their idle deadline ────────────
         sessions = await self._find_due_sessions(now=now)
 
         result = FinalizationWorkerResult(scanned=len(sessions))
@@ -181,7 +190,12 @@ class ReflectionFinalizationWorker:
                 logger.exception(
                     "reflection finalization worker: error processing session %s",
                     getattr(session, "id", "unknown"),
-                    extra={"worker_id": self._worker_id},
+                    extra=redact_for_log_extra(
+                        {
+                            "worker_id": self._worker_id,
+                            "session_id": str(getattr(session, "id", "unknown")),
+                        }
+                    ),
                 )
                 result = FinalizationWorkerResult(
                     scanned=result.scanned,
@@ -192,17 +206,42 @@ class ReflectionFinalizationWorker:
                     errors=result.errors + 1,
                 )
 
-        if result.finalized or result.abandoned:
+        # ── Phase 2: recover finalizing sessions without entries ─────────
+        # Sessions that were retried (processing_failed → finalizing) or
+        # interrupted after finalize_session but before entry creation
+        # are stuck in finalizing with no entry.  We recover them here.
+        retried = await self._collect_retried_sessions()
+
+        for session_row in retried:
+            try:
+                await self._retry_finalizing_session(session_row, now=now)
+            except Exception:
+                logger.exception(
+                    "reflection finalization worker: error recovering "
+                    "retried session %s",
+                    getattr(session_row, "id", getattr(session_row, "get", lambda _: None)("id")),
+                    extra=redact_for_log_extra(
+                        {
+                            "worker_id": self._worker_id,
+                            "session_id": str(
+                                getattr(session_row, "id", getattr(session_row, "get", lambda _: None)("id"))
+                            ),
+                        }
+                    ),
+                )
+
+        if result.finalized or result.abandoned or retried:
             logger.info(
                 "reflection finalization worker tick: scanned=%d finalized=%d "
                 "abandoned=%d skipped_active=%d skipped_idempotent=%d errors=%d "
-                "(worker=%s)",
+                "retried_recovered=%d (worker=%s)",
                 result.scanned,
                 result.finalized,
                 result.abandoned,
                 result.skipped_active,
                 result.skipped_idempotent,
                 result.errors,
+                len(retried),
                 self._worker_id,
             )
 
@@ -322,7 +361,7 @@ class ReflectionFinalizationWorker:
             # fetch).  Retry safety is provided by the idempotency
             # check inside normalize_and_create_entry.
             try:
-                await normalize_and_create_entry(
+                entry = await normalize_and_create_entry(
                     store=store,
                     user_id=session_state.user_id,
                     session_id=session_state.session_id,
@@ -330,12 +369,30 @@ class ReflectionFinalizationWorker:
                     pool=self._pool,
                     processor_version=self._worker_id,
                 )
+                # ── Mark processed to prevent re-processing ──────────
+                # Transition session to processed so that subsequent polls
+                # and retry paths treat it as terminal.  Uses complete_session
+                # (direct status update) rather than mark_session_processed
+                # because the worker does not use the claim mechanism.
+                if entry is not None:
+                    await store.complete_session(
+                        session_id=session_state.session_id,
+                        user_id=session_state.user_id,
+                    )
             except Exception:
                 logger.exception(
                     "finalization worker: normalize+create_entry failed for "
                     "session=%s (session is still finalized — entry creation "
                     "will be retried on next poll via idempotency)",
                     session_state.session_id,
+                    extra=redact_for_log_extra(
+                        {
+                            "session_id": str(session_state.session_id),
+                            "user_id": str(session_state.user_id),
+                            "bot_id": session_state.bot_id,
+                            "worker_id": self._worker_id,
+                        }
+                    ),
                 )
             return decision
 
@@ -358,6 +415,78 @@ class ReflectionFinalizationWorker:
             # completion and topic transitions are handled synchronously
             # in the inbound path (via capture_burst_for_reflection).
             return decision
+
+    # ── Retry recovery ──────────────────────────────────────────────────
+
+    async def _collect_retried_sessions(self) -> list[Any]:
+        """Find ``finalizing`` sessions that lack entries and need recovery.
+
+        These sessions arrived in ``finalizing`` via ``retry_session``
+        (processing_failed → finalizing) or were interrupted after
+        ``finalize_session`` but before ``normalize_and_create_entry``.
+
+        Returns rows with at least: id, user_id, bot_id, status,
+        source_message_ids, opened_at, idle_finalize_at, finalized_at,
+        abandoned_at, topic_id, phase.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT s.id, s.user_id, s.bot_id, s.status,
+                   s.source_message_ids, s.opened_at, s.idle_finalize_at,
+                   s.finalized_at, s.abandoned_at, s.topic_id, s.phase
+            FROM mediator.reflection_sessions s
+            WHERE s.status = 'finalizing'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM mediator.reflection_entries e
+                  WHERE e.session_id = s.id
+              )
+            ORDER BY s.finalized_at ASC NULLS LAST
+            LIMIT $1
+            """,
+            self._batch_size,
+        )
+        return list(rows)
+
+    async def _retry_finalizing_session(
+        self,
+        row: Any,
+        *,
+        now: datetime,
+    ) -> None:
+        """Recover a single ``finalizing`` session that lacks an entry.
+
+        Calls ``normalize_and_create_entry`` which is idempotent — if an
+        entry already exists (race), it returns the existing one.  On
+        success transitions the session to ``processed`` via
+        ``complete_session``.
+        """
+        get = row.get if isinstance(row, dict) else lambda k: row[k]
+        session_id = get("id")
+        user_id = get("user_id")
+        bot_id = get("bot_id") or "unknown"
+
+        store = ReflectionStore(self._pool)
+
+        entry = await normalize_and_create_entry(
+            store=store,
+            user_id=user_id,
+            session_id=session_id,
+            bot_id=bot_id,
+            pool=self._pool,
+            processor_version=self._worker_id,
+        )
+
+        if entry is not None:
+            await store.complete_session(
+                session_id=session_id,
+                user_id=user_id,
+            )
+            logger.info(
+                "finalization worker: recovered retried session=%s entry=%s",
+                session_id,
+                entry.id,
+            )
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

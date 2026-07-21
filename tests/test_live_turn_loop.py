@@ -19,6 +19,9 @@ from app.services.live.turn_loop import (
 )
 
 
+pytestmark = pytest.mark.usefixtures("app_env")
+
+
 class _TurnFakePool:
     def __init__(self, conversation: dict[str, Any], user: dict[str, Any]) -> None:
         self.conversation = conversation

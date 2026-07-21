@@ -283,10 +283,10 @@ async def test_list_reflections_current_only_filters_superseded():
         ctx, ListReflectionsInput(current_only=True)
     )
 
-    # Verify current_only was passed through (SQL uses supersedes_entry_id IS NULL)
+    # Current means the append-only leaf: no successor points at the row.
     assert len(pool.fetch_sqls) >= 1
     sql = pool.fetch_sqls[0]
-    assert "supersedes_entry_id IS NULL" in sql
+    assert "successor.supersedes_entry_id = re.id" in sql
     assert len(result.entries) == 1
 
 
@@ -308,10 +308,35 @@ async def test_list_reflections_current_only_false_includes_superseded():
         ctx, ListReflectionsInput(current_only=False)
     )
 
-    # supersedes_entry_id IS NULL should NOT be in the SQL
+    # The append-only leaf anti-join should not be present for full history.
     sql = pool.fetch_sqls[0]
-    assert "supersedes_entry_id IS NULL" not in sql
+    assert "successor.supersedes_entry_id = re.id" not in sql
     assert len(result.entries) == 1
+
+
+@pytest.mark.anyio
+async def test_get_current_entry_uses_revision_leaf_not_null_pointer():
+    user_id = _uid()
+    session_id = _uid()
+    original_id = _uid()
+    corrected = _make_entry(
+        user_id=user_id,
+        session_id=session_id,
+        revision_number=2,
+        supersedes_entry_id=original_id,
+    )
+    pool = _FakePool(fetchrow_result=_entry_to_row(corrected))
+
+    result = await ReflectionStore(pool).get_current_entry(
+        user_id=user_id,
+        session_id=session_id,
+    )
+
+    assert result is not None
+    assert result.id == corrected.id
+    sql = pool.fetchrow_sqls[0]
+    assert "successor.supersedes_entry_id = re.id" in sql
+    assert "re.supersedes_entry_id IS NULL" not in sql
 
 
 @pytest.mark.anyio
@@ -842,6 +867,8 @@ async def test_correct_reflection_creates_new_revision():
     )
 
     with patch.object(
+        ReflectionStore, "get_entry", return_value=_make_entry(entry_id=old_entry_id, user_id=user_id, session_id=session_id)
+    ), patch.object(
         ReflectionStore, "correct_entry", return_value=new_entry
     ):
         pool = _FakePool()
@@ -860,6 +887,43 @@ async def test_correct_reflection_creates_new_revision():
     assert result.session_id == session_id
     assert result.revision_number == 2
     assert result.supersedes_entry_id == old_entry_id
+
+
+@pytest.mark.anyio
+async def test_correct_reflection_maps_correction_note_to_valid_payload_summary():
+    """Correction note should be stored via the shared envelope, not a custom key."""
+    user_id = _uid()
+    old_entry_id = _uid()
+    session_id = _uid()
+    new_entry = _make_entry(
+        entry_id=_uid(),
+        user_id=user_id,
+        session_id=session_id,
+        revision_number=2,
+        supersedes_entry_id=old_entry_id,
+    )
+
+    with patch.object(
+        ReflectionStore, "get_entry", return_value=_make_entry(entry_id=old_entry_id, user_id=user_id, session_id=session_id)
+    ), patch.object(
+        ReflectionStore, "correct_entry", return_value=new_entry
+    ) as mock_correct:
+        pool = _FakePool()
+        ctx = _make_turn_ctx(user_id=user_id, pool=pool)
+        result = await correct_reflection(
+            ctx,
+            CorrectReflectionInput(
+                supersedes_entry_id=old_entry_id,
+                correction_note="Better phrasing for the correction",
+                plaintext_searchable="better phrasing",
+                summary="updated summary",
+            ),
+        )
+
+    assert result.is_error is False
+    assert mock_correct.await_args.kwargs["payload"] == {
+        "summary": "Better phrasing for the correction"
+    }
 
 
 @pytest.mark.anyio

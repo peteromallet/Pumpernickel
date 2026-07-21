@@ -49,13 +49,15 @@ def _compact(sql: str) -> str:
 # ===========================================================================
 
 
-def test_0064_files_exist_and_are_next_numbered_pair() -> None:
+def test_0064_files_exist_and_follow_0063() -> None:
     numbered = sorted(
         path.name
         for path in MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")
         if not path.name.endswith(".down.sql")
     )
-    assert numbered[-1].startswith("0064_")
+    up_name = UP_PATH.name
+    assert up_name in numbered
+    assert numbered[numbered.index(up_name) - 1].startswith("0063_")
     assert UP_PATH.exists()
     assert DOWN_PATH.exists()
 

@@ -229,7 +229,7 @@ class TestValidation:
     def test_failure_class_invalid_raises(self) -> None:
         from app.services.reflections import _validate_failure_class
 
-        with pytest.raises(ValueError, match="invalid failure_class"):
+        with pytest.raises(ValueError, match="invalid reflection failure_class"):
             _validate_failure_class("bogus")
 
     def test_status_valid_values(self) -> None:
@@ -1398,7 +1398,7 @@ class TestCorrectionImmutability:
                     user_id=user, session_id=session.id, current_only=True,
                 )
                 assert len(entries) == 1
-                assert entries[0].supersedes_entry_id is None
+                assert entries[0].supersedes_entry_id == original.id
                 assert entries[0].revision_number == 2
 
                 # Full history includes both

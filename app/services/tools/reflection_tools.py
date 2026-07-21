@@ -23,6 +23,7 @@ from app.reflections.reconciliation import (
     PoolingTargetEditProbe,
     ReconciliationEngine,
 )
+from app.services.reflection_redaction import redact_for_log_extra
 from app.services.reflections import (
     EntryNotFoundError,
     ReflectionStore,
@@ -157,6 +158,7 @@ async def list_reflections(
         topic_id=args.topic_id,
         current_only=args.current_only,
         limit=args.limit,
+        visible_only=True,
     )
 
     if not entries:
@@ -170,7 +172,11 @@ async def list_reflections(
         session_ids = {e.session_id for e in entries}
         session_map: dict[UUID, Any] = {}
         for sid in session_ids:
-            sess = await store.get_session(user_id=ctx.user_id, session_id=sid)
+            sess = await store.get_session(
+                user_id=ctx.user_id,
+                session_id=sid,
+                visible_only=True,
+            )
             if sess is not None:
                 session_map[sid] = sess
 
@@ -225,7 +231,11 @@ async def get_reflection(
         args.include_internals,
     )
 
-    entry = await store.get_entry(user_id=ctx.user_id, entry_id=args.entry_id)
+    entry = await store.get_entry(
+        user_id=ctx.user_id,
+        entry_id=args.entry_id,
+        visible_only=True,
+    )
 
     if entry is None:
         return GetReflectionOutput(
@@ -236,7 +246,9 @@ async def get_reflection(
     session_classification = None
     if args.include_internals:
         sess = await store.get_session(
-            user_id=ctx.user_id, session_id=entry.session_id
+            user_id=ctx.user_id,
+            session_id=entry.session_id,
+            visible_only=True,
         )
         if sess is not None:
             session_classification = sess.classification_metadata
@@ -285,7 +297,7 @@ async def search_reflections(
         ctx.user_id,
         bot_id,
         args.topic_id,
-        args.query,
+        "[REDACTED search query]",
         args.mode,
         args.include_internals,
     )
@@ -308,7 +320,20 @@ async def search_reflections(
             ),
         )
     except Exception:
-        logger.exception("search_reflections retrieval failed")
+        logger.exception(
+            "search_reflections retrieval failed for user=%s bot=%s topic=%s",
+            ctx.user_id,
+            bot_id,
+            args.topic_id,
+            extra=redact_for_log_extra(
+                {
+                    "user_id": str(ctx.user_id),
+                    "bot_id": bot_id,
+                    "topic_id": str(args.topic_id) if args.topic_id else None,
+                    "mode": args.mode,
+                }
+            ),
+        )
         return SearchReflectionsOutput(
             is_error=True,
             error="Retrieval search failed.  Try a different query or use list_reflections.",
@@ -329,7 +354,9 @@ async def search_reflections(
         ]
         for eid in entry_ids:
             entry = await store.get_entry(
-                user_id=ctx.user_id or ctx.user.id, entry_id=eid
+                user_id=ctx.user_id or ctx.user.id,
+                entry_id=eid,
+                visible_only=True,
             )
             if entry is not None:
                 entry_map[eid] = entry
@@ -337,6 +364,7 @@ async def search_reflections(
                     sess = await store.get_session(
                         user_id=ctx.user_id or ctx.user.id,
                         session_id=entry.session_id,
+                        visible_only=True,
                     )
                     if sess is not None:
                         session_map[entry.session_id] = sess
@@ -496,6 +524,12 @@ async def _reconcile_after_correction(
                 "_reconcile_after_correction: could not build target probe; "
                 "proceeding without independent-edit detection",
                 exc_info=True,
+                extra=redact_for_log_extra(
+                    {
+                        "superseded_entry_id": str(superseded_entry_id),
+                        "user_id": str(user_id),
+                    }
+                ),
             )
             probe = None
 
@@ -513,6 +547,13 @@ async def _reconcile_after_correction(
             "superseded_entry=%s corrected_entry=%s; correction is unchanged",
             superseded_entry_id,
             corrected_entry_id,
+            extra=redact_for_log_extra(
+                {
+                    "superseded_entry_id": str(superseded_entry_id),
+                    "corrected_entry_id": str(corrected_entry_id),
+                    "user_id": str(user_id),
+                }
+            ),
         )
 
 
@@ -553,7 +594,23 @@ async def correct_reflection(
     # on the read side).
     correction_payload: dict[str, Any] = {}
     if args.correction_note:
-        correction_payload["correction_note"] = args.correction_note
+        # Corrections still go through the shared reflection envelope validator.
+        # Store the note under the standard summary field rather than inventing
+        # a correction-only top-level payload key.
+        correction_payload["summary"] = args.correction_note
+
+    visible_entry = await store.get_entry(
+        user_id=ctx.user_id,
+        entry_id=args.supersedes_entry_id,
+        visible_only=True,
+    )
+    if visible_entry is None:
+        return CorrectReflectionOutput(
+            is_error=True,
+            error=(
+                f"Entry {args.supersedes_entry_id} not found or not owned by you"
+            ),
+        )
 
     try:
         entry = await store.correct_entry(
@@ -572,7 +629,19 @@ async def correct_reflection(
             ),
         )
     except Exception as exc:
-        logger.exception("correct_reflection failed")
+        logger.exception(
+            "correct_reflection failed for user=%s supersedes=%s bot=%s",
+            ctx.user_id,
+            args.supersedes_entry_id,
+            bot_id,
+            extra=redact_for_log_extra(
+                {
+                    "user_id": str(ctx.user_id),
+                    "supersedes_entry_id": str(args.supersedes_entry_id),
+                    "bot_id": bot_id,
+                }
+            ),
+        )
         return CorrectReflectionOutput(
             is_error=True,
             error=f"Correction failed: {exc}",
