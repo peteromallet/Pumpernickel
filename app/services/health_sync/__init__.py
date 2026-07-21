@@ -96,6 +96,11 @@ from app.services.health_sync.worker import (
     HealthSyncWorkerResult,
     health_sync_resource_types,
 )
+from app.services.health_sync.export import export_withings_data
+from app.services.health_sync.weekly_summary import (
+    WeeklyHealthDigest,
+    generate_weekly_digest,
+)
 
 __all__ = [
     "ConnectionFreshness",
@@ -176,4 +181,7 @@ __all__ = [
     "store_connection_tokens",
     "reconcile_connections",
     "health_sync_resource_types",
+    "WeeklyHealthDigest",
+    "generate_weekly_digest",
+    "export_withings_data",
 ]

@@ -199,7 +199,7 @@ class WeeklyWorkoutSummaryResult:
 # ---------------------------------------------------------------------------
 
 _SELECT_CONNECTION_FRESHNESS = """\
-    SELECT last_success_at
+    SELECT last_success_at, provider
     FROM mediator.health_connections
     WHERE id = $1
       AND user_id = $2
@@ -396,6 +396,15 @@ async def get_connection_freshness(
         last_success_at is not None
         and (ref - last_success_at) <= _FRESHNESS_WINDOW
     )
+    if not is_fresh:
+        _provider = row.get("provider") if row is not None else None
+        if _provider:
+            from app.services.health_sync import metrics as health_metrics
+
+            health_metrics.record_stale_freshness(
+                provider=_provider,
+                resource_type="connection",
+            )
     return ConnectionFreshness(
         connection_id=connection_id,
         last_success_at=last_success_at,

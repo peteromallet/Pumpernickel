@@ -6,10 +6,13 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 import inspect
+import time
 from typing import Any
 from uuid import UUID
 
+from app.services.health_sync import metrics as health_metrics
 from app.services.health_sync.models import (
+    HealthProviderSlug,
     HealthResourceType,
     HealthSyncCursor,
     HealthSyncError,
@@ -28,6 +31,18 @@ from app.services.health_sync.repository import HealthDirtyCategory, HealthSyncR
 
 DEFAULT_SYNC_MAX_ATTEMPTS = 3
 DEFAULT_SYNC_RETRY_AFTER_CAP_SECONDS = 30
+
+
+def _empty_workout() -> Any:
+    """Return a minimal NormalizedWorkout placeholder for tombstone projection calls."""
+    from app.services.health_sync.models import NormalizedWorkout
+
+    return NormalizedWorkout(
+        started_at=_utc_now(),
+        local_date=_utc_now().date(),
+        workout_type="unknown",
+        attribution={},
+    )
 
 
 def _utc_now() -> datetime:
@@ -175,6 +190,11 @@ async def sync_connection_resource(
     dirty_id: UUID | None = None,
     cursor_seed: HealthSyncCursor | None = None,
     now: datetime | None = None,
+    projection_loader: Callable[
+        [UUID], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ]
+    | None = None,
+    projection_enabled: bool = False,
 ) -> HealthSyncOutcome:
     normalized_resource = HealthResourceType(resource_type)
     normalized_seed = _normalized_cursor_seed(
@@ -221,6 +241,19 @@ async def sync_connection_resource(
             raise RuntimeError("health provider reported pagination without a continuation cursor")
         current_cursor = result.next_cursor
 
+    provider_slug = provider.capabilities.provider
+
+    health_metrics.record_sync_fetched(
+        provider=provider_slug,
+        resource_type=normalized_resource,
+        count=fetched_count,
+    )
+    health_metrics.record_sync_deleted(
+        provider=provider_slug,
+        resource_type=normalized_resource,
+        count=deleted_count,
+    )
+
     timestamp = _normalize_datetime(now or _utc_now())
     assert timestamp is not None
     cursor_after = _cursor_for_persistence(
@@ -228,6 +261,9 @@ async def sync_connection_resource(
         cursor_before=cursor_before,
         candidate=cursor_candidate,
     )
+
+    # Collect workout projections to apply after the transaction.
+    _workout_projections: list[tuple[Any, UUID, bool]] = []
 
     normalized_inserted = 0
     async with repository.transaction() as connection:
@@ -318,6 +354,9 @@ async def sync_connection_resource(
                         workout=normalized_workout,
                         executor=connection,
                     )
+                    _workout_projections.append(
+                        (normalized_workout, stored.record_id, False)
+                    )
         for tombstone in tombstones_to_store:
             stored = await repository.tombstone_source_record(
                 connection_id=connection_id,
@@ -347,6 +386,7 @@ async def sync_connection_resource(
                     user_id=user_id,
                     executor=connection,
                 )
+                _workout_projections.append((None, stored.record_id, True))
         if cursor_after is not None:
             await repository.store_cursor(
                 connection_id=connection_id,
@@ -360,6 +400,40 @@ async def sync_connection_resource(
                 cleared_at=timestamp,
                 executor=connection,
             )
+
+    # ── Apply workout projections (after transaction commit) ────────────
+    if (
+        projection_enabled
+        and projection_loader is not None
+        and _workout_projections
+    ):
+        try:
+            commitments_raw = projection_loader(user_id)
+            if inspect.isawaitable(commitments_raw):
+                commitments_raw = await commitments_raw
+            commitments = list(commitments_raw) if commitments_raw else []
+        except Exception:
+            commitments = []
+
+        if commitments:
+            from app.services.health_sync.projection_applicator import (
+                apply_workout_projection,
+            )
+
+            for workout, source_record_id, is_tombstone in _workout_projections:
+                try:
+                    await apply_workout_projection(
+                        repository=repository,
+                        workout=workout if workout is not None else _empty_workout(),
+                        source_record_id=source_record_id,
+                        connection_id=connection_id,
+                        user_id=user_id,
+                        commitments=commitments,
+                        enabled=True,
+                        is_tombstone=is_tombstone,
+                    )
+                except Exception:
+                    pass
 
     return HealthSyncOutcome(
         resource_type=normalized_resource,
@@ -388,10 +462,22 @@ async def sync_connection_resource_safely(
     retry_after_cap_seconds: int = DEFAULT_SYNC_RETRY_AFTER_CAP_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: datetime | None = None,
+    projection_loader: Callable[
+        [UUID], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ]
+    | None = None,
+    projection_enabled: bool = False,
 ) -> HealthSyncOutcome:
     normalized_resource = HealthResourceType(resource_type)
+    provider_slug = provider.capabilities.provider
     timestamp = _normalize_datetime(now or _utc_now()) or _utc_now()
     initial_cursor_before: HealthSyncCursor | None = None
+    started_at = time.monotonic()
+
+    health_metrics.record_sync_attempt(
+        provider=provider_slug,
+        resource_type=normalized_resource,
+    )
 
     for attempt in range(1, max(1, int(max_attempts)) + 1):
         try:
@@ -405,10 +491,24 @@ async def sync_connection_resource_safely(
                 dirty_id=dirty_id,
                 cursor_seed=cursor_seed,
                 now=timestamp,
+                projection_loader=projection_loader,
+                projection_enabled=projection_enabled,
             )
             await repository.record_sync_success(
                 connection_id=connection_id,
                 synced_at=timestamp,
+            )
+            duration_s = time.monotonic() - started_at
+            health_metrics.record_sync_outcome(
+                provider=provider_slug,
+                resource_type=normalized_resource,
+                status=HealthSyncStatus.COMPLETED,
+            )
+            health_metrics.record_sync_duration(
+                provider=provider_slug,
+                resource_type=normalized_resource,
+                duration_seconds=duration_s,
+                status=HealthSyncStatus.COMPLETED,
             )
             return outcome
         except HealthSyncCursorError as exc:
@@ -424,6 +524,25 @@ async def sync_connection_resource_safely(
                 connection_id=connection_id,
                 error=exc.error,
                 errored_at=timestamp,
+            )
+            duration_s = time.monotonic() - started_at
+            health_metrics.record_cursor_error(
+                provider=provider_slug,
+                resource_type=normalized_resource,
+                error_kind=exc.error.kind,
+            )
+            health_metrics.record_sync_outcome(
+                provider=provider_slug,
+                resource_type=normalized_resource,
+                status=HealthSyncStatus.FAILED,
+                error_kind=exc.error.kind,
+                retryable=False,
+            )
+            health_metrics.record_sync_duration(
+                provider=provider_slug,
+                resource_type=normalized_resource,
+                duration_seconds=duration_s,
+                status=HealthSyncStatus.FAILED,
             )
             return _failed_outcome(
                 resource_type=normalized_resource,
@@ -446,12 +565,31 @@ async def sync_connection_resource_safely(
                 retry_after_cap_seconds=retry_after_cap_seconds,
             )
             if delay_seconds is not None and attempt < max(1, int(max_attempts)):
+                health_metrics.record_sync_retry(
+                    provider=provider_slug,
+                    resource_type=normalized_resource,
+                    retryable=True,
+                )
                 await sleep(delay_seconds)
                 continue
             await repository.record_sync_error(
                 connection_id=connection_id,
                 error=error,
                 errored_at=timestamp,
+            )
+            duration_s = time.monotonic() - started_at
+            health_metrics.record_sync_outcome(
+                provider=provider_slug,
+                resource_type=normalized_resource,
+                status=HealthSyncStatus.FAILED,
+                error_kind=error.kind,
+                retryable=error.retryable,
+            )
+            health_metrics.record_sync_duration(
+                provider=provider_slug,
+                resource_type=normalized_resource,
+                duration_seconds=duration_s,
+                status=HealthSyncStatus.FAILED,
             )
             return _failed_outcome(
                 resource_type=normalized_resource,
@@ -470,6 +608,11 @@ async def sync_claimed_dirty_category(
     retry_after_cap_seconds: int = DEFAULT_SYNC_RETRY_AFTER_CAP_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     now: datetime | None = None,
+    projection_loader: Callable[
+        [UUID], list[dict[str, Any]] | Awaitable[list[dict[str, Any]]]
+    ]
+    | None = None,
+    projection_enabled: bool = False,
 ) -> HealthSyncOutcome:
     return await sync_connection_resource_safely(
         repository=repository,
@@ -483,6 +626,8 @@ async def sync_claimed_dirty_category(
         retry_after_cap_seconds=retry_after_cap_seconds,
         sleep=sleep,
         now=now,
+        projection_loader=projection_loader,
+        projection_enabled=projection_enabled,
     )
 
 

@@ -9,7 +9,9 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from app.config import Settings, get_settings
+from app.services.health_sync import metrics as health_metrics
 from app.services.health_sync.models import (
+    HealthProviderSlug,
     HealthResourceType,
     HealthSyncError,
     HealthSyncErrorKind,
@@ -166,7 +168,7 @@ class HealthSyncWorker:
             skipped_connections = len(summary.skipped_connection_ids)
             scanned_connections = summary.scanned_connection_count
 
-        return HealthSyncWorkerResult(
+        result = HealthSyncWorkerResult(
             claimed=len(claimed),
             synced=synced,
             failed=failed,
@@ -175,6 +177,19 @@ class HealthSyncWorker:
             skipped_connections=skipped_connections,
             scanned_connections=scanned_connections,
         )
+
+        health_metrics.record_worker_scan(
+            provider=HealthProviderSlug.WITHINGS,
+            claimed=result.claimed,
+            synced=result.synced,
+            failed=result.failed,
+            skipped_disabled=result.skipped_disabled,
+            reconciliation_outcomes=result.reconciliation_outcomes,
+            skipped_connections=result.skipped_connections,
+            scanned_connections=result.scanned_connections,
+        )
+
+        return result
 
     async def _sync_dirty_category(
         self,

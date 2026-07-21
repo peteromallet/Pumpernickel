@@ -17,10 +17,12 @@ from app.routers.live_voice import get_current_user as get_live_voice_current_us
 from app.services.health_sync import (
     HealthResourceType,
     WithingsProvider,
+    export_withings_data,
     load_connection_tokens,
     WITHINGS_PROVIDER_CAPABILITIES,
 )
 from app.services.health_sync.oauth_state import get_oauth_state_store
+from app.services.health_sync.repository import repository_for
 
 router = APIRouter()
 
@@ -60,11 +62,7 @@ def _selected_resource_types(
         enabled.append(HealthResourceType.WORKOUT)
     if settings.health_sync_sleep_enabled:
         enabled.append(HealthResourceType.SLEEP)
-    if enabled:
-        return tuple(enabled)
-    return tuple(
-        category.resource_type for category in WITHINGS_PROVIDER_CAPABILITIES.categories
-    )
+    return tuple(enabled)
 
 
 def _required_scopes(resource_types: tuple[HealthResourceType, ...]) -> list[str]:
@@ -190,10 +188,19 @@ async def withings_resync(
     if row is None:
         raise HTTPException(status_code=404, detail="Withings connection not found")
     resource_types = _selected_resource_types(None, settings)
+    repo = repository_for(pool)
+    for resource_type in resource_types:
+        await repo.mark_dirty(
+            connection_id=row["id"],
+            user_id=user_id,
+            provider="withings",
+            resource_type=resource_type,
+            reason="manual",
+        )
     return {
         "provider": "withings",
         "status": "accepted",
-        "detail": "Resync signaling is queued for a later milestone.",
+        "detail": "Resync queued for enabled categories.",
         "resource_types": [resource_type.value for resource_type in resource_types],
         "connection": _metadata_only_connection(row),
     }
@@ -249,6 +256,7 @@ async def withings_disconnect(
 
 @router.delete("/api/health/devices/withings")
 async def withings_delete(
+    request: Request,
     pool: Any = Depends(get_pool),
     user_id: UUID = Depends(get_health_current_user),
     settings: Settings = Depends(get_settings),
@@ -259,34 +267,55 @@ async def withings_delete(
     current = await _fetch_connection(pool, user_id)
     if current is None:
         raise HTTPException(status_code=404, detail="Withings connection not found")
-    await pool.execute(
-        """
-        DELETE FROM mediator.health_source_records
-        WHERE connection_id = $1
-        """,
-        current["id"],
-    )
-    row = await pool.fetchrow(
-        """
-        UPDATE mediator.health_connections
-        SET status = 'deleted',
-            access_token_encrypted = NULL,
-            refresh_token_encrypted = NULL,
-            access_token_expires_at = NULL,
-            refresh_token_expires_at = NULL,
-            deleted_at = COALESCE(deleted_at, now()),
-            revoked_at = COALESCE(revoked_at, now()),
-            updated_at = now()
-        WHERE id = $1 AND deleted_at IS NULL
-        RETURNING status, granted_scopes, granted_at, last_success_at, last_error_at,
-                  last_error_code, disconnected_at, revoked_at, deleted_at, updated_at
-        """,
-        current["id"],
-    )
-    if row is None:
+    # Best-effort revoke/unsubscribe before local tear-down,
+    # mirroring the disconnect intent.
+    try:
+        tokens = await load_connection_tokens(pool, connection_id=current["id"])
+        if tokens.access_token:
+            await _withings_provider(request, settings).revoke(
+                access_token=tokens.access_token,
+                refresh_token=tokens.refresh_token,
+            )
+    except Exception:
+        pass
+    try:
+        repo = repository_for(pool)
+        record = await repo.delete_connection_data(
+            connection_id=current["id"],
+            user_id=user_id,
+        )
+    except LookupError:
         raise HTTPException(status_code=404, detail="Withings connection not found")
     return {
         "provider": "withings",
         "status": "deleted",
-        "connection": _metadata_only_connection(row),
+        "connection": _metadata_only_connection(
+            {
+                "status": record.status,
+                "granted_scopes": sorted(record.granted_scopes),
+                "granted_at": record.updated_at,
+                "last_success_at": None,
+                "last_error_at": None,
+                "last_error_code": None,
+                "disconnected_at": None,
+                "revoked_at": record.updated_at,
+                "deleted_at": record.updated_at,
+                "updated_at": record.updated_at,
+            }
+        ),
     }
+
+
+@router.get("/api/health/devices/withings/export")
+async def withings_export(
+    pool: Any = Depends(get_pool),
+    user_id: UUID = Depends(get_health_current_user),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    if not settings.health_sync_enabled:
+        status_code, payload = _feature_disabled_response()
+        return JSONResponse(status_code=status_code, content=payload)
+    row = await _fetch_connection(pool, user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Withings connection not found")
+    return await export_withings_data(pool, user_id=user_id)

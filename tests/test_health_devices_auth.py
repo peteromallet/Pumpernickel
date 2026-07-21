@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -43,6 +44,7 @@ class HealthPool:
         self._user_id = user_id
         self._row = None
         self._deleted_source_record_count = 0
+        self._dirty_categories: list[dict[str, Any]] = []
         if user_id is not None:
             self._row = {
                 "id": uuid4(),
@@ -105,6 +107,42 @@ class HealthPool:
             self._row["access_token_expires_at"] = None
             self._row["refresh_token_expires_at"] = None
             return self._row
+        if compact.startswith("INSERT INTO mediator.health_dirty_categories"):
+            connection_id, user_id, provider, resource_type, reason, source_receipt_id, marked_at = args
+            if connection_id != self._row["id"]:
+                raise AssertionError(f"Dirty marking for wrong connection: {connection_id}")
+            existing = next(
+                (
+                    r
+                    for r in self._dirty_categories
+                    if r["connection_id"] == connection_id and r["resource_type"] == resource_type and r.get("cleared_at") is None
+                ),
+                None,
+            )
+            if existing is None:
+                dirty_id = uuid4()
+                dirty_row = {
+                    "id": dirty_id,
+                    "connection_id": connection_id,
+                    "user_id": user_id,
+                    "provider": provider,
+                    "resource_type": resource_type,
+                    "reason": reason,
+                    "source_receipt_id": source_receipt_id,
+                    "attempts": 0,
+                    "marked_at": marked_at,
+                    "claimed_at": None,
+                    "claimed_by": None,
+                    "cleared_at": None,
+                }
+                self._dirty_categories.append(dirty_row)
+                return dict(dirty_row)
+            existing["reason"] = reason
+            existing["source_receipt_id"] = source_receipt_id
+            existing["marked_at"] = max(existing["marked_at"], marked_at)
+            existing["claimed_at"] = None
+            existing["claimed_by"] = None
+            return dict(existing)
         raise AssertionError(f"Unexpected SQL: {compact}")
 
     async def execute(self, sql: str, *args: Any) -> str:
@@ -114,7 +152,20 @@ class HealthPool:
                 return "DELETE 0"
             self._deleted_source_record_count = 1
             return "DELETE 1"
+        # Silently accept all other DELETEs (repository-driven cleanup).
+        if compact.startswith("DELETE FROM"):
+            return "DELETE 0"
         raise AssertionError(f"Unexpected SQL: {compact}")
+
+    @asynccontextmanager
+    async def acquire(self):
+        """Minimal acquire that yields self as the connection."""
+        yield self
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Nested transaction passthrough."""
+        yield
 
 
 def _prime(monkeypatch: pytest.MonkeyPatch, *, auth_enabled: bool) -> None:
@@ -167,7 +218,8 @@ def test_authenticated_routes_return_metadata_only(monkeypatch: pytest.MonkeyPat
     _prime(monkeypatch, auth_enabled=True)
     token = live_jwt.mint(user_id=str(user_id))
     headers = {"Authorization": f"Bearer {token}"}
-    client = _client(HealthPool(user_id))
+    pool = HealthPool(user_id)
+    client = _client(pool)
 
     connect = client.post(
         "/api/health/devices/withings/connect",
@@ -186,7 +238,39 @@ def test_authenticated_routes_return_metadata_only(monkeypatch: pytest.MonkeyPat
 
     resync = client.post("/api/health/devices/withings/resync", headers=headers)
     assert resync.status_code == 200, resync.text
-    assert resync.json()["status"] == "accepted"
+    resync_body = resync.json()
+    assert resync_body["status"] == "accepted"
+    assert resync_body["detail"] == "Resync queued for enabled categories."
+
+    # Verify dirty categories were marked for each enabled resource type
+    assert len(pool._dirty_categories) == 3
+    dirty_resource_types = {d["resource_type"] for d in pool._dirty_categories}
+    assert dirty_resource_types == {"measurement", "workout", "sleep"}
+    for dirty in pool._dirty_categories:
+        assert dirty["connection_id"] == pool._row["id"]
+        assert dirty["user_id"] == user_id
+        assert dirty["provider"] == "withings"
+        assert dirty["reason"] == "manual"
+
+    # Verify resync response is metadata-only: no cursor, tokens, raw payloads,
+    # provider user ids, device ids, or health values
+    resync_str = str(resync_body)
+    for forbidden_key in (
+        "access_token",
+        "refresh_token",
+        "oauth_code",
+        "raw_payload",
+        "cursor_state",
+        "provider_user_id",
+        "external_user_id",
+        "device_id",
+        "steps",
+        "weight_kg",
+        "heart_rate",
+        "value_numeric",
+        "sleep_score",
+    ):
+        assert forbidden_key not in resync_str, f"'{forbidden_key}' leaked into resync response: {resync_str}"
 
     disconnect = client.post("/api/health/devices/withings/disconnect", headers=headers)
     assert disconnect.status_code == 200, disconnect.text
@@ -201,13 +285,109 @@ def test_authenticated_routes_return_metadata_only(monkeypatch: pytest.MonkeyPat
         {
             "connect": connect_body,
             "status": status.json(),
-            "resync": resync.json(),
+            "resync": resync_body,
             "disconnect": disconnect.json(),
             "delete": delete.json(),
         }
     )
     for forbidden_key in ("access_token", "refresh_token", "oauth_code", "raw_payload", "cursor_state"):
         assert forbidden_key not in combined
+
+
+def test_resync_returns_503_when_health_sync_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    _prime(monkeypatch, auth_enabled=True)
+    monkeypatch.setenv("HEALTH_SYNC_ENABLED", "false")
+    get_settings.cache_clear()
+    user_id = uuid4()
+    token = live_jwt.mint(user_id=str(user_id))
+    headers = {"Authorization": f"Bearer {token}"}
+    client = _client(HealthPool(user_id))
+
+    response = client.post("/api/health/devices/withings/resync", headers=headers)
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body["provider"] == "withings"
+    assert body["status"] == "unavailable"
+    assert "detail" in body
+
+
+def test_resync_returns_404_when_no_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    _prime(monkeypatch, auth_enabled=True)
+    user_id = uuid4()
+    token = live_jwt.mint(user_id=str(user_id))
+    headers = {"Authorization": f"Bearer {token}"}
+    client = _client(HealthPool())  # No user_id → no connection
+
+    response = client.post("/api/health/devices/withings/resync", headers=headers)
+    assert response.status_code == 404, response.text
+    assert "Withings connection not found" in response.json()["detail"]
+
+
+def test_resync_scopes_to_authenticated_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the authenticated user's active Withings connection is dirtied."""
+    _prime(monkeypatch, auth_enabled=True)
+    user_a = uuid4()
+    user_b = uuid4()
+    token_a = live_jwt.mint(user_id=str(user_a))
+    pool = HealthPool(user_a)
+    client = _client(pool)
+
+    # User B's token should NOT match user A's connection
+    token_b = live_jwt.mint(user_id=str(user_b))
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+    response_b = client.post("/api/health/devices/withings/resync", headers=headers_b)
+    assert response_b.status_code == 404, f"User B should not find User A's connection: {response_b.text}"
+
+    # User A's token matches
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    response_a = client.post("/api/health/devices/withings/resync", headers=headers_a)
+    assert response_a.status_code == 200, response_a.text
+    body_a = response_a.json()
+    assert body_a["status"] == "accepted"
+
+    # All dirty categories belong to user A's connection
+    assert len(pool._dirty_categories) == 3
+    for dirty in pool._dirty_categories:
+        assert dirty["user_id"] == user_a
+        assert dirty["connection_id"] == pool._row["id"]
+
+
+def test_resync_response_has_required_metadata_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    _prime(monkeypatch, auth_enabled=True)
+    user_id = uuid4()
+    token = live_jwt.mint(user_id=str(user_id))
+    headers = {"Authorization": f"Bearer {token}"}
+    client = _client(HealthPool(user_id))
+
+    response = client.post("/api/health/devices/withings/resync", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    # Top-level shape
+    assert body["provider"] == "withings"
+    assert body["status"] == "accepted"
+    assert isinstance(body["detail"], str)
+    assert isinstance(body["resource_types"], list)
+    for rt in body["resource_types"]:
+        assert rt in ("measurement", "workout", "sleep")
+
+    # Connection metadata shape (no sensitive fields)
+    conn = body["connection"]
+    assert isinstance(conn["status"], str)
+    assert isinstance(conn["granted_scopes"], list)
+    assert isinstance(conn["updated_at"], str) or conn["updated_at"] is None
+
+    # These fields must never appear in the response
+    forbidden = (
+        "cursor_state", "access_token", "refresh_token",
+        "provider_user_id", "external_user_id",
+        "device_id", "source_device_id",
+        "steps", "weight_kg", "heart_rate", "value_numeric",
+        "sleep_score", "raw_payload", "oauth_code",
+    )
+    body_str = str(body)
+    for key in forbidden:
+        assert key not in body_str, f"'{key}' found in resync response"
 
 
 def test_dev_fallback_allows_health_routes_without_token(monkeypatch: pytest.MonkeyPatch) -> None:

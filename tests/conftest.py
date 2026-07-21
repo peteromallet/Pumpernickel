@@ -1197,6 +1197,16 @@ class FakePool:
             if row.get("user_id") != args[1]:
                 return None
             return {"last_success_at": row.get("last_success_at")}
+        if compact.startswith("SELECT last_success_at, provider FROM mediator.health_connections"):
+            row = self.health_connections.get(args[0])
+            if row is None or row.get("deleted_at") is not None:
+                return None
+            if row.get("user_id") != args[1]:
+                return None
+            return {
+                "last_success_at": row.get("last_success_at"),
+                "provider": row.get("provider", "withings"),
+            }
         if (
             compact.startswith("SELECT metric, measured_at, value_numeric, canonical_unit,")
             and "FROM mediator.health_normalized_measurements" in compact
@@ -1349,8 +1359,48 @@ class FakePool:
         return None
 
     def _health_execute(self, compact: str, *args: Any) -> str | None:
-        if compact.startswith("DELETE FROM mediator.health_source_records WHERE connection_id = $1"):
+        # ── Connection-scoped deletes (delete_connection_data orchestrator).
+        # Every statement is double-scoped by connection_id AND user_id.
+        if (
+            compact.startswith("DELETE FROM mediator.events WHERE user_id = $2")
+            and "mediator.health_source_to_event_projections" in compact
+        ):
+            return self._health_delete_connection_projection_owned_events(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_source_to_event_projections WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_projection_ledger(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_dirty_categories WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_dirty_categories(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_webhook_receipts WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_webhook_receipts(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_source_records WHERE connection_id = $1"
+        ):
             return self._health_delete_source_records(*args)
+        if compact.startswith(
+            "DELETE FROM mediator.health_normalized_measurements WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_normalized(
+                self.health_normalized_measurements, *args
+            )
+        if compact.startswith(
+            "DELETE FROM mediator.health_normalized_sleep WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_normalized(
+                self.health_normalized_sleep, *args
+            )
+        if compact.startswith(
+            "DELETE FROM mediator.health_normalized_workouts WHERE connection_id = $1"
+        ):
+            return self._health_delete_connection_normalized(
+                self.health_normalized_workouts, *args
+            )
+        # ── Single-record deletes (tombstone reversal path) ─────────────────
         if compact.startswith("DELETE FROM mediator.health_normalized_measurements"):
             return self._health_delete_normalized_measurements(*args)
         if compact.startswith("DELETE FROM mediator.health_normalized_sleep"):
@@ -1643,11 +1693,15 @@ class FakePool:
         }
 
     def _health_delete_connection(self, *args: Any) -> dict[str, Any] | None:
-        (connection_id,) = args
+        connection_id, user_id, deleted_at = args
         row = self.health_connections.get(connection_id)
-        if row is None or row.get("deleted_at") is not None:
+        if (
+            row is None
+            or row.get("deleted_at") is not None
+            or row.get("user_id") != user_id
+        ):
             return None
-        timestamp = datetime.now(UTC)
+        timestamp = deleted_at or datetime.now(UTC)
         row.update(
             {
                 "status": "deleted",
@@ -1655,22 +1709,23 @@ class FakePool:
                 "refresh_token_encrypted": None,
                 "access_token_expires_at": None,
                 "refresh_token_expires_at": None,
+                "refresh_token_rotated_at": None,
                 "deleted_at": row.get("deleted_at") or timestamp,
                 "revoked_at": row.get("revoked_at") or timestamp,
                 "updated_at": timestamp,
             }
         )
         return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "provider": row["provider"],
+            "external_user_id": row.get("external_user_id"),
             "status": row["status"],
             "granted_scopes": list(row.get("granted_scopes") or []),
-            "granted_at": row.get("granted_at"),
-            "last_success_at": row.get("last_success_at"),
-            "last_error_at": row.get("last_error_at"),
-            "last_error_code": row.get("last_error_code"),
-            "disconnected_at": row.get("disconnected_at"),
-            "revoked_at": row.get("revoked_at"),
-            "deleted_at": row.get("deleted_at"),
-            "updated_at": row.get("updated_at"),
+            "cursor_state": dict(row.get("cursor_state") or {}),
+            "updated_at": row["updated_at"],
+            "deleted_at": row["deleted_at"],
+            "revoked_at": row["revoked_at"],
         }
 
     def _health_list_connections(self, *args: Any) -> list[dict[str, Any]]:
@@ -1684,16 +1739,85 @@ class FakePool:
         return rows[:limit]
 
     def _health_delete_source_records(self, *args: Any) -> str:
-        (connection_id,) = args
+        connection_id, user_id = args
         record_ids = [
             record_id
             for record_id, row in self.health_source_records.items()
             if row["connection_id"] == connection_id
+            and row["user_id"] == user_id
         ]
         for record_id in record_ids:
             row = self.health_source_records.pop(record_id)
             key = (row["connection_id"], row["resource_type"], row["external_id"])
             self.health_source_records_by_key.pop(key, None)
+        return f"DELETE {len(record_ids)}"
+
+    # ── Connection-scoped delete helpers (delete_connection_data) ────────────
+
+    def _health_delete_connection_normalized(
+        self, store: dict[Any, dict[str, Any]], *args: Any
+    ) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in store.items()
+            if row["connection_id"] == connection_id and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            store.pop(rid)
+        return f"DELETE {len(record_ids)}"
+
+    def _health_delete_connection_projection_owned_events(self, *args: Any) -> str:
+        connection_id, user_id = args
+        event_ids = {
+            row["event_id"]
+            for row in self.health_source_to_event_projections.values()
+            if row["connection_id"] == connection_id
+            and row["user_id"] == user_id
+            and row.get("event_id") is not None
+        }
+        deleted = 0
+        for event_id in list(event_ids):
+            row = self.events.get(event_id)
+            if row is not None and row.get("user_id") == user_id:
+                del self.events[event_id]
+                deleted += 1
+        return f"DELETE {deleted}"
+
+    def _health_delete_connection_projection_ledger(self, *args: Any) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in self.health_source_to_event_projections.items()
+            if row["connection_id"] == connection_id and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_source_to_event_projections.pop(rid)
+        return f"DELETE {len(record_ids)}"
+
+    def _health_delete_connection_dirty_categories(self, *args: Any) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in self.health_dirty_categories.items()
+            if row["connection_id"] == connection_id and row["user_id"] == user_id
+        ]
+        for rid in record_ids:
+            self.health_dirty_categories.pop(rid)
+        return f"DELETE {len(record_ids)}"
+
+    def _health_delete_connection_webhook_receipts(self, *args: Any) -> str:
+        connection_id, user_id = args
+        record_ids = [
+            rid
+            for rid, row in self.health_webhook_receipts.items()
+            if row.get("connection_id") == connection_id
+            and row.get("user_id") == user_id
+        ]
+        for rid in record_ids:
+            row = self.health_webhook_receipts.pop(rid)
+            payload_key = (row.get("provider"), row.get("payload_hash"))
+            self.health_webhook_receipts_by_payload.pop(payload_key, None)
         return f"DELETE {len(record_ids)}"
 
     def _health_delete_normalized_measurements(self, *args: Any) -> str:

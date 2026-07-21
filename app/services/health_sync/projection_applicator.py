@@ -221,6 +221,8 @@ async def apply_workout_projection(
         executor=executor,
     )
 
+    _provider = workout.attribution.get("provider", "withings")
+
     # ── 3. Tombstone path ──────────────────────────────────────────────
     if is_tombstone:
         if existing is not None:
@@ -236,10 +238,22 @@ async def apply_workout_projection(
                 now=_utc_now(),
                 executor=executor,
             )
+            from app.services.health_sync import metrics as health_metrics
+
+            health_metrics.record_projection_outcome(
+                provider=_provider,
+                status="removed",
+            )
         return None
 
     # ── 4. Idempotent replay: same version, no change ──────────────────
     if existing is not None and existing.projection_version == projection_version:
+        from app.services.health_sync import metrics as health_metrics
+
+        health_metrics.record_projection_outcome(
+            provider=_provider,
+            status="projected",
+        )
         return existing
 
     # ── 5. Revision / rematch path ─────────────────────────────────────
@@ -268,7 +282,7 @@ async def apply_workout_projection(
             )
 
         # Try to create a new projection for the revised workout.
-        return await _create_projection(
+        result = await _create_projection(
             repository=repository,
             workout=workout,
             source_record_id=source_record_id,
@@ -280,9 +294,16 @@ async def apply_workout_projection(
             supersedes_projection_id=existing.projection_id,
             executor=executor,
         )
+        from app.services.health_sync import metrics as health_metrics
+
+        health_metrics.record_projection_outcome(
+            provider=_provider,
+            status="projected" if result is not None else "no_match",
+        )
+        return result
 
     # ── 6. First-time projection ───────────────────────────────────────
-    return await _create_projection(
+    result = await _create_projection(
         repository=repository,
         workout=workout,
         source_record_id=source_record_id,
@@ -294,6 +315,13 @@ async def apply_workout_projection(
         supersedes_projection_id=None,
         executor=executor,
     )
+    from app.services.health_sync import metrics as health_metrics
+
+    health_metrics.record_projection_outcome(
+        provider=_provider,
+        status="projected" if result is not None else "no_match",
+    )
+    return result
 
 
 __all__ = [

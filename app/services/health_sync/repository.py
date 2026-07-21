@@ -385,6 +385,85 @@ _DELETE_PROJECTION_EVENT_SQL = """
     RETURNING id
 """
 
+# ── Connection-scoped local delete primitives ──────────────────────────────
+# These remove ALL local Withings health data for a single user connection.
+# Every statement is scoped by both ``connection_id`` and ``user_id`` so a
+# bug in argument binding cannot reach another user's rows.  Projection-
+# owned adherence events are removed via the ledger subquery, which leaves
+# manual ``log_event`` testimony untouched.
+
+_MARK_CONNECTION_DELETED_SQL = """
+    UPDATE mediator.health_connections
+    SET status = 'deleted',
+        access_token_encrypted = NULL,
+        refresh_token_encrypted = NULL,
+        access_token_expires_at = NULL,
+        refresh_token_expires_at = NULL,
+        refresh_token_rotated_at = NULL,
+        deleted_at = COALESCE(deleted_at, $3),
+        revoked_at = COALESCE(revoked_at, $3),
+        updated_at = $3
+    WHERE id = $1
+      AND user_id = $2
+      AND deleted_at IS NULL
+    RETURNING id, user_id, provider, external_user_id, status, granted_scopes,
+              cursor_state, updated_at, deleted_at, revoked_at
+"""
+
+_DELETE_CONNECTION_SOURCE_RECORDS_SQL = """
+    DELETE FROM mediator.health_source_records
+    WHERE connection_id = $1
+      AND user_id = $2
+"""
+
+_DELETE_CONNECTION_NORMALIZED_MEASUREMENTS_SQL = """
+    DELETE FROM mediator.health_normalized_measurements
+    WHERE connection_id = $1
+      AND user_id = $2
+"""
+
+_DELETE_CONNECTION_NORMALIZED_SLEEP_SQL = """
+    DELETE FROM mediator.health_normalized_sleep
+    WHERE connection_id = $1
+      AND user_id = $2
+"""
+
+_DELETE_CONNECTION_NORMALIZED_WORKOUTS_SQL = """
+    DELETE FROM mediator.health_normalized_workouts
+    WHERE connection_id = $1
+      AND user_id = $2
+"""
+
+_DELETE_CONNECTION_DIRTY_CATEGORIES_SQL = """
+    DELETE FROM mediator.health_dirty_categories
+    WHERE connection_id = $1
+      AND user_id = $2
+"""
+
+_DELETE_CONNECTION_WEBHOOK_RECEIPTS_SQL = """
+    DELETE FROM mediator.health_webhook_receipts
+    WHERE connection_id = $1
+      AND user_id = $2
+"""
+
+_DELETE_CONNECTION_PROJECTION_OWNED_EVENTS_SQL = """
+    DELETE FROM mediator.events
+    WHERE user_id = $2
+      AND id IN (
+          SELECT event_id
+          FROM mediator.health_source_to_event_projections
+          WHERE connection_id = $1
+            AND user_id = $2
+            AND event_id IS NOT NULL
+      )
+"""
+
+_DELETE_CONNECTION_PROJECTION_LEDGER_SQL = """
+    DELETE FROM mediator.health_source_to_event_projections
+    WHERE connection_id = $1
+      AND user_id = $2
+"""
+
 _INSERT_NORMALIZED_WORKOUT_SQL = """
     INSERT INTO mediator.health_normalized_workouts (
         source_record_id,
@@ -1422,6 +1501,222 @@ class HealthSyncRepository:
             user_id,
         )
         return row is not None
+
+    # ------------------------------------------------------------------
+    # Connection-scoped local delete primitives
+    # ------------------------------------------------------------------
+
+    async def mark_connection_deleted(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        now: datetime | None = None,
+        executor: Any | None = None,
+    ) -> HealthConnectionRecord:
+        """Mark a connection deleted and clear encrypted token fields.
+
+        The update is scoped by both ``connection_id`` and ``user_id`` and
+        only fires when the connection is not already deleted, so it doubles
+        as an ownership guard.  Raises ``LookupError`` when no matching
+        connection is found (missing, already deleted, or not owned by the
+        caller).  ``COALESCE`` keeps any previously-recorded ``deleted_at`` /
+        ``revoked_at`` so repeated calls remain idempotent at the SQL layer.
+        """
+        row = await self._executor(executor).fetchrow(
+            _MARK_CONNECTION_DELETED_SQL,
+            connection_id,
+            user_id,
+            _normalize_datetime(now or _utc_now()),
+        )
+        if row is None:
+            raise LookupError("health connection not found or not owned by user")
+        return _connection_from_row(_mapping_row(row))
+
+    async def delete_connection_source_records(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_SOURCE_RECORDS_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_normalized_measurements(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_NORMALIZED_MEASUREMENTS_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_normalized_sleep(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_NORMALIZED_SLEEP_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_normalized_workouts(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_NORMALIZED_WORKOUTS_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_dirty_categories(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_DIRTY_CATEGORIES_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_webhook_receipts(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_WEBHOOK_RECEIPTS_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_projection_owned_events(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        """Delete adherence events owned by this connection's projections.
+
+        Only events linked through the projection ledger for this
+        connection+user are removed; manual ``log_event`` testimony is
+        preserved because it has no ledger row.
+        """
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_PROJECTION_OWNED_EVENTS_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_projection_ledger(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        executor: Any | None = None,
+    ) -> None:
+        await self._executor(executor).execute(
+            _DELETE_CONNECTION_PROJECTION_LEDGER_SQL,
+            connection_id,
+            user_id,
+        )
+
+    async def delete_connection_data(
+        self,
+        *,
+        connection_id: UUID,
+        user_id: UUID,
+        now: datetime | None = None,
+    ) -> HealthConnectionRecord:
+        """Delete all local Withings health data for a user's connection.
+
+        Runs every removal inside a single transaction so the cleanup is
+        atomic: either the connection is fully torn down locally or no
+        partial state is left behind.  Order matters — projection-owned
+        adherence events are removed first (their ``event_id`` is resolved
+        from the projection ledger via a subquery), then the ledger itself,
+        then normalized rows, webhook receipts, dirty categories, source
+        records, and finally the connection is marked deleted with its
+        encrypted token fields cleared.
+
+        Every statement is scoped by both ``connection_id`` and ``user_id``,
+        so another user's rows and manual adherence events can never be
+        reached even under argument-binding bugs.  Raises ``LookupError``
+        when the connection does not exist or is not owned by the user.
+        """
+        timestamp = _normalize_datetime(now or _utc_now())
+        async with self.transaction() as connection:
+            await connection.execute(
+                _DELETE_CONNECTION_PROJECTION_OWNED_EVENTS_SQL,
+                connection_id,
+                user_id,
+            )
+            await connection.execute(
+                _DELETE_CONNECTION_PROJECTION_LEDGER_SQL,
+                connection_id,
+                user_id,
+            )
+            await connection.execute(
+                _DELETE_CONNECTION_NORMALIZED_WORKOUTS_SQL,
+                connection_id,
+                user_id,
+            )
+            await connection.execute(
+                _DELETE_CONNECTION_NORMALIZED_SLEEP_SQL,
+                connection_id,
+                user_id,
+            )
+            await connection.execute(
+                _DELETE_CONNECTION_NORMALIZED_MEASUREMENTS_SQL,
+                connection_id,
+                user_id,
+            )
+            await connection.execute(
+                _DELETE_CONNECTION_WEBHOOK_RECEIPTS_SQL,
+                connection_id,
+                user_id,
+            )
+            await connection.execute(
+                _DELETE_CONNECTION_DIRTY_CATEGORIES_SQL,
+                connection_id,
+                user_id,
+            )
+            await connection.execute(
+                _DELETE_CONNECTION_SOURCE_RECORDS_SQL,
+                connection_id,
+                user_id,
+            )
+            row = await connection.fetchrow(
+                _MARK_CONNECTION_DELETED_SQL,
+                connection_id,
+                user_id,
+                timestamp,
+            )
+        if row is None:
+            raise LookupError("health connection not found or not owned by user")
+        return _connection_from_row(_mapping_row(row))
 
     def _executor(self, executor: Any | None) -> Any:
         return executor if executor is not None else self._pool
