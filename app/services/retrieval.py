@@ -71,6 +71,8 @@ class RetrievalResult:
     sent_at: Any | None = None
     source_type: str = "message"
     source_id: UUID | None = None
+    evidence_metadata: dict[str, Any] | None = None
+    source_message_ids: list[UUID] | None = None
 
     def __post_init__(self) -> None:
         source_type = self.source_type.strip() if self.source_type else "message"
@@ -127,6 +129,7 @@ async def hybrid_search(
         settings=settings,
         limit=_positive_limit(request.limit),
     )
+    await _hydrate_reflection_rows(pool, keyword_rows + semantic_rows)
     return _fuse_rrf_results(
         keyword_rows=keyword_rows,
         semantic_rows=semantic_rows,
@@ -218,9 +221,12 @@ async def _keyword_search(
 ) -> list[RetrievalResult]:
     limit = _positive_limit(request.limit)
     rows = await _fetch_keyword_matches(pool, request, limit=limit)
+    await _hydrate_reflection_rows(pool, rows)
     results: list[RetrievalResult] = []
     for row in rows:
         source_type, source_id, message_id = _source_identity_from_row(row)
+        evidence = _reflection_evidence_from_row(source_type, row)
+        source_msg_ids = _source_message_ids_from_row(row)
         results.append(
             RetrievalResult(
                 message_id=message_id,
@@ -233,6 +239,8 @@ async def _keyword_search(
                 sent_at=row["sent_at"],
                 source_type=source_type,
                 source_id=source_id,
+                evidence_metadata=evidence,
+                source_message_ids=source_msg_ids,
             )
         )
     return results
@@ -313,9 +321,12 @@ async def _semantic_search(
         settings=settings,
         limit=limit,
     )
+    await _hydrate_reflection_rows(pool, rows)
     results: list[RetrievalResult] = []
     for row in rows:
         source_type, source_id, message_id = _source_identity_from_row(row)
+        evidence = _reflection_evidence_from_row(source_type, row)
+        source_msg_ids = _source_message_ids_from_row(row)
         results.append(
             RetrievalResult(
                 message_id=message_id,
@@ -328,6 +339,8 @@ async def _semantic_search(
                 sent_at=row["sent_at"],
                 source_type=source_type,
                 source_id=source_id,
+                evidence_metadata=evidence,
+                source_message_ids=source_msg_ids,
             )
         )
     return results
@@ -442,7 +455,7 @@ def _retrieval_visibility_filters(
     next_param += 1
 
     filters = [
-        f"sc.source_type IN ('message', 'memory', 'observation', 'distillation', 'artifact')",
+        f"sc.source_type IN ('message', 'memory', 'observation', 'distillation', 'artifact', 'conversation_note', 'theme', 'reflection')",
         f"sc.bot_id IS NOT NULL",
         f"sc.bot_id = ${bot_param}",
         f"sc.thread_owner_user_id IS NOT NULL",
@@ -512,6 +525,8 @@ def _fuse_rrf_results(
             "keyword_score": float(row["keyword_score"]),
             "keyword_rank": int(row["keyword_rank"]),
             "semantic_rank": None,
+            "media_analysis": _row_get(row, "_reflection_evidence") or _row_get(row, "media_analysis"),
+            "source_message_ids": _row_get(row, "_reflection_source_message_ids") or _row_get(row, "source_message_ids"),
         }
 
     for row in semantic_rows:
@@ -526,11 +541,17 @@ def _fuse_rrf_results(
                 "keyword_score": None,
                 "keyword_rank": None,
                 "semantic_rank": None,
+                "media_analysis": None,
+                "source_message_ids": None,
             },
         )
         existing["semantic_rank"] = int(row["semantic_rank"])
         if existing["sent_at"] is None:
             existing["sent_at"] = row["sent_at"]
+        if existing.get("media_analysis") is None:
+            existing["media_analysis"] = _row_get(row, "_reflection_evidence") or _row_get(row, "media_analysis")
+        if existing.get("source_message_ids") is None:
+            existing["source_message_ids"] = _row_get(row, "_reflection_source_message_ids") or _row_get(row, "source_message_ids")
 
     fused = []
     for item in by_source.values():
@@ -549,6 +570,9 @@ def _fuse_rrf_results(
             match_type = "exact"
         else:
             match_type = "semantic"
+        src_type = item["source_type"]
+        evidence = _reflection_evidence_from_row(src_type, item)
+        source_msg_ids = _source_message_ids_from_row(item)
         fused.append(
             RetrievalResult(
                 message_id=item["message_id"],
@@ -561,6 +585,8 @@ def _fuse_rrf_results(
                 sent_at=item["sent_at"],
                 source_type=item["source_type"],
                 source_id=item["source_id"],
+                evidence_metadata=evidence,
+                source_message_ids=source_msg_ids,
             )
         )
 
@@ -592,6 +618,105 @@ def _source_identity_from_row(row: Any) -> tuple[str, UUID, UUID | None]:
     if source_id is None:
         raise ValueError("retrieval row is missing source_id and message_id")
     return str(source_type), source_id, message_id
+
+
+async def _hydrate_reflection_rows(
+    pool: Any,
+    rows: list[Any],
+) -> None:
+    """Post-fetch enrichment: add evidence metadata and source-message
+    provenance to reflection rows without changing the main retrieval SQL.
+
+    This is a batch lookup that queries ``reflection_entries`` once for all
+    reflection-typed rows in *rows* and mutates each matching row in-place
+    with the keys ``_reflection_evidence`` and
+    ``_reflection_source_message_ids``.
+    """
+    reflection_ids: list[UUID] = []
+    for row in rows:
+        src_type = _row_get(row, "source_type")
+        if src_type == "reflection":
+            src_id = _row_get(row, "source_id")
+            if src_id is not None:
+                reflection_ids.append(src_id)
+
+    if not reflection_ids:
+        return
+
+    fetched = await pool.fetch(
+        """
+        SELECT
+            re.id,
+            jsonb_build_object(
+                'session_id', re.session_id,
+                'template_key', re.template_key,
+                'temporal_scope', re.temporal_scope,
+                'phase', re.phase,
+                'revision_number', re.revision_number,
+                'schema_version', re.schema_version,
+                'supersedes_entry_id', re.supersedes_entry_id
+            ) AS evidence,
+            COALESCE(re.source_message_ids, '{}'::uuid[]) AS source_message_ids
+        FROM mediator.reflection_entries re
+        WHERE re.id = ANY($1::uuid[])
+        """,
+        reflection_ids,
+    )
+
+    by_id: dict[UUID, dict[str, Any]] = {
+        row["id"]: dict(row) for row in fetched
+    }
+
+    for row in rows:
+        src_type = _row_get(row, "source_type")
+        if src_type != "reflection":
+            continue
+        src_id = _row_get(row, "source_id")
+        if src_id is None:
+            continue
+        entry = by_id.get(src_id)
+        if entry is None:
+            continue
+        # Mutate the row in-place with underscore-prefixed keys so they
+        # never collide with the original column names.
+        if hasattr(row, "__setitem__"):
+            row["_reflection_evidence"] = entry.get("evidence")
+            row["_reflection_source_message_ids"] = entry.get("source_message_ids")
+
+
+def _reflection_evidence_from_row(
+    source_type: str,
+    row: Any,
+) -> dict[str, Any] | None:
+    """Return evidence metadata for reflection rows only.
+
+    Reads from the post-fetch hydration key ``_reflection_evidence`` (set
+    by :func:`_hydrate_reflection_rows`) or falls back to
+    ``media_analysis`` for callers that pre-join the reflection table.
+    """
+    if source_type != "reflection":
+        return None
+    evidence = _row_get(row, "_reflection_evidence") or _row_get(row, "media_analysis")
+    if evidence is None:
+        return None
+    if isinstance(evidence, dict):
+        return evidence
+    return None
+
+
+def _source_message_ids_from_row(row: Any) -> list[UUID] | None:
+    """Return ordered source-message provenance UUIDs when present.
+
+    Reads from the post-fetch hydration key ``_reflection_source_message_ids``
+    (set by :func:`_hydrate_reflection_rows`) or falls back to the raw
+    ``source_message_ids`` column for callers that pre-join.
+    """
+    raw = _row_get(row, "_reflection_source_message_ids") or _row_get(row, "source_message_ids")
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, UUID)]
+    return None
 
 
 def _row_get(row: Any, key: str) -> Any:

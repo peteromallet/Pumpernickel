@@ -1,7 +1,7 @@
 ---
 name: superpom-compass-grounded-reflection
 description: User asks for help reflecting on whether a recent stretch of decisions has served their stated priorities — SuperPOM should use the Compass to ground the reflection and create a bot_proposed observation item for review.
-tags: [superpom, reflection, compass-first, bot-proposed, review-gate]
+tags: [superpom, reflection, explicit-reflection, compass-first, bot-proposed, review-gate]
 setup:
   orientation_items:
     - key: principle_focus

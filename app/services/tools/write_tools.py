@@ -17,6 +17,7 @@ from app.services.cross_thread_privacy import (
 )
 from app.services.crypto import encrypt_value
 from app.config import get_settings
+from app.services.deletion import cleanup_deleted_reflection_state
 from app.services.partner_sharing import (
     get_partner_share,
     resolve_dyad_partner,
@@ -3137,6 +3138,10 @@ async def delete_outbound_message(
         args.message_id,
     )
     await enqueue_message_embedding_drop(ctx.pool, message_id=args.message_id)
+    await cleanup_deleted_reflection_state(
+        ctx.pool,
+        message_ids=[args.message_id],
+    )
     result = DeleteOutboundMessageOutput(
         action="deleted",
         message_id=args.message_id,

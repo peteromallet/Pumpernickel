@@ -18,6 +18,7 @@ EmbedSourceType = Literal[
     "artifact",
     "conversation_note",
     "theme",
+    "reflection",
 ]
 EmbedJobKind = Literal["embed", "reembed", "drop"]
 EmbedJobStatus = Literal["pending", "processing", "succeeded", "failed", "skipped", "superseded", "cancelled"]

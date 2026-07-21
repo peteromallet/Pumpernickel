@@ -8,28 +8,12 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 from collections.abc import AsyncIterator
 from typing import Any
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.config import get_settings
-from app.main import app
-
-
-class _UndefinedTableError(Exception):
-    """Simulates asyncpg.UndefinedTableError for stale-DB fallback testing."""
-
-
-def _coerce_jsonb(value):
-    """Mirror the asyncpg jsonb codec for FakePool: accept dicts, decode strings, pass None."""
-    if value is None or isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str):
-        return json.loads(value)
-    return value
-
-
-REQUIRED_ENV = {
+_TEST_SETTINGS_ENV = {
     "DATABASE_URL": "postgresql://user:pass@localhost:5432/db",
     "DATABASE_SCHEMA": "public",
     "SUPABASE_URL": "https://example.supabase.co",
@@ -53,6 +37,40 @@ REQUIRED_ENV = {
     "MEDIA_FETCH_TIMEOUT_S": "30",
     "DEFAULT_USER_TIMEZONE": "UTC",
 }
+_TEST_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+_TEST_DOTENV_CREATED = False
+
+
+def _ensure_test_dotenv() -> None:
+    global _TEST_DOTENV_CREATED
+    if _TEST_DOTENV_PATH.exists():
+        return
+    _TEST_DOTENV_PATH.write_text(
+        "\n".join(f"{key}={value}" for key, value in _TEST_SETTINGS_ENV.items()) + "\n"
+    )
+    _TEST_DOTENV_CREATED = True
+
+
+_ensure_test_dotenv()
+
+from app.config import get_settings
+from app.main import app
+
+
+class _UndefinedTableError(Exception):
+    """Simulates asyncpg.UndefinedTableError for stale-DB fallback testing."""
+
+
+def _coerce_jsonb(value):
+    """Mirror the asyncpg jsonb codec for FakePool: accept dicts, decode strings, pass None."""
+    if value is None or isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+REQUIRED_ENV = dict(_TEST_SETTINGS_ENV)
 
 SCRUB_ENV_KEYS = {
     "DATA_ENCRYPTION_KEY",
@@ -109,6 +127,13 @@ def _seed_relationship_topic_id() -> None:
     import app.bots.registry as _reg
 
     _reg._RELATIONSHIP_TOPIC_ID = UUID("00000000-0000-4000-8000-000000000001")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_test_dotenv() -> None:
+    yield
+    if _TEST_DOTENV_CREATED and _TEST_DOTENV_PATH.exists():
+        _TEST_DOTENV_PATH.unlink()
 
 
 @pytest.fixture
@@ -6198,6 +6223,8 @@ class FakePool:
             "DELETE FROM mediator.content_embeddings"
         ):
             if compact.startswith("DELETE FROM mediator.content_embeddings"):
+                if len(args) == 1:
+                    return "DELETE 0"
                 _, source_id = args
                 key = source_id
             else:
@@ -6282,6 +6309,24 @@ class FakePool:
                     )
                     affected += 1
             return f"UPDATE {affected}"
+        if compact.startswith("UPDATE mediator.reflection_sessions rs"):
+            return "UPDATE 0"
+        if compact.startswith("UPDATE mediator.reflection_entries re"):
+            return "UPDATE 0"
+        if compact.startswith("UPDATE mediator.reflection_derivations rd"):
+            return "UPDATE 0"
+        if compact.startswith("UPDATE memories m SET status = 'invalidated'"):
+            return "UPDATE 0"
+        if compact.startswith("UPDATE observations o SET status = 'stale'"):
+            return "UPDATE 0"
+        if compact.startswith("UPDATE distillations d SET status = 'invalidated'"):
+            return "UPDATE 0"
+        if compact.startswith("UPDATE mediator.user_orientation_items uoi SET status = 'retired'"):
+            return "UPDATE 0"
+        if compact.startswith("DELETE FROM mediator.content_embeddings ce"):
+            return "DELETE 0"
+        if compact.startswith("UPDATE mediator.embed_jobs ej SET status = 'cancelled'"):
+            return "UPDATE 0"
         if compact.startswith("SET search_path TO"):
             return "SET"
         if compact == "SELECT 1":

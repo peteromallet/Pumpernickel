@@ -16,6 +16,12 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from app.config import get_settings
 from app.db import get_pool
+from app.services.failure_class_reconciliation import (
+    classify_failure_domain,
+    format_failure_class,
+)
+from app.services.reflection_redaction import redact_reflection_diagnostics
+from app.services.reflections import VALID_STATUSES, admin_list_sessions
 from app.services.system_state import set_user_bot_paused
 from evals.results import list_eval_results, list_eval_runs
 
@@ -65,6 +71,7 @@ def _page(title: str, body: str) -> str:
             ("escalations", "Escalations"),
             ("evals", "Evals"),
             ("audit", "Audit"),
+            ("reflections", "Reflections"),
             ("user-bot-pauses", "Pauses"),
             ("health", "Health"),
         ]
@@ -186,7 +193,8 @@ async def themes(pool: Any = Depends(get_pool), _: None = Depends(authenticate_a
 @router.get("/admin/memories", response_class=HTMLResponse)
 async def memories(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin), user_id: str | None = None, status_filter: str | None = Query(default=None, alias="status")) -> str:
     # allowlisted: admin operator view
-    rows = await _fetch(pool, "SELECT id, about_user_id, content, status, supersedes_memory_id, created_at, last_referenced_at FROM memories ORDER BY created_at DESC LIMIT 100")
+    rows = await _fetch(pool, "SELECT id, about_user_id, content, status, supersedes_memory_id, created_at, last_referenced_at FROM memories WHERE status <> 'invalidated' ORDER BY created_at DESC LIMIT 100")
+    rows = [row for row in rows if row.get("status") != "invalidated"]
     if user_id:
         rows = [row for row in rows if str(row.get("about_user_id")) == user_id]
     if status_filter:
@@ -208,8 +216,13 @@ async def watch_items(pool: Any = Depends(get_pool), _: None = Depends(authentic
 @router.get("/admin/observations", response_class=HTMLResponse)
 async def observations(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin), min_significance: int = 0) -> str:
     # allowlisted: admin operator view
-    rows = await _fetch(pool, "SELECT id, about_user_id, content, confidence, significance, status, supporting_message_ids, created_at, last_reinforced_at FROM observations ORDER BY created_at DESC LIMIT 100")
-    rows = [row for row in rows if (row.get("significance") or 0) >= min_significance]
+    rows = await _fetch(pool, "SELECT id, about_user_id, content, confidence, significance, status, supporting_message_ids, created_at, last_reinforced_at FROM observations WHERE status = 'active' ORDER BY created_at DESC LIMIT 100")
+    rows = [
+        row
+        for row in rows
+        if row.get("status") == "active"
+        and (row.get("significance") or 0) >= min_significance
+    ]
     return _page("Observations", _table(rows, ["id", "about_user_id", "content", "confidence", "significance", "status", "supporting_message_ids", "created_at", "last_reinforced_at"]))
 
 
@@ -223,10 +236,12 @@ async def distillations(pool: Any = Depends(get_pool), _: None = Depends(authent
                supporting_message_ids, supersedes_distillation_id, superseded_by_distillation_id,
                revision_note, revision_count, created_at, updated_at, revised_at, retired_at
         FROM distillations  # allowlisted: admin operator view
+        WHERE status <> 'invalidated'
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 100
         """,
     )
+    rows = [row for row in rows if row.get("status") != "invalidated"]
     if status_filter:
         rows = [row for row in rows if row.get("status") == status_filter]
     if q:
@@ -308,6 +323,69 @@ async def spend(pool: Any = Depends(get_pool), _: None = Depends(authenticate_ad
 @router.get("/admin/escalations", response_class=HTMLResponse)
 async def escalations(pool: Any = Depends(get_pool), _: None = Depends(authenticate_admin)) -> str:
     return await _simple_page("Escalations", pool, "SELECT bt.id, bt.started_at, bt.reasoning, bt.final_output_message_id FROM bot_turns bt WHERE EXISTS (SELECT 1 FROM tool_calls tc WHERE tc.turn_id = bt.id AND tc.tool_name='escalate_to_partner') ORDER BY bt.started_at DESC LIMIT 100", ["id", "started_at", "reasoning", "final_output_message_id"])
+
+
+@router.get("/admin/reflections", response_class=HTMLResponse)
+async def reflections_admin(
+    pool: Any = Depends(get_pool),
+    _: None = Depends(authenticate_admin),
+    status_filter: str | None = Query(default=None, alias="status"),
+    limit: int = 100,
+) -> str:
+    """Operator listing: active and stuck reflection sessions.
+
+    Exposes only redaction-tested metadata fields — opaque IDs, user/bot/
+    topic scope, processing state, classification status, retry counts,
+    failure class, derivation decisions (count), deletion status, and
+    embedding coverage.  No payload text, encrypted bodies, or plaintext
+    searchable content is ever rendered.
+    """
+    rows = await admin_list_sessions(
+        pool,
+        status_filter=status_filter,
+        limit=limit,
+    )
+    # Redact every row before rendering — defence in depth even though
+    # admin_list_sessions only SELECTs safe columns.
+    rows = [redact_reflection_diagnostics(row) for row in rows]
+
+    # ── Format failure_class with domain context (M4 / T9 reconciliation) ──
+    for row in rows:
+        raw = row.get("failure_class")
+        row["failure_class_domain"] = classify_failure_domain(raw) or "none"
+        row["failure_class"] = format_failure_class(raw)
+
+    columns = [
+        "id",
+        "user_id",
+        "bot_id",
+        "topic_id",
+        "template_key",
+        "temporal_scope",
+        "phase",
+        "status",
+        "classification_source",
+        "classification_confidence",
+        "retry_count",
+        "failure_class",
+        "failure_class_domain",
+        "failure_reason",
+        "last_error",
+        "entry_count",
+        "derivation_count",
+        "has_embeddable_entries",
+        "claimed_by",
+        "created_at",
+        "finalized_at",
+        "processed_at",
+        "abandoned_at",
+        "idle_finalize_at",
+        "updated_at",
+    ]
+    return _page(
+        "Reflection Sessions",
+        _table(rows, columns),
+    )
 
 
 @router.get("/admin/evals", response_class=HTMLResponse)

@@ -45,6 +45,7 @@ def test_backfill_embeddings_requires_direct_non_pooler_url() -> None:
     for url in (
         "",
         "postgresql://user:pass@db.example.com:6543/postgres",
+        "postgresql://user:pass@pgbouncer.example.com:5432/postgres",
         "postgresql://user:pass@pgbouncer.example.com:6432/postgres",
     ):
         try:

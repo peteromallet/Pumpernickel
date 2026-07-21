@@ -60,6 +60,7 @@ class HotContextSolo:
     workout_block: str | None = None
     upcoming_items: list[dict[str, Any]] = field(default_factory=list)
     compass_snapshot: Any | None = None  # CompassSnapshot | None, imported lazily
+    reflections_digest: list[dict[str, Any]] = field(default_factory=list)
     bot_id: str = "coach"
 
 
@@ -373,6 +374,98 @@ async def _fetch_topic_status_solo(
         user_id,
     )
     return dict(row) if row is not None else None
+
+
+async def _fetch_reflections_digest(
+    pool: Any,
+    *,
+    user_id: UUID,
+    bot_id: str,
+    topic_id: UUID,
+    max_entries: int = 10,
+    lookback_days: int = 60,
+) -> list[dict[str, Any]]:
+    """Return a bounded digest of active/recent reflection entries.
+
+    Only includes current (un-superseded) entries from processed sessions
+    with non-empty plaintext_searchable.  Excludes deferred, rejected,
+    and deleted candidates by only joining sessions with status='processed'.
+
+    The digest is compact: plaintext_searchable clipped, no raw encrypted
+    payloads, and only minimal provenance metadata.
+    """
+    rows = await pool.fetch(
+        """\
+        SELECT e.id AS entry_id,
+               e.session_id,
+               e.template_key,
+               e.temporal_scope,
+               e.phase,
+               e.plaintext_searchable,
+               e.source_message_ids,
+               e.revision_number,
+               e.created_at,
+               s.status AS session_status,
+               s.processed_at AS session_processed_at
+        FROM mediator.reflection_entries e
+        JOIN mediator.reflection_sessions s ON s.id = e.session_id
+        WHERE e.user_id = $1
+          AND e.bot_id = $2
+          AND e.topic_id = $3
+          AND NOT EXISTS (
+              SELECT 1
+              FROM mediator.reflection_entries successor
+              WHERE successor.supersedes_entry_id = e.id
+          )
+          AND e.plaintext_searchable IS NOT NULL
+          AND btrim(e.plaintext_searchable) <> ''
+          AND s.status = 'processed'
+          AND e.created_at >= (now() - ($4 || ' days')::interval)
+        ORDER BY e.created_at DESC
+        LIMIT $5
+        """,
+        user_id,
+        bot_id,
+        topic_id,
+        str(lookback_days),
+        max_entries,
+    )
+    if not rows:
+        return []
+
+    # Build digest list and detect open loops (opening without closing).
+    digest: list[dict[str, Any]] = []
+    session_phases: dict[UUID, set[str]] = {}
+    for row in rows:
+        sid = row["session_id"]
+        phase = row["phase"] or ""
+        session_phases.setdefault(sid, set()).add(phase)
+
+    for row in rows:
+        sid = row["session_id"]
+        phase = row["phase"] or ""
+        phases_in_session = session_phases.get(sid, set())
+        is_open_loop = (
+            phase == "opening"
+            and "closing" not in phases_in_session
+            and "checkpoint" not in phases_in_session
+        )
+        created = row["created_at"]
+        created_iso = created.isoformat() if hasattr(created, "isoformat") else str(created)
+        text = (row["plaintext_searchable"] or "").strip()
+        digest.append({
+            "entry_id": str(row["entry_id"]),
+            "session_id": str(sid),
+            "template_key": row["template_key"] or "",
+            "temporal_scope": row["temporal_scope"] or "",
+            "phase": phase,
+            "plaintext_searchable": text[:240] + ("..." if len(text) > 240 else ""),
+            "source_message_ids": [str(mid) for mid in (row["source_message_ids"] or [])],
+            "revision_number": int(row["revision_number"] or 1),
+            "created_at": created_iso,
+            "is_open_loop": is_open_loop,
+        })
+    return digest
 
 
 async def build_hot_context_solo(
@@ -1019,6 +1112,17 @@ async def build_hot_context_solo(
             )
             compass_snapshot = None
 
+    # ── Reflection digest (active/recent, compact evidence summaries) ──
+    try:
+        reflections_digest = await _fetch_reflections_digest(
+            pool,
+            user_id=user.id,
+            bot_id=bot_id,
+            topic_id=primary_topic_id,
+        )
+    except Exception:
+        reflections_digest = []
+
     return HotContextSolo(
         current_user=current_user,
         partner_user=partner_user,
@@ -1043,6 +1147,7 @@ async def build_hot_context_solo(
         workout_block=workout_block,
         upcoming_items=upcoming_items,
         compass_snapshot=compass_snapshot,
+        reflections_digest=reflections_digest,
         bot_id=bot_id,
         time_since_last_message=_duration_since(latest_sent_at),
         trigger_metadata={
@@ -1482,6 +1587,51 @@ def _render_solo_with_counts(
         if compass_md:
             lines += ["", compass_md]
 
+    # ── Reflection digest (active/recent, evidence summaries) ──────────
+    # Compass-first ordering: reflections appear after Compass.  Only
+    # processed-session current entries are included; deferred, rejected,
+    # and deleted candidates are excluded.  Open loops (opening without
+    # closing) are marked explicitly.
+    if hc.reflections_digest:
+        # Group by session for opening-vs-closing comparisons.
+        by_session: dict[str, list[dict[str, Any]]] = {}
+        for item in hc.reflections_digest:
+            sid = item["session_id"]
+            by_session.setdefault(sid, []).append(item)
+
+        lines += ["", "## Recent reflections"]
+        for sid, items in by_session.items():
+            # Per-session: report template, scope, open-loop indicator,
+            # and compact evidence summaries (limited to 2 best entries).
+            primary = items[0]
+            scope = primary.get("temporal_scope", "")
+            tpl = primary.get("template_key", "")
+            phases_seen = {it["phase"] for it in items}
+            has_opening = "opening" in phases_seen
+            has_closing = "closing" in phases_seen
+            open_loop_marker = ""
+            if has_opening and not has_closing:
+                open_loop_marker = " [OPEN LOOP]"
+
+            session_line = (
+                f"- session={_clip(sid, clip_limit)} "
+                f"template={_clip(tpl, clip_limit)} "
+                f"scope={_clip(scope, clip_limit)}"
+                f"{open_loop_marker}"
+            )
+            lines.append(session_line)
+
+            # Show evidence summaries for up to 2 entries per session.
+            for entry in items[:2]:
+                entry_id = entry["entry_id"]
+                phase = entry["phase"]
+                text = entry["plaintext_searchable"]
+                loop_flag = " [open]" if entry.get("is_open_loop") else ""
+                lines.append(
+                    f"    · [{phase}{loop_flag}] id={_clip(entry_id, clip_limit)} "
+                    f"v{entry['revision_number']} {_clip(text, clip_limit)}"
+                )
+
     if hc.upcoming_items:
         lines += ["", "## Upcoming reminders"]
         for item in hc.upcoming_items:
@@ -1759,6 +1909,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
         workout_block=hc.workout_block,
         upcoming_items=hc.upcoming_items,
         compass_snapshot=hc.compass_snapshot,
+        reflections_digest=list(hc.reflections_digest),
         bot_id=hc.bot_id,
         time_since_last_message=hc.time_since_last_message,
         trigger_metadata=hc.trigger_metadata,
@@ -1766,6 +1917,7 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
     truncations = {
         "distillations": 0,
         "observations": 0,
+        "reflections_digest": 0,
         "compass": 0,
         "memories": 0,
         "recent_messages": 0,
@@ -1787,6 +1939,11 @@ def render_hot_context_solo(hc: HotContextSolo) -> str:
     ):
         working.compass_snapshot = _trim_compass_snapshot(working.compass_snapshot)
         truncations["compass"] += 1
+        text = _render_solo_with_counts(working, truncations, clip_limit)
+    # ── Reflections digest truncation (after Compass, before memories) ──
+    while _estimated_tokens(text) > budget and working.reflections_digest:
+        working.reflections_digest.pop()
+        truncations["reflections_digest"] += 1
         text = _render_solo_with_counts(working, truncations, clip_limit)
     for name in ("memories", "recent_messages"):
         items = getattr(working, name)

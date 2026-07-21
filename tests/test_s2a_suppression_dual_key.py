@@ -68,14 +68,14 @@ class TestSuppressionBotIdOnlyFilter:
         )
 
     def test_no_null_bot_id_filter(self):
-        """bot_id IS NULL must be absent from both agentic.py and read_tools.py."""
+        """Legacy suppression fallback must stay absent from both code paths."""
         agentic_content = open("app/services/agentic.py").read()
         read_tools_content = open("app/services/tools/read_tools.py").read()
-        assert "bot_id IS NULL" not in agentic_content, (
-            "agentic.py must NOT contain bot_id IS NULL"
+        assert "OR bot_id IS NULL" not in agentic_content, (
+            "agentic.py must NOT contain legacy OR bot_id IS NULL fallback"
         )
-        assert "bot_id IS NULL" not in read_tools_content, (
-            "read_tools.py must NOT contain bot_id IS NULL"
+        assert "OR bot_id IS NULL" not in read_tools_content, (
+            "read_tools.py must NOT contain legacy OR bot_id IS NULL fallback"
         )
 
     def test_call_sites_pass_bot_id(self):

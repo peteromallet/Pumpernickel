@@ -17,7 +17,9 @@ from resident_chat_runtime.discord_rest import DISCORD_API_BASE, DiscordRestClie
 from app.config import get_settings
 from app.models.user import upsert_user
 from app.services.crypto import encrypt_value
+from app.services.deletion import cleanup_deleted_reflection_state
 from app.services.discord_id import _decode_discord_user_id
+from app.services.message_embedding_lifecycle import enqueue_message_embedding_drop
 from app.services.whitelist import is_allowed_phone
 
 TYPING_DELAY_MIN_S = 0.2
@@ -670,10 +672,21 @@ class DiscordGatewayBot:
     async def _handle_message_delete(self, message: dict[str, Any]) -> None:
         # DEBT-090: DELETE targets only whatsapp_message_id without bot_id.
         # Accepted sprint debt per SD-006 (no broad queue semantics redesign).
-        await self.pool.execute(
-            "UPDATE messages SET deleted_at = now() WHERE whatsapp_message_id = $1",
+        row = await self.pool.fetchrow(
+            """
+            UPDATE messages
+            SET deleted_at = now()
+            WHERE whatsapp_message_id = $1
+            RETURNING id
+            """,
             str(message["id"]),
         )
+        if row is not None:
+            await enqueue_message_embedding_drop(self.pool, message_id=row["id"])
+            await cleanup_deleted_reflection_state(
+                self.pool,
+                message_ids=[row["id"]],
+            )
 
     async def _handle_reaction_add(self, event: dict[str, Any]) -> None:
         user_id = str(event.get("user_id", ""))

@@ -227,6 +227,9 @@ class Settings(BaseSettings):
     embedding_backfill_batch_size: int = Field(default=64, ge=1, le=1000)
     embedding_backfill_rate_limit_per_min: int = Field(default=60, ge=1, le=100000)
     embedding_backfill_coverage_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
+    reflection_finalization_worker_enabled: bool = False
+    reflection_finalization_worker_poll_interval_s: float = Field(default=60.0, gt=1.0, le=3600.0)
+    reflection_finalization_worker_batch_size: int = Field(default=50, ge=1, le=500)
     heartbeat_interval_hours: int = 24
     anthropic_input_usd_per_mtok: float = 3.0  # Cache creation is 1.25x input.
     anthropic_output_usd_per_mtok: float = 15.0  # Cache reads are 0.10x input.

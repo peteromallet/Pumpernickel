@@ -51,6 +51,10 @@ WHITELIST_PATHS: set[str] = {
     "bots/prompts/hector.py",        # alternate relative path form
     "app/bots/prompts/habits.py",    # natural-language prompt text, not SQL
     "bots/prompts/habits.py",        # alternate relative path form
+    "app/bots/prompts/profiles/superpom.py",  # natural-language prompt text, not SQL
+    "bots/prompts/profiles/superpom.py",      # alternate relative path form
+    "app/bots/superpom.py",          # natural-language phase instructions, not SQL
+    "bots/superpom.py",              # alternate relative path form
 }
 WHITELIST_DIR_PREFIXES: tuple[str, ...] = (
     "tests/",

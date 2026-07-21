@@ -38,11 +38,13 @@ from app.services.debouncer import BurstCoalescer
 from app.services.pacer import DiscordPacer, PacedSendKind, PacingDecision
 from app.services.metrics_sweep import run_metrics_sweep_forever
 from app.services.recovery import recover_on_startup, run_recovery_forever
+from app.services.reflections_integration import capture_burst_for_reflection
 from app.services.scheduled_job_handlers import ScheduledJobHandlers, seed_weekly_reflections
 from app.services.scheduled_jobs import ScheduledJobWorker, seed_heartbeat
 from app.services.scope import InboundScope
 from app.services.embed_worker import EmbedJobWorker
 from app.services.health_sync.worker import HealthSyncWorker, health_sync_resource_types
+from app.services.reflections_finalization_worker import ReflectionFinalizationWorker
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +225,13 @@ def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> t
             await _send_paced_reaction(pool, message_ids, user, decision, scope=scope)
 
         async def on_burst_complete(message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
+            await capture_burst_for_reflection(
+                pool,
+                message_ids,
+                user,
+                bot_id=scope.bot_id,
+                topic_id=scope.topic_id,
+            )
             await run_agentic_turn(message_ids, user, scope=scope)
 
         async def on_paced_answer(message_ids: list[UUID], user: User, decision: PacingDecision, *, scope: InboundScope) -> None:
@@ -247,6 +256,13 @@ def _build_coalescer_for_bot(pool: Any, settings: Settings, *, bot_id: str) -> t
             pacer,
         )
     async def on_burst_complete(message_ids: list[UUID], user: User, *, scope: InboundScope) -> None:
+        await capture_burst_for_reflection(
+            pool,
+            message_ids,
+            user,
+            bot_id=scope.bot_id,
+            topic_id=scope.topic_id,
+        )
         await run_agentic_turn(message_ids, user, scope=scope)
 
     return BurstCoalescer(on_burst_complete=on_burst_complete), None
@@ -496,6 +512,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             health_sync_worker_task = asyncio.create_task(health_sync_worker.run_forever())
             app.state.health_sync_worker = health_sync_worker
             app.state.background_tasks.add(health_sync_worker_task)
+        if settings.reflection_finalization_worker_enabled:
+            finalization_worker = ReflectionFinalizationWorker(pool, settings=settings)
+            finalization_worker_task = asyncio.create_task(finalization_worker.run_forever())
+            app.state.reflection_finalization_worker = finalization_worker
+            app.state.background_tasks.add(finalization_worker_task)
         if settings.scheduler_enabled:
             await seed_heartbeat(pool, settings=settings)
             await seed_weekly_reflections(pool)

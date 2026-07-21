@@ -43,10 +43,23 @@ from typing import Final
 
 
 class FailureClass(str, Enum):
-    """The seven-class taxonomy.
+    """The seven-class taxonomy for **message-level** failures.
 
     Members inherit from ``str`` so equality works against the legacy
     column values without coercion (``FailureClass.INFRA_BUG == "infra_bug"``).
+
+    .. important::
+
+       This taxonomy applies to ``mediator.messages.failure_class`` and
+       the inbound-queue / recovery-sweep retry decisions.  It is
+       intentionally **separate** from the four-class reflection-session
+       failure taxonomy (``retryable_processor``, ``terminal_input``,
+       ``terminal_internal``, ``stale_claim``) stored on
+       ``mediator.reflection_sessions.failure_class`` and enforced by
+       ``app/services/reflections.VALID_FAILURE_CLASSES``.
+
+       Reconciliation decision (M4 / T8): keep both taxonomies
+       independent.  Do not merge, cross-map, or create a third taxonomy.
     """
 
     RETRYABLE_PRE_SEND = "retryable_pre_send"

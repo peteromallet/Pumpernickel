@@ -246,10 +246,13 @@ real test Withings account:
 
 ### 7.1 Connect Flow
 
-1. `GET /api/health/devices/withings/connect` — returns a Withings OAuth authorization URL.
+1. `POST /api/health/devices/withings/connect` with JSON such as
+   `{"redirect_uri":"https://<app>/settings/health","resource_types":["measurement","workout","sleep"]}` — returns a Withings OAuth authorization URL.
 2. Follow the URL in a browser, authorize the test account.
 3. Confirm the callback redirects back to the app and the connection appears in the database with `status='active'`.
-4. `GET /api/health/devices/withings/status` — returns `connected: true` and metadata (no tokens, no external user ID, no device IDs, no health values).
+4. `GET /api/health/devices/withings/status` — returns
+   `feature_enabled: true` and `connection.status: "active"` plus metadata
+   (no tokens, no external user ID, no device IDs, no health values).
 
 ### 7.2 Sync Flow
 
@@ -270,7 +273,8 @@ real test Withings account:
 2. Confirm all local data is removed (source records, normalized rows, dirty categories, webhook receipts, projection ledger, projection-owned events).
 3. Confirm manual adherence events survive.
 4. Confirm another user's data is untouched.
-5. `GET /api/health/devices/withings/status` — returns `connected: false`.
+5. `GET /api/health/devices/withings/status` — returns
+   `connection.status: "not_connected"`.
 
 ### 7.5 Export Flow
 

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import subprocess
+import shutil
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _uv_run(code: str, *args: str) -> subprocess.CompletedProcess[str]:
+    if shutil.which("uv") is None:
+        pytest.skip("uv executable not installed in this environment")
     return subprocess.run(
         ["uv", "run", *args, "python", "-c", code],
         cwd=REPO_ROOT,

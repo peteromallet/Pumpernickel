@@ -471,6 +471,12 @@ def is_compass_visible(item: dict[str, Any]) -> bool:
     status = item.get("status", "pending")
     review_state = item.get("review_state", "unreviewed")
     source = item.get("source", "user_stated")
+    closed_reason = item.get("closed_reason")
+
+    # Reflection-deletion cleanup retires derived orientation items as
+    # tombstones. They must never reappear in Compass or downstream hot context.
+    if closed_reason == "source_message_deleted":
+        return False
 
     # Rejected and superseded are never Compass-visible by default.
     if status in ("rejected", "superseded"):

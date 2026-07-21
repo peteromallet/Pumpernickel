@@ -492,7 +492,7 @@ The privacy surfaces regression suite scans every default surface that could lea
 | `/api/health/devices/withings/disconnect` excludes health values | `test_disconnect_excludes_health_values` | ✅ Automated |
 | `DELETE /api/health/devices/withings` excludes tokens and provider IDs | `test_delete_excludes_tokens_and_provider_ids` | ✅ Automated |
 | `DELETE /api/health/devices/withings` excludes health values | `test_delete_excludes_health_values` | ✅ Automated |
-| `GET /api/health/devices/withings/connect` excludes tokens and health values | `test_connect_excludes_tokens_and_health_values` | ✅ Automated |
+| `POST /api/health/devices/withings/connect` excludes tokens and health values | `test_connect_excludes_tokens_and_health_values` | ✅ Automated |
 
 ### 5.2 Admin Diagnostics Surfaces
 

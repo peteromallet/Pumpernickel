@@ -214,3 +214,45 @@ async def enqueue_conversation_note_drop(
         source_type="conversation_note",
         source_id=note_id,
     )
+
+
+# ── Reflection embedding lifecycle ──────────────────────────────────────────
+
+
+def _reflection_plaintext_is_searchable(plaintext: str | None) -> bool:
+    """A reflection entry is searchable when its trimmed plaintext is non-empty."""
+    return bool((plaintext or "").strip())
+
+
+def _reflection_content_hash(plaintext: str) -> str:
+    return _content_hash(plaintext)
+
+
+async def enqueue_reflection_embed(
+    pool: Any,
+    *,
+    entry_id: UUID,
+    plaintext_searchable: str,
+) -> None:
+    """Best-effort enqueue after a reflection entry becomes searchable."""
+    if not _reflection_plaintext_is_searchable(plaintext_searchable):
+        return
+    await enqueue_content_embed(
+        pool,
+        source_type="reflection",
+        source_id=entry_id,
+        content_hash=_reflection_content_hash(plaintext_searchable),
+    )
+
+
+async def enqueue_reflection_drop(
+    pool: Any,
+    *,
+    entry_id: UUID,
+) -> None:
+    """Best-effort enqueue after a reflection entry leaves the searchable surface."""
+    await enqueue_content_embedding_drop(
+        pool,
+        source_type="reflection",
+        source_id=entry_id,
+    )
