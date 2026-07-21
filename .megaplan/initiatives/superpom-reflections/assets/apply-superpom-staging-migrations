@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+credentials=${1:-/workspace/.creds/superpom-supabase-staging.json}
+workspace=${2:-/workspace/superpom-reflections-20260719/Pumpernickel}
+log=${3:-/workspace/.creds/superpom-staging-migrations.log}
+expected_ref=elrnuzrkwyxgqtkagrxd
+
+actual_ref=$(jq -r '.project_ref' "$credentials")
+if [[ "$actual_ref" != "$expected_ref" ]]; then
+  printf 'Refusing to reset unexpected Supabase project: %s\n' "$actual_ref" >&2
+  exit 2
+fi
+
+database_url=$(jq -r '.DIRECT_DATABASE_URL' "$credentials")
+mapfile -t public_tables < <(
+  psql "$database_url" -Atqc \
+    "SELECT format('%I.%I', schemaname, tablename) FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
+)
+
+: >"$log"
+chmod 600 "$log"
+for table in "${public_tables[@]}"; do
+  psql "$database_url" -v ON_ERROR_STOP=1 -q \
+    -c "DROP TABLE IF EXISTS $table CASCADE" >>"$log" 2>&1
+done
+
+psql "$database_url" -v ON_ERROR_STOP=1 -q \
+  -c "DROP SCHEMA IF EXISTS mediator CASCADE;
+      CREATE SCHEMA mediator;
+      GRANT USAGE ON SCHEMA mediator TO postgres, anon, authenticated, service_role;
+      GRANT ALL ON SCHEMA mediator TO postgres, service_role;" >>"$log" 2>&1
+
+{
+  printf '%s\n' 'SET search_path TO mediator, public;'
+  while IFS= read -r migration; do
+    if [[ "$(basename "$migration")" == "0020_topics_bots_bindings.sql" ]]; then
+      printf '%s\n' \
+        "INSERT INTO users (id, name, phone, timezone) VALUES
+          ('a0000000-0000-4000-8000-000000000001', 'Staging Partner A', '+15550000001', 'Europe/Berlin'),
+          ('b0000000-0000-4000-8000-000000000002', 'Staging Partner B', '+15550000002', 'Europe/Berlin')
+         ON CONFLICT (id) DO NOTHING;"
+    fi
+    printf '\\i %s\n' "$migration"
+  done < <(
+    find "$workspace/migrations" -maxdepth 1 -type f \
+      -name '[0-9][0-9][0-9][0-9]_*.sql' ! -name '*.down.sql' | sort
+  )
+} | psql "$database_url" -v ON_ERROR_STOP=1 >>"$log" 2>&1
+
+discord_a=$(sed -n 's/^DISCORD_PARTNER_USER_ID_A=//p' /workspace/.creds/superpom-staging.env)
+discord_b=$(sed -n 's/^DISCORD_PARTNER_USER_ID_B=//p' /workspace/.creds/superpom-staging.env)
+if [[ "$discord_a" =~ ^[0-9]+$ && "$discord_b" =~ ^[0-9]+$ ]]; then
+  psql "$database_url" -v ON_ERROR_STOP=1 -q \
+    -c "INSERT INTO mediator.user_identities (transport, address, user_id, verified_at)
+        VALUES
+          ('discord', '$discord_a', 'a0000000-0000-4000-8000-000000000001', now()),
+          ('discord', '$discord_b', 'b0000000-0000-4000-8000-000000000002', now())
+        ON CONFLICT (transport, address) DO UPDATE
+        SET user_id = EXCLUDED.user_id, verified_at = EXCLUDED.verified_at" >>"$log" 2>&1
+fi
+
+mediator_tables=$(psql "$database_url" -Atqc \
+  "SELECT count(*) FROM pg_tables WHERE schemaname = 'mediator'")
+public_tables_remaining=$(psql "$database_url" -Atqc \
+  "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")
+printf 'MIGRATIONS_APPLIED mediator_tables=%s public_tables=%s\n' \
+  "$mediator_tables" "$public_tables_remaining"

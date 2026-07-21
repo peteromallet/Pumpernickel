@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config=/workspace/.creds/superpom-staging.env
+auth=/workspace/.creds/railway-config.json
+authorization=/workspace/.creds/superpom-staging.deploy-authorized
+expected_authorization='project=Veas environment=staging service=Veas-staging'
+required=(
+  ENV_NAME RAILWAY_PROJECT_ID RAILWAY_ENVIRONMENT_ID RAILWAY_SERVICE_ID
+  DATABASE_URL DIRECT_DATABASE_URL SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY
+  ANTHROPIC_API_KEY OPENAI_API_KEY GROQ_API_KEY DEEPSEEK_API_KEY WHATSAPP_VERIFY_TOKEN
+  DISCORD_BOT_TOKEN DISCORD_BOT_TOKEN_SUPERPOM DISCORD_BOT_USER_ID_SUPERPOM
+  DISCORD_PARTNER_USER_ID_A DISCORD_PARTNER_USER_ID_B
+  LIVE_VOICE_TEST_USER_ID LIVE_VOICE_OPS_USER_IDS DATA_ENCRYPTION_KEY ADMIN_PASSWORD
+)
+
+fail() {
+  printf 'BLOCKED: %s\n' "$*" >&2
+  exit 1
+}
+
+allow_pending_discord=false
+require_authorization=false
+for option in "$@"; do
+  case "$option" in
+    --allow-pending-discord) allow_pending_discord=true ;;
+    --require-authorization) require_authorization=true ;;
+    *) fail "unknown option: $option" ;;
+  esac
+done
+
+[[ -x /usr/local/bin/railway ]] || fail 'Railway CLI is not installed'
+[[ -s "$auth" ]] || fail "Railway auth seed is missing: $auth"
+[[ -s "$config" ]] || fail "staging config is missing: $config"
+[[ "$(stat -c %a /workspace/.creds)" == 700 ]] || fail '/workspace/.creds must be mode 700'
+[[ "$(stat -c %a "$auth")" == 600 ]] || fail "$auth must be mode 600"
+[[ "$(stat -c %a "$config")" == 600 ]] || fail "$config must be mode 600"
+
+set -a
+# shellcheck disable=SC1090
+. "$config"
+set +a
+
+missing=()
+for key in "${required[@]}"; do
+  if [[ "$allow_pending_discord" == true &&
+        ( "$key" == DISCORD_BOT_TOKEN ||
+          "$key" == DISCORD_BOT_TOKEN_SUPERPOM ||
+          "$key" == DISCORD_BOT_USER_ID_SUPERPOM ) ]]; then
+    continue
+  fi
+  [[ -n "${!key:-}" ]] || missing+=("$key")
+done
+(( ${#missing[@]} == 0 )) || fail "blank required values: ${missing[*]}"
+
+[[ "$ENV_NAME" == staging ]] || fail 'ENV_NAME must be staging'
+[[ "${MESSAGING_PROVIDER:-}" == discord ]] || fail 'MESSAGING_PROVIDER must be discord'
+[[ "${SCHEDULER_ENABLED:-}" == false ]] || fail 'SCHEDULER_ENABLED must remain false for initial staging verification'
+[[ "${LIVE_VOICE_AUTH_ENABLED:-}" == true ]] || fail 'LIVE_VOICE_AUTH_ENABLED must be true in staging'
+[[ "$RAILWAY_PROJECT_ID" == 7d0aae23-6f83-4107-85e2-aba051cdc26e ]] || fail 'unexpected Railway project ID'
+[[ "$RAILWAY_ENVIRONMENT_ID" == 3bafa7f3-217b-4c82-9c0e-74b2e028e1e1 ]] || fail 'unexpected Railway environment ID'
+[[ "$RAILWAY_SERVICE_ID" == a96350d4-92f8-450f-a6d2-f7d2adcdb38a ]] || fail 'unexpected Railway service ID'
+
+identity=$(/usr/local/bin/railway whoami 2>&1) || fail 'Railway authentication failed'
+[[ "$identity" == *'Logged in as POM'* ]] || fail 'unexpected Railway account'
+
+production_json=$(mktemp)
+trap 'rm -f "$production_json"' EXIT
+chmod 600 "$production_json"
+/usr/local/bin/railway variables --json --environment production --service Veas >"$production_json"
+
+same_as_production=()
+for key in DATABASE_URL DIRECT_DATABASE_URL SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY \
+  DISCORD_BOT_TOKEN DISCORD_BOT_TOKEN_SUPERPOM DATA_ENCRYPTION_KEY ADMIN_PASSWORD; do
+  production_value=$(jq -r --arg key "$key" '.[$key] // ""' "$production_json")
+  [[ -z "$production_value" || "${!key}" != "$production_value" ]] || same_as_production+=("$key")
+done
+(( ${#same_as_production[@]} == 0 )) || fail "staging values equal production: ${same_as_production[*]}"
+
+if [[ "$require_authorization" == true ]]; then
+  [[ -s "$authorization" ]] || fail "deploy authorization is missing: $authorization"
+  [[ "$(cat "$authorization")" == "$expected_authorization" ]] || fail 'deploy authorization target does not match'
+fi
+
+printf 'READY project=Veas environment=staging service=Veas-staging config=validated production_isolation=validated'
+if [[ "$require_authorization" == true ]]; then
+  printf ' authorization=validated'
+else
+  printf ' authorization=not_required'
+fi
+if [[ "$allow_pending_discord" == true ]]; then
+  printf ' discord_gateway=pending'
+fi
+printf '\n'

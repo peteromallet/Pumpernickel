@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config=/workspace/.creds/superpom-staging.env
+supabase=/workspace/.creds/superpom-supabase-staging.json
+
+[[ -s "$config" ]] || { echo "missing $config" >&2; exit 1; }
+[[ -s "$supabase" ]] || { echo "missing $supabase" >&2; exit 1; }
+
+export SUPERPOM_PRODUCTION_JSON
+SUPERPOM_PRODUCTION_JSON=$(cd /workspace/superpom-reflections-20260719/Pumpernickel && \
+  /usr/local/bin/railway variables --json --environment production --service Veas)
+
+python - "$config" "$supabase" <<'PY'
+import base64
+import json
+import os
+import secrets
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+supabase_path = Path(sys.argv[2])
+production = json.loads(os.environ["SUPERPOM_PRODUCTION_JSON"])
+staging_supabase = json.loads(supabase_path.read_text())
+
+lines = config_path.read_text().splitlines()
+values: dict[str, str] = {}
+order: list[str] = []
+comments: list[str] = []
+for line in lines:
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        comments.append(line)
+        continue
+    key, value = line.split("=", 1)
+    values[key] = value
+    order.append(key)
+
+for key in ("DATABASE_URL", "DIRECT_DATABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
+    values[key] = staging_supabase[key]
+
+# Model-provider credentials are account-scoped rather than data-environment
+# scoped. Reusing them in isolated staging is intentional; DB, Supabase,
+# encryption, admin, and bot credentials remain staging-specific.
+for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY"):
+    values[key] = production.get(key, "")
+
+values["WHATSAPP_VERIFY_TOKEN"] = values.get("WHATSAPP_VERIFY_TOKEN") or secrets.token_urlsafe(32)
+values["DATA_ENCRYPTION_KEY"] = values.get("DATA_ENCRYPTION_KEY") or base64.b64encode(secrets.token_bytes(32)).decode()
+values["ADMIN_PASSWORD"] = values.get("ADMIN_PASSWORD") or secrets.token_urlsafe(32)
+
+# Human Discord IDs are identities, not bot credentials; reuse is safe and
+# lets the staging bot target the same consenting operators.
+for key in ("DISCORD_PARTNER_USER_ID_A", "DISCORD_PARTNER_USER_ID_B", "LIVE_VOICE_TEST_USER_ID"):
+    values[key] = production.get(key, "")
+values["LIVE_VOICE_OPS_USER_IDS"] = production.get("LIVE_VOICE_OPS_USER_IDS", "") or values.get("LIVE_VOICE_TEST_USER_ID", "")
+
+values["ENV_NAME"] = "staging"
+values["SCHEDULER_ENABLED"] = "false"
+values["MESSAGING_PROVIDER"] = "discord"
+values["LIVE_VOICE_AUTH_ENABLED"] = "true"
+
+rendered = []
+seen = set()
+for line in lines:
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        rendered.append(line)
+        continue
+    key = line.split("=", 1)[0]
+    rendered.append(f"{key}={values.get(key, '')}")
+    seen.add(key)
+for key, value in values.items():
+    if key not in seen:
+        rendered.append(f"{key}={value}")
+
+tmp_path = config_path.with_suffix(".env.next")
+tmp_path.write_text("\n".join(rendered) + "\n")
+os.chmod(tmp_path, 0o600)
+os.replace(tmp_path, config_path)
+PY
+
+unset SUPERPOM_PRODUCTION_JSON
+chmod 600 "$config"
+
+set -a
+# shellcheck disable=SC1090
+. "$config"
+set +a
+
+for key in DATABASE_URL DIRECT_DATABASE_URL SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY \
+  ANTHROPIC_API_KEY OPENAI_API_KEY GROQ_API_KEY DEEPSEEK_API_KEY \
+  WHATSAPP_VERIFY_TOKEN DATA_ENCRYPTION_KEY ADMIN_PASSWORD \
+  DISCORD_PARTNER_USER_ID_A DISCORD_PARTNER_USER_ID_B \
+  LIVE_VOICE_TEST_USER_ID LIVE_VOICE_OPS_USER_IDS; do
+  [[ -n "${!key:-}" ]] || { echo "bootstrap failed: $key remains blank" >&2; exit 1; }
+done
+
+echo 'BOOTSTRAPPED isolated_supabase=yes generated_staging_secrets=yes shared_provider_credentials=yes discord_bot_credentials=pending'

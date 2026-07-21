@@ -1,0 +1,43 @@
+provider: ssh
+
+repo:
+  url: https://github.com/peteromallet/Pumpernickel.git
+  branch: main
+  workspace: /workspace/superpom-reflections-20260719/Pumpernickel
+
+agents:
+  default: codex
+
+codex:
+  model: gpt-5.4
+  reasoning: high
+
+mode: idle
+
+chain:
+  spec: /workspace/superpom-reflections-20260719/Pumpernickel/.megaplan/initiatives/superpom-reflections/chain.yaml
+
+megaplan:
+  ref: editible-install
+  codex_auth: chatgpt
+  repo: https://github.com/peteromallet/Arnold.git
+  src_path: /workspace/arnold
+
+resources:
+  volume: agent-volume
+  port: 8080
+
+ssh:
+  host: 159.69.51.216
+  user: root
+  port: 22
+  remote_dir: /opt/megaplan-cloud/deploy
+  workspace_dir: /opt/megaplan-cloud/workspace
+  container: megaplan-cloud-agent
+
+chain_session: superpom-reflections-20260719
+
+# Railway credentials and staging runtime values are stored directly on the
+# persistent worker under /workspace/.creds. Keep this empty: declaring secret
+# names here would upload local values and could overwrite worker-side values.
+secrets: []

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config=/workspace/.creds/superpom-staging.env
+preflight=/workspace/.creds/superpom-staging-preflight
+
+"$preflight" "$@"
+
+args=(variables --environment staging --service Veas-staging --skip-deploys)
+published=()
+while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ -n "$line" && "$line" != \#* ]] || continue
+  key=${line%%=*}
+  value=${line#*=}
+  [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+  [[ "$key" == RAILWAY_PROJECT_ID || "$key" == RAILWAY_ENVIRONMENT_ID || "$key" == RAILWAY_SERVICE_ID ]] && continue
+  [[ -n "$value" ]] || continue
+  args+=(--set "$key=$value")
+  published+=("$key")
+done <"$config"
+
+set +x
+/usr/local/bin/railway "${args[@]}" >/dev/null
+printf 'PUBLISHED environment=staging service=Veas-staging keys=%s\n' "$(IFS=,; echo "${published[*]}")"

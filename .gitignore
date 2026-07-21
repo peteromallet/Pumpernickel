@@ -18,7 +18,11 @@ venv/
 # Local/editor/OS state
 .DS_Store
 .claude/
-.megaplan/
+.megaplan/*
+!.megaplan/initiatives/
+.megaplan/initiatives/*
+!.megaplan/initiatives/superpom-reflections/
+!.megaplan/initiatives/superpom-reflections/**
 .megaplan-queue/
 
 # Operator outputs

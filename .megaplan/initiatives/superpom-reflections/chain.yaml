@@ -1,0 +1,45 @@
+base_branch: main
+
+anchors:
+  north_star: NORTHSTAR.md
+
+milestones:
+  - label: m1-foundation
+    idea: .megaplan/initiatives/superpom-reflections/briefs/m1-foundation.md
+    profile: partnered-5
+    robustness: full
+    depth: medium
+    vendor: codex
+
+  - label: m2-capture
+    idea: .megaplan/initiatives/superpom-reflections/briefs/m2-capture.md
+    profile: partnered-5
+    robustness: full
+    depth: medium
+    vendor: codex
+
+  - label: m3-knowledge-retrieval
+    idea: .megaplan/initiatives/superpom-reflections/briefs/m3-knowledge-retrieval.md
+    profile: partnered-5
+    robustness: full
+    depth: medium
+    vendor: codex
+
+  - label: m4-hardening-ship
+    idea: .megaplan/initiatives/superpom-reflections/briefs/m4-hardening-ship.md
+    profile: partnered-5
+    robustness: full
+    depth: medium
+    vendor: codex
+
+on_failure:
+  abort: stop_chain
+on_escalate:
+  abort: stop_chain
+merge_policy: auto
+
+driver:
+  robustness: full
+  auto_approve: true
+  max_iterations: 60
+  poll_sleep: 8.0

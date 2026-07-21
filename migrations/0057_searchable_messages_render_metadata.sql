@@ -7,6 +7,11 @@
 
 BEGIN;
 
+-- PostgreSQL only permits CREATE OR REPLACE VIEW to preserve the existing
+-- column names and order (new columns may only be appended). This migration
+-- deliberately inserts render metadata before content, so recreate the view.
+DROP VIEW IF EXISTS mediator.v_searchable_messages;
+
 CREATE OR REPLACE VIEW mediator.v_searchable_messages AS
 SELECT
     m.id AS message_id,
