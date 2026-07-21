@@ -63,6 +63,7 @@ CREATE TABLE mediator.reflection_sessions (
         REFERENCES mediator.bots(id),
 
     -- Session initiation.
+    opened_at                    timestamptz NOT NULL DEFAULT now(),
     opened_by_message_id        uuid
         REFERENCES mediator.messages(id),
     opened_by_turn_id           uuid

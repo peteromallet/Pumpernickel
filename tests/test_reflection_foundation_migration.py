@@ -84,6 +84,10 @@ def test_0066_creates_exactly_three_reflection_tables():
     assert ud.count("create table mediator.reflection_") == 3
 
 
+def test_0066_sessions_include_opened_at_for_finalization_age():
+    assert "opened_at timestamptz not null default now()" in ud
+
+
 def test_0066_no_forbidden_surfaces():
     assert "scheduled_job" not in ud.replace("-- no scheduled_jobs", "")
     assert "feature_flag" not in ud
