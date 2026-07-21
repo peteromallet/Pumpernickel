@@ -108,6 +108,7 @@ MEDIATOR_BOT = MediatorBotSpec(
     bot_id=MEDIATOR_BOT_ID,
     prompt_renderer=render_system_prompt,
     step_instructions=MEDIATOR_STEP_INSTRUCTIONS,
+    provider_chain=("deepseek", "anthropic"),
     cross_topic_policy="peek",
     read_scopes=ReadScopes(
         topics=frozenset({"own"}),

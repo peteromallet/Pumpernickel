@@ -224,6 +224,7 @@ def build_superpom_spec() -> BotSpec:
         write_scopes=WriteScopes(topics=frozenset({"own"})),
         cross_topic_policy="peek",
         compass_enabled=True,
+        provider_chain=("deepseek", "anthropic"),
         tool_allowlist=(
             frozenset(TOOL_DISPATCH.keys()) - _SUPERPOM_EXCLUSIONS
         ),

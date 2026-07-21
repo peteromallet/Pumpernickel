@@ -168,6 +168,7 @@ def build_habits_spec() -> BotSpec:
         ),
         write_scopes=WriteScopes(topics=frozenset({"own"})),
         cross_topic_policy="peek",
+        provider_chain=("deepseek", "anthropic"),
         tool_allowlist=(
             frozenset(TOOL_DISPATCH.keys()) - _COACH_EXCLUSIONS
         ) | _HABITS_ADDITIONS,

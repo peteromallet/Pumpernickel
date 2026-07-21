@@ -11,7 +11,6 @@ decision #6 — see feedback.md.
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
 
 from app.bots.base import BotSpec, ReadScopes, WriteScopes
 from app.services.prompts_solo import render_solo_system_prompt
@@ -77,6 +76,7 @@ def build_coach_spec() -> BotSpec:
         read_scopes=ReadScopes(topics=frozenset({"career"})),
         write_scopes=WriteScopes(topics=frozenset({"career"})),
         cross_topic_policy="peek",
+        provider_chain=("deepseek", "anthropic"),
         tool_allowlist=frozenset(TOOL_DISPATCH.keys())
         - frozenset(
             {

@@ -17,6 +17,16 @@ from tests.conftest import FakePool
 pytestmark = pytest.mark.anyio
 
 
+@pytest.fixture(autouse=True)
+def _pin_provider_for_anthropic_fakes(monkeypatch):
+    """Keep provider-agnostic lifecycle tests on their in-process fake."""
+    monkeypatch.setattr(
+        agentic,
+        "_resolve_provider_chain",
+        lambda _bot_spec, _user, _settings: ("anthropic",),
+    )
+
+
 USAGE = {
     "input_tokens": 100,
     "cache_creation_input_tokens": 20,

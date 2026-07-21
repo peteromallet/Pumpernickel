@@ -153,6 +153,7 @@ def build_tante_rosi_spec() -> BotSpec:
         ),
         write_scopes=WriteScopes(topics=frozenset({"own"})),
         cross_topic_policy="peek",
+        provider_chain=("deepseek", "anthropic"),
         tool_allowlist=(
             frozenset(TOOL_DISPATCH.keys()) - _COACH_EXCLUSIONS - HECTOR_ONLY_TOOLS
         )

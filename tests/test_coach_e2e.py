@@ -390,6 +390,15 @@ async def test_coach_e2e_turn(app_env, monkeypatch):
         FakeAnthropicFactory(responses, requests),
     )
 
+    # This test exercises solo-bot lifecycle/scoping, not production provider
+    # selection. Pin it to the in-process fake installed above so a chain
+    # change can never escape to a live DeepSeek request.
+    monkeypatch.setattr(
+        agentic,
+        "_resolve_provider_chain",
+        lambda _bot_spec, _user, _settings: ("anthropic",),
+    )
+
     # ── patch delivery ────────────────────────────────────────────────
     whatsapp_sent: list = []
     _patch_whatsapp(monkeypatch, whatsapp_sent)
