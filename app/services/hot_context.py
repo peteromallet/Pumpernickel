@@ -1227,9 +1227,9 @@ async def build_hot_context(
     # Transformed with the identical visibility / redaction logic as the
     # recent-message window.
     topic_recent_edge_sent_at = (
-        hot_context_window_edge["sent_at"]
+        datetime.fromisoformat(hot_context_window_edge["sent_at"])
         if hot_context_window_edge is not None
-        else now_utc.isoformat()
+        else now_utc
     )
     topic_recent_prior_rows = await pool.fetch(
         """\

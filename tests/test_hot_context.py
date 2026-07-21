@@ -473,11 +473,10 @@ class HotContextPool:
             ]
             # --- Topic-recent prior (T4): sent_at < $4 + configurable limit ---
             if "AND sent_at < $" in compact and "LIMIT $" in compact:
-                sent_at_cutoff_str = args[3]
+                sent_at_cutoff = args[3]
                 limit = args[4] if len(args) > 4 else 20
-                from datetime import datetime as dt
-
-                cutoff = dt.fromisoformat(str(sent_at_cutoff_str))
+                assert isinstance(sent_at_cutoff, datetime)
+                cutoff = sent_at_cutoff
                 if cutoff.tzinfo is None:
                     cutoff = cutoff.replace(tzinfo=UTC)
                 prior_rows = [
