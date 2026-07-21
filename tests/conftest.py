@@ -1123,6 +1123,8 @@ class FakePool:
             result = self._health_connection_for_user(*args)
             if result is None:
                 return None
+            if "status = 'active'" in compact and result.get("status") != "active":
+                return None
             return {"id": result["id"]}
         if (
             compact.startswith("SELECT id, status, granted_scopes")
@@ -1292,6 +1294,7 @@ class FakePool:
             compact.startswith("SELECT metric, measured_at, value_numeric, canonical_unit,")
             and "FROM mediator.health_normalized_measurements" in compact
             and "measured_at >= $2" in compact
+            and "measured_at <= $3" not in compact
         ):
             user_id, cutoff = args
             rows = [
@@ -1301,6 +1304,24 @@ class FakePool:
                 and r["measured_at"] >= cutoff
             ]
             rows.sort(key=lambda r: (r["measured_at"], str(r["id"])), reverse=True)
+            return rows
+        if (
+            compact.startswith("SELECT metric, measured_at, value_numeric, canonical_unit,")
+            and "FROM mediator.health_normalized_measurements" in compact
+            and "measured_at >= $2" in compact
+            and "measured_at <= $3" in compact
+        ):
+            user_id, started_at, ended_at = args
+            rows = [
+                dict(r)
+                for r in self.health_normalized_measurements.values()
+                if r["user_id"] == user_id
+                and started_at <= r["measured_at"] <= ended_at
+            ]
+            rows.sort(
+                key=lambda r: (r["measured_at"], r["metric"], str(r["id"])),
+                reverse=True,
+            )
             return rows
         if (
             compact.startswith("SELECT started_at, ended_at, local_sleep_date, local_timezone,")

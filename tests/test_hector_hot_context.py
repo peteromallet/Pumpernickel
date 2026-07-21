@@ -26,6 +26,7 @@ def _make_minimal_hc(
     *,
     bot_id: str = "coach",
     fitness_block: str | None = None,
+    health_block: str | None = None,
     workout_block: str | None = None,
     topic_status: dict | None = None,
     pregnancy_state: str | None = None,
@@ -62,6 +63,7 @@ def _make_minimal_hc(
             "messages": [],
         },
         fitness_block=fitness_block,
+        health_block=health_block,
         workout_block=workout_block,
         topic_status=topic_status,
         pregnancy_state=pregnancy_state,
@@ -175,6 +177,15 @@ class TestFitnessBlockOrdering:
         assert fit_idx < ct_idx, (
             "## Fitness should appear before ## Cross-topic activity"
         )
+
+    def test_health_snapshot_precedes_adherence_inside_fitness(self):
+        hc = _make_minimal_hc(
+            bot_id="hector",
+            health_block="Health data:\n  latest: sleep=7h",
+            fitness_block=_sample_fitness_block(),
+        )
+        rendered = _render_solo_with_counts(hc, {}, clip_limit=240)
+        assert rendered.index("Health data:") < rendered.index("Current focus:")
 
 
 class TestFitnessBlockContent:

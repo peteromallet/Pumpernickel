@@ -10,7 +10,7 @@ and their ``is_deleted`` flag are never consulted directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 from uuid import UUID
@@ -58,6 +58,13 @@ class WeightResult:
     avg_30d: float | None = None
     min_7d: float | None = None
     max_7d: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MeasurementsResult:
+    """Body measurements in a bounded time range."""
+
+    readings: list[WeightReading] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +232,16 @@ _SELECT_WEIGHT_TREND = """\
       AND metric = 'weight'
       AND measured_at >= $2
     ORDER BY measured_at DESC
+"""
+
+_SELECT_MEASUREMENTS_IN_RANGE = """\
+    SELECT metric, measured_at, value_numeric, canonical_unit,
+           source_device_id, source_device_model
+    FROM mediator.health_normalized_measurements
+    WHERE user_id = $1
+      AND measured_at >= $2
+      AND measured_at <= $3
+    ORDER BY measured_at DESC, metric
 """
 
 _SELECT_SLEEP_NIGHTLY = """\
@@ -473,6 +490,22 @@ async def get_weight(
     )
 
 
+async def get_measurements_in_range(
+    *,
+    user_id: UUID,
+    pool: Any,
+    started_at: datetime,
+    ended_at: datetime,
+) -> MeasurementsResult:
+    """Return readings in closed ``[started_at, ended_at]``, scoped to *user_id*."""
+    rows = await _executor(pool).fetch(
+        _SELECT_MEASUREMENTS_IN_RANGE, user_id, started_at, ended_at
+    )
+    return MeasurementsResult(
+        readings=[_row_to_weight_reading(r) for r in (rows or [])]
+    )
+
+
 async def get_nightly_sleep(
     *,
     user_id: UUID,
@@ -716,6 +749,7 @@ async def get_weekly_workout_summary(
     user_id: UUID,
     pool: Any,
     reference_date: date | None = None,
+    timezone_name: str | None = None,
 ) -> WeeklyWorkoutSummaryResult:
     """Return 7-day rolling workout summaries ending on *reference_date*.
 
@@ -730,9 +764,15 @@ async def get_weekly_workout_summary(
     window_start = ref_date - timedelta(days=6)  # inclusive 7-day window
     window_end = ref_date + timedelta(days=1)  # exclusive upper bound
 
-    # Use UTC datetime boundaries for the window.
-    window_start_dt = datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc)
-    window_end_dt = datetime.combine(window_end, datetime.min.time(), tzinfo=timezone.utc)
+    # Pad the UTC query by one day at each edge, then filter by the workout's
+    # derived local date below.  A local calendar week is not equivalent to
+    # UTC midnight boundaries (especially near UTC+/-14 and DST changes).
+    window_start_dt = datetime.combine(
+        window_start - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+    )
+    window_end_dt = datetime.combine(
+        window_end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+    )
 
     rows = await _executor(pool).fetch(
         _SELECT_WORKOUTS_IN_RANGE,
@@ -763,7 +803,21 @@ async def get_weekly_workout_summary(
         sid = UUID(str(row["source_record_id"]))
         proj_list = proj_by_source.get(sid, [])
         proj_state = _resolve_projection_state(proj_list)
-        summaries.append(_row_to_workout_summary(row, proj_state))
+        workout = _row_to_workout_summary(row, proj_state)
+        if timezone_name:
+            try:
+                from zoneinfo import ZoneInfo
+
+                workout = replace(
+                    workout,
+                    local_date=workout.started_at.astimezone(
+                        ZoneInfo(timezone_name)
+                    ).date(),
+                )
+            except (KeyError, ValueError):
+                pass
+        if workout.local_date is not None and window_start <= workout.local_date <= ref_date:
+            summaries.append(workout)
 
     # Group by local_date.
     by_date: dict[date, list[WorkoutSummary]] = {}
@@ -808,6 +862,7 @@ def _executor(pool: Any) -> Any:
 
 __all__ = [
     "ConnectionFreshness",
+    "MeasurementsResult",
     "NightlySleepResult",
     "RecentWorkoutsResult",
     "SleepDaySummary",
@@ -820,6 +875,7 @@ __all__ = [
     "WorkoutProjectionState",
     "WorkoutSummary",
     "get_connection_freshness",
+    "get_measurements_in_range",
     "get_nightly_sleep",
     "get_recent_workouts",
     "get_sleep_rolling_7d",

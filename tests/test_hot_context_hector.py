@@ -11,7 +11,7 @@ T15 (SC15):
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -896,9 +896,9 @@ class TestWorkoutBlockOmission:
             bot_id="hector",
         )
 
-        assert hc.workout_block is None, (
-            "workout_block should be None when no normalized workouts exist"
-        )
+        assert hc.workout_block is not None
+        assert "past_24h: no_workout_data" in hc.workout_block
+        assert hc.workout_block.count("no_workout_data") == 8
 
     @pytest.mark.asyncio
     async def test_no_workout_block_for_non_hector_with_data(
@@ -1071,7 +1071,7 @@ class TestWorkoutBlockWithData:
             "workout_block should be populated when workout data exists"
         )
         assert "Recent workouts (7d):" in hc.workout_block
-        assert "workout(s)" in hc.workout_block
+        assert "count=1" in hc.workout_block
         # workout types should appear
         assert "running" in hc.workout_block
         assert "cycling" in hc.workout_block

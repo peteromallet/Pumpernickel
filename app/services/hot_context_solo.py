@@ -7,7 +7,7 @@ no partner content, no bridge candidates.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 import logging
@@ -1044,6 +1044,8 @@ async def build_hot_context_solo(
             health_block = await _build_health_summary_block(
                 user_id=user.id,
                 pool=pool,
+                now_utc=now_utc,
+                timezone_name=user_timezone or "UTC",
             )
         except Exception:
             # Failure isolation: health queries are best-effort
@@ -1052,6 +1054,8 @@ async def build_hot_context_solo(
             workout_block = await _build_workout_summary_block(
                 user_id=user.id,
                 pool=pool,
+                now_utc=now_utc,
+                timezone_name=user_timezone or "UTC",
             )
         except Exception:
             # Failure isolation: workout queries are best-effort
@@ -1180,18 +1184,22 @@ async def build_hot_context_solo(
 async def _build_health_summary_block(
     user_id: UUID,
     pool: Any,
+    *,
+    now_utc: datetime,
+    timezone_name: str,
 ) -> str | None:
-    """Query derived health summaries (weight trend + sleep rolling) and
-    return a compact pre-formatted string for Hector hot context.
+    """Build Hector's deterministic, local-time health snapshot.
 
-    Returns None when no health data is available (no connection or no
-    normalized rows).  This runs independently of active commitments so
-    the bot always sees the user's health picture when data exists.
+    The prominent rows use a rolling past-24-hour window for completed sleep
+    and body measurements, retaining exact local timestamps. Older data is
+    never relabelled as recent. Trends cover today (explicitly partial) plus
+    the six preceding local dates.
     """
     from app.services.health_sync.read_models import (
         get_connection_freshness,
+        get_measurements_in_range,
+        get_nightly_sleep,
         get_sleep_rolling_7d,
-        get_weight,
     )
 
     # Find the user's active Withings connection.
@@ -1201,6 +1209,7 @@ async def _build_health_summary_block(
         FROM mediator.health_connections
         WHERE user_id = $1
           AND provider = 'withings'
+          AND status = 'active'
           AND deleted_at IS NULL
         ORDER BY updated_at DESC
         LIMIT 1
@@ -1212,70 +1221,278 @@ async def _build_health_summary_block(
 
     connection_id = conn_row["id"]
 
-    # Connection freshness.
     freshness = await get_connection_freshness(
         connection_id=connection_id,
         user_id=user_id,
         pool=pool,
+        now=now_utc,
     )
 
-    # Weight trend.
-    weight = await get_weight(user_id=user_id, pool=pool)
+    tz = timezone_or_utc(timezone_name)
+    now_local = now_utc.astimezone(tz)
+    today = now_local.date()
+    yesterday = today - timedelta(days=1)
+    trend_start = today - timedelta(days=6)
+    range_start = datetime.combine(trend_start, datetime.min.time(), tzinfo=tz)
+    range_end = now_utc.astimezone(tz)
 
-    # Sleep rolling 7-day.
-    sleep = await get_sleep_rolling_7d(user_id=user_id, pool=pool)
+    measurements = await get_measurements_in_range(
+        user_id=user_id,
+        pool=pool,
+        started_at=range_start.astimezone(UTC),
+        ended_at=range_end.astimezone(UTC),
+    )
+    today_sleep = await get_nightly_sleep(
+        user_id=user_id, local_sleep_date=today, pool=pool
+    )
+    yesterday_sleep = await get_nightly_sleep(
+        user_id=user_id, local_sleep_date=yesterday, pool=pool
+    )
+    sleep = await get_sleep_rolling_7d(
+        user_id=user_id, pool=pool, reference_date=today
+    )
 
-    # Determine if there is anything to report.
-    has_weight = weight.latest is not None
-    has_sleep = sleep.nights_with_data > 0
-    if not has_weight and not has_sleep:
-        return None
+    recent_sleep_sessions = [
+        session
+        for session in [*today_sleep.sessions, *yesterday_sleep.sessions]
+        if now_utc - timedelta(hours=24) <= session.ended_at <= now_utc
+    ]
+    last_night_sessions = _select_recent_overnight_group(recent_sleep_sessions, tz)
+    latest_sleep_date = (
+        max(session.ended_at for session in last_night_sessions)
+        .astimezone(tz)
+        .date()
+        if last_night_sessions
+        else None
+    )
 
-    lines: list[str] = []
-    lines.append("Health summaries:")
+    by_measurement_date: dict[date, dict[str, Any]] = {}
+    for reading in measurements.readings:
+        local_date = reading.measured_at.astimezone(tz).date()
+        metrics = by_measurement_date.setdefault(local_date, {})
+        metrics.setdefault(reading.metric, reading)  # query is newest first
 
-    if not freshness.is_fresh and not has_weight and not has_sleep:
-        lines.append("  (no recent health data)")
-        return "\n".join(lines)
-
-    if has_weight:
-        w = weight.latest
-        assert w is not None
-        lines.append(
-            f"  Weight: {w.value_numeric:.1f} {w.canonical_unit}"
-            f" (as of {w.measured_at.strftime('%Y-%m-%d')})"
+    lines = [
+        f"Health data (private; local_timezone={timezone_name}):",
+        "  latest:",
+        "    latest_completed_sleep_past_24h"
+        + (
+            f" (wake_date={latest_sleep_date.isoformat()}): "
+            if latest_sleep_date is not None
+            else ": no_recent_overnight_sleep"
         )
-        if weight.avg_7d is not None:
-            lines.append(f"    7d avg: {weight.avg_7d:.1f} {w.canonical_unit}")
-        if weight.avg_30d is not None:
-            lines.append(f"    30d avg: {weight.avg_30d:.1f} {w.canonical_unit}")
+        + (
+            _format_sleep_sessions(last_night_sessions, tz)
+            if last_night_sessions
+            else ""
+        ),
+    ]
 
-    if has_sleep:
-        total_asleep = sum(
-            (s.total_asleep_seconds or 0)
-            for summary in sleep.summaries
-            for s in summary.sessions
+    recent_cutoff = now_utc - timedelta(hours=24)
+    recent_by_metric: dict[str, Any] = {}
+    for reading in measurements.readings:
+        if reading.measured_at >= recent_cutoff:
+            recent_by_metric.setdefault(reading.metric, reading)
+    if recent_by_metric:
+        rendered_measurements = ", ".join(
+            _format_measurement(recent_by_metric[metric], tz=tz, now_utc=now_utc)
+            for metric in _ordered_metrics(recent_by_metric)
         )
-        avg_score_vals = [
-            s.sleep_score
-            for summary in sleep.summaries
-            for s in summary.sessions
-            if s.sleep_score is not None
-        ]
-        lines.append(
-            f"  Sleep (7d): {sleep.nights_with_data} nights, "
-            f"{total_asleep / 3600:.1f}h total asleep"
+    else:
+        rendered_measurements = "no_data"
+    lines.append(
+        "    measurements_past_24h: "
+        f"{rendered_measurements}"
+    )
+    lines.append(
+        f"    sync_status: {'fresh' if freshness.is_fresh else 'stale'}"
+        + (
+            f"; last_success_at={freshness.last_success_at.isoformat()}"
+            if freshness.last_success_at is not None
+            else "; last_success_at=unknown"
         )
-        if avg_score_vals:
-            avg_score = sum(avg_score_vals) / len(avg_score_vals)
-            lines.append(f"    avg sleep score: {avg_score:.0f}")
+    )
+
+    weight_days = [
+        (day, metrics["weight"])
+        for day, metrics in sorted(by_measurement_date.items())
+        if trend_start <= day <= today and "weight" in metrics
+    ]
+    if weight_days:
+        values = [reading.value_numeric for _, reading in weight_days]
+        unit = weight_days[-1][1].canonical_unit
+        delta = values[-1] - values[0] if len(values) > 1 else None
+        delta_text = f"{delta:+.1f} {unit}" if delta is not None else "insufficient_data"
+        weight_trend = (
+            f"avg={sum(values) / len(values):.1f} {unit}; "
+            f"delta_oldest_to_newest={delta_text}; days_with_data={len(values)}/7"
+        )
+    else:
+        weight_trend = "no_data"
+
+    sleep_by_date = {summary.local_sleep_date: summary for summary in sleep.summaries}
+    overnight_by_date = {
+        day: _qualifying_overnight_sessions(summary.sessions, tz)
+        for day, summary in sleep_by_date.items()
+    }
+    sleep_durations = [
+        _sleep_duration_seconds(sessions)
+        for sessions in overnight_by_date.values()
+        if sessions and _sleep_duration_seconds(sessions) is not None
+    ]
+    sleep_avg = (
+        f"{_format_duration(round(sum(sleep_durations) / len(sleep_durations)))}"
+        f"/night; nights_with_duration={len(sleep_durations)}/7"
+        if sleep_durations
+        else "no_data"
+    )
+    lines += [
+        f"  recent_7_local_dates ({trend_start.isoformat()}..{today.isoformat()}; today=partial):",
+        f"    weight: {weight_trend}",
+        f"    sleep_average: {sleep_avg}",
+        "    sleep_by_date (newest_first):",
+    ]
+    for day_offset in range(7):
+        day = today - timedelta(days=day_offset)
+        summary = sleep_by_date.get(day)
+        day_label = " [today_partial]" if day == today else ""
+        if summary is None:
+            lines.append(f"      - {day.isoformat()}{day_label}: no_data")
+        else:
+            overnight_sessions = overnight_by_date[day]
+            if not overnight_sessions:
+                lines.append(
+                    f"      - {day.isoformat()}{day_label}: no_overnight_sleep"
+                )
+                continue
+            lines.append(
+                f"      - {day.isoformat()}{day_label}: "
+                f"{_format_sleep_sessions(overnight_sessions, tz)}"
+            )
 
     return "\n".join(lines)
+
+
+def _ordered_metrics(metrics: dict[str, Any]) -> list[str]:
+    preferred = ["weight", "fat_ratio", "fat_mass", "muscle_mass", "bone_mass"]
+    return [metric for metric in preferred if metric in metrics] + sorted(
+        set(metrics) - set(preferred)
+    )
+
+
+def _format_measurement(reading: Any, *, tz: Any, now_utc: datetime) -> str:
+    value = f"{reading.value_numeric:.1f}"
+    measured_local = reading.measured_at.astimezone(tz)
+    age = _format_age(now_utc - reading.measured_at)
+    return (
+        f"{reading.metric}={value} {reading.canonical_unit} "
+        f"@ {measured_local.isoformat(timespec='minutes')} (age={age})"
+    )
+
+
+def _format_age(delta: timedelta) -> str:
+    minutes = max(0, round(delta.total_seconds() / 60))
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, remainder = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{remainder:02d}m"
+    days, remaining_hours = divmod(hours, 24)
+    return f"{days}d{remaining_hours:02d}h"
+
+
+def _format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "unknown"
+    minutes = max(0, round(seconds / 60))
+    hours, remainder = divmod(minutes, 60)
+    return f"{hours}h{remainder:02d}m"
+
+
+def _format_sleep_sessions(sessions: list[Any], tz: Any) -> str:
+    if not sessions:
+        return "no_data"
+    started_at = min(session.started_at for session in sessions).astimezone(tz)
+    ended_at = max(session.ended_at for session in sessions).astimezone(tz)
+    durations = [
+        session.total_asleep_seconds
+        for session in sessions
+        if session.total_asleep_seconds is not None
+    ]
+    scores = [session.sleep_score for session in sessions if session.sleep_score is not None]
+    asleep = _format_duration(sum(durations)) if durations else "unknown"
+    score = f"{sum(scores) / len(scores):.0f}" if scores else "unknown"
+    return (
+        f"asleep={asleep}; bed_local={started_at.isoformat(timespec='minutes')}; "
+        f"wake_local={ended_at.isoformat(timespec='minutes')}; score={score}"
+    )
+
+
+def _sleep_duration_seconds(sessions: list[Any]) -> int | None:
+    durations = [
+        session.total_asleep_seconds
+        for session in sessions
+        if session.total_asleep_seconds is not None
+    ]
+    if durations:
+        return sum(durations)
+    if not sessions:
+        return None
+    return round(
+        (max(session.ended_at for session in sessions) - min(
+            session.started_at for session in sessions
+        )).total_seconds()
+    )
+
+
+def _qualifying_overnight_sessions(sessions: list[Any], tz: Any) -> list[Any]:
+    candidates = []
+    for session in sessions:
+        if session.completeness_state not in {"complete", "revised"}:
+            continue
+        started_local = session.started_at.astimezone(tz)
+        ended_local = session.ended_at.astimezone(tz)
+        starts_at_night = started_local.hour >= 18 or started_local.hour < 6
+        wakes_in_morning = ended_local.hour < 12 or (
+            ended_local.hour == 12 and ended_local.minute == 0
+        )
+        if starts_at_night and wakes_in_morning:
+            candidates.append(session)
+    if not candidates:
+        return []
+    duration = _sleep_duration_seconds(candidates)
+    if duration is None or duration < 3 * 3600:
+        return []
+    return candidates
+
+
+def _select_recent_overnight_group(sessions: list[Any], tz: Any) -> list[Any]:
+    by_wake_date: dict[date, list[Any]] = {}
+    for session in sessions:
+        actual_wake_date = session.ended_at.astimezone(tz).date()
+        by_wake_date.setdefault(actual_wake_date, []).append(session)
+    groups = [
+        group
+        for group in (
+            _qualifying_overnight_sessions(day_sessions, tz)
+            for day_sessions in by_wake_date.values()
+        )
+        if group
+    ]
+    if not groups:
+        return []
+    return max(
+        groups,
+        key=lambda group: max(session.ended_at for session in group),
+    )
 
 
 async def _build_workout_summary_block(
     user_id: UUID,
     pool: Any,
+    *,
+    now_utc: datetime,
+    timezone_name: str,
 ) -> str | None:
     """Query 7-day rolling workout summaries and return a compact
     pre-formatted string for Hector hot context.
@@ -1302,6 +1519,7 @@ async def _build_workout_summary_block(
         FROM mediator.health_connections
         WHERE user_id = $1
           AND provider = 'withings'
+          AND status = 'active'
           AND deleted_at IS NULL
         ORDER BY updated_at DESC
         LIMIT 1
@@ -1311,17 +1529,52 @@ async def _build_workout_summary_block(
     if conn_row is None:
         return None
 
-    # 7-day rolling workout summary.
-    result = await get_weekly_workout_summary(user_id=user_id, pool=pool)
-
-    if not result.summaries or result.days_with_workouts == 0:
-        return None
-
+    tz = timezone_or_utc(timezone_name)
+    today = now_utc.astimezone(tz).date()
+    result = await get_weekly_workout_summary(
+        user_id=user_id,
+        pool=pool,
+        reference_date=today,
+        timezone_name=timezone_name,
+    )
     lines: list[str] = []
+    trend_start = today - timedelta(days=6)
     lines.append("Recent workouts (7d):")
+    lines.append(
+        f"  metadata: private=true; local_timezone={timezone_name}; "
+        f"local_dates={trend_start.isoformat()}..{today.isoformat()}; today=partial"
+    )
+    recent_24h = [
+        workout
+        for day in result.summaries
+        for workout in day.workouts
+        if now_utc - timedelta(hours=24) <= workout.started_at <= now_utc
+    ]
+    recent_24h.sort(key=lambda workout: workout.started_at, reverse=True)
+    if recent_24h:
+        recent_parts = []
+        for workout in recent_24h:
+            started_local = workout.started_at.astimezone(tz)
+            duration = _format_duration(workout.duration_seconds)
+            recent_parts.append(
+                f"{workout.workout_type} {duration} @ "
+                f"{started_local.isoformat(timespec='minutes')}"
+            )
+        lines.append(f"  past_24h: {'; '.join(recent_parts)}")
+    else:
+        lines.append("  past_24h: no_workout_data")
+    lines.append("  by_date (newest_first):")
 
-    for day in result.summaries:
-        ld = day.local_date
+    by_date = {day.local_date: day for day in result.summaries}
+    for day_offset in range(7):
+        local_day = today - timedelta(days=day_offset)
+        day_label = " [today_partial]" if local_day == today else ""
+        day = by_date.get(local_day)
+        if day is None:
+            lines.append(
+                f"    - {local_day.isoformat()}{day_label}: no_workout_data"
+            )
+            continue
         types_list: list[str] = sorted(
             {w.workout_type for w in day.workouts if w.workout_type != "unknown"}
         )
@@ -1334,12 +1587,15 @@ async def _build_workout_summary_block(
             dur_mins = round(day.total_duration_seconds / 60)
             dur_str = f", {dur_mins}min total"
 
-        proj_str = ""
-        if day.projected_count > 0:
-            proj_str = f" ({day.projected_count} projected)"
+        projection_str = (
+            f"; projected_count={day.projected_count}"
+            if day.projected_count > 0
+            else ""
+        )
 
         lines.append(
-            f"  {ld}: {day.workout_count} workout(s) — {types_str}{dur_str}{proj_str}"
+            f"    - {local_day.isoformat()}{day_label}: count={day.workout_count}; "
+            f"types={types_str}{dur_str}{projection_str}"
         )
 
     return "\n".join(lines)
@@ -1658,12 +1914,12 @@ def _render_solo_with_counts(
 
     # ── Fitness adherence + Health + Workout summaries (Hector only) ─
     fitness_parts: list[str] = []
-    if hc.fitness_block:
-        fitness_parts.append(hc.fitness_block)
     if hc.health_block:
         fitness_parts.append(hc.health_block)
     if hc.workout_block:
         fitness_parts.append(hc.workout_block)
+    if hc.fitness_block:
+        fitness_parts.append(hc.fitness_block)
     if fitness_parts:
         lines += ["", "## Fitness", "\n".join(fitness_parts)]
 

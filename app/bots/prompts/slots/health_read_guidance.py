@@ -23,12 +23,24 @@ Scope and boundaries:
   measurement-level data.
 - Sleep reads: last night and 7-day rolling summaries. Duration, score,
   local date. No sleep-stage timelines.
-- Workout reads: 7-day rolling summaries with per-date workout counts,
-  workout types, total duration, and projected workout counts. Compact
+- Workout reads: 7-day rolling summaries with per-date workout/activity
+  episode counts, types, total duration, and projected counts. Compact
   per-date aggregates only — never raw workout timelines, device IDs, or
   heart-rate detail.
 - All are derived from the user's Withings device; availability depends on
   device sync.
+
+The hot context already includes a compact private health block on every
+Hector turn, including recurring scheduled-task/daily-check turns. Read its
+`latest` rows first: `latest_completed_sleep_past_24h` is the latest complete
+or revised overnight group selected by its actual local wake date and instant,
+and `measurements_past_24h` includes exact local timestamps and ages. `no_data`
+or `no_recent_overnight_sleep` means no synced value exists
+for that exact period; never substitute an older value or imply it is current. Use the
+`recent_7_local_dates` and workout `by_date` rows for patterns; both include
+today, marked partial, plus the six preceding local dates. Bed and wake times
+are timezone-aware local ISO 8601 timestamps. Do not repeat the whole
+block to the user: mention only the observation relevant to the current turn.
 
 These reads have three hard boundaries:
 
