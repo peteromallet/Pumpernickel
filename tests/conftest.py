@@ -1193,6 +1193,8 @@ class FakePool:
             return self._health_disconnect_connection(*args)
         if compact.startswith("UPDATE mediator.health_connections SET status = 'deleted'"):
             return self._health_delete_connection(*args)
+        if compact.startswith("UPDATE mediator.health_connections SET external_user_id = $2"):
+            return self._health_rotate_tokens(*args)
         if compact.startswith("SELECT id, connection_id, user_id, provider, provider_user_id, resource_type"):
             provider, payload_hash = args
             receipt_id = self.health_webhook_receipts_by_payload.get((provider, payload_hash))
@@ -1773,6 +1775,52 @@ class FakePool:
             "deleted_at": row["deleted_at"],
             "revoked_at": row["revoked_at"],
         }
+
+    def _health_rotate_tokens(self, *args: Any) -> dict[str, Any] | None:
+        # Mirrors _ROTATE_REFRESH_SQL: compare-and-swap on updated_at +
+        # refresh_token_encrypted, then rotate the OAuth tokens.
+        (
+            connection_id,
+            external_user_id,
+            granted_scopes,
+            granted_at,
+            access_token_encrypted,
+            refresh_token_encrypted,
+            access_token_expires_at,
+            refresh_token_expires_at,
+            refresh_token_rotated_at,
+            updated_at,
+            expected_updated_at,
+            expected_refresh_token_encrypted,
+        ) = args
+        row = self.health_connections.get(connection_id)
+        if row is None or row.get("deleted_at") is not None:
+            return None
+        if (
+            row.get("updated_at") != expected_updated_at
+            or row.get("refresh_token_encrypted") != expected_refresh_token_encrypted
+        ):
+            return None
+        row.update(
+            {
+                "external_user_id": external_user_id,
+                "status": "active",
+                "granted_scopes": list(granted_scopes),
+                "granted_at": granted_at,
+                "access_token_encrypted": access_token_encrypted,
+                "refresh_token_encrypted": refresh_token_encrypted,
+                "access_token_expires_at": access_token_expires_at,
+                "refresh_token_expires_at": refresh_token_expires_at,
+                "refresh_token_rotated_at": refresh_token_rotated_at,
+                "last_error_at": None,
+                "last_error_code": None,
+                "last_error_detail": None,
+                "disconnected_at": None,
+                "revoked_at": None,
+                "updated_at": updated_at,
+            }
+        )
+        return dict(row)
 
     def _health_list_connections(self, *args: Any) -> list[dict[str, Any]]:
         provider, limit = args
