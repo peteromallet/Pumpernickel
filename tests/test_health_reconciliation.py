@@ -55,7 +55,7 @@ async def _store_valid_connection(
         tokens=HealthOAuthTokens(
             access_token=exchanged.access_token,
             refresh_token=exchanged.refresh_token,
-            expires_at=exchanged.expires_at,
+            expires_at=datetime(2026, 7, 20, 16, 0, tzinfo=UTC),
             external_user_id=exchanged.external_user_id,
             granted_scopes=scopes,
         ),
@@ -258,3 +258,148 @@ async def test_reconciliation_skips_disconnected_connections(monkeypatch: pytest
     assert summary.outcomes[0].status is HealthSyncStatus.COMPLETED
     assert disconnected.connection_id in summary.skipped_connection_ids
     assert all(row["connection_id"] == active.connection_id for row in pool.health_source_records.values())
+
+
+class _RefreshTrackingProvider:
+    """Provider that records token refreshes and the access token used to fetch."""
+
+    name = "withings"
+    capabilities = WITHINGS_PROVIDER_CAPABILITIES
+
+    def __init__(self) -> None:
+        self.refreshed_with: list[str] = []
+        self.fetched_with: list[str] = []
+
+    async def exchange_code(self, *, code: str, redirect_uri: str):
+        raise NotImplementedError
+
+    async def refresh_token(self, *, refresh_token: str) -> HealthOAuthTokens:
+        self.refreshed_with.append(refresh_token)
+        return HealthOAuthTokens(
+            access_token="refreshed-access-token",
+            refresh_token="rotated-refresh-token",
+            expires_at=datetime(2026, 7, 20, 15, 0, tzinfo=UTC),
+            external_user_id="420001",
+            granted_scopes=frozenset({"user.metrics"}),
+        )
+
+    async def fetch_changes(
+        self,
+        *,
+        access_token: str,
+        resource_type: HealthResourceType,
+        cursor: HealthSyncCursor | None,
+    ) -> HealthFetchResult:
+        self.fetched_with.append(access_token)
+        last_modified = (
+            cursor.last_modified
+            if cursor is not None and cursor.last_modified is not None
+            else datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
+        )
+        return HealthFetchResult(
+            resource_type=resource_type,
+            records=(
+                HealthSourceRecord(
+                    provider=HealthProviderSlug.WITHINGS,
+                    resource_type=resource_type,
+                    external_id="measure-refresh",
+                    source_modified_at=last_modified + timedelta(minutes=1),
+                    observed_at=last_modified + timedelta(minutes=1),
+                    payload_hash="hash-refresh",
+                ),
+            ),
+            next_cursor=HealthSyncCursor(
+                resource_type=resource_type,
+                last_modified=last_modified + timedelta(minutes=1),
+            ),
+            has_more=False,
+        )
+
+    async def revoke(self, *, access_token: str, refresh_token: str | None = None) -> None:
+        raise NotImplementedError
+
+
+async def test_reconciliation_refreshes_expired_access_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconcile must refresh an expired access token instead of fetching with it.
+
+    Regression guard for the outage where the periodic reconciliation path used
+    the stored (expired) token directly, failed Withings authentication, and
+    never refreshed — leaving recent nights unsynced.
+    """
+    pool = FakePool()
+    repository = repository_for(pool)
+    provider = _RefreshTrackingProvider()
+    user_id = uuid4()
+    _set_key(monkeypatch)
+    await store_connection_tokens(
+        pool,
+        user_id=user_id,
+        provider=HealthProviderSlug.WITHINGS,
+        tokens=HealthOAuthTokens(
+            access_token="expired-access-token",
+            refresh_token="stored-refresh-token",
+            expires_at=datetime(2026, 7, 20, 10, 0, tzinfo=UTC),
+            external_user_id="420001",
+            granted_scopes=frozenset({"user.metrics"}),
+        ),
+        resource_types=[HealthResourceType.MEASUREMENT],
+        now=datetime(2026, 7, 20, 7, 0, tzinfo=UTC),
+    )
+
+    summary = await reconcile_connections(
+        pool=pool,
+        repository=repository,
+        provider=provider,
+        claimed_by="health-reconcile-refresh",
+        connection_limit=10,
+        dirty_limit=0,
+        now=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+    )
+
+    assert provider.refreshed_with == ["stored-refresh-token"]
+    assert provider.fetched_with == ["refreshed-access-token"]
+    assert summary.scanned_connection_count == 1
+    assert summary.skipped_connection_ids == ()
+    assert len(summary.outcomes) == 1
+    assert summary.outcomes[0].status is HealthSyncStatus.COMPLETED
+
+
+async def test_reconciliation_does_not_refresh_unexpired_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A still-valid access token must be used as-is (no needless refresh)."""
+    pool = FakePool()
+    repository = repository_for(pool)
+    provider = _RefreshTrackingProvider()
+    user_id = uuid4()
+    _set_key(monkeypatch)
+    await store_connection_tokens(
+        pool,
+        user_id=user_id,
+        provider=HealthProviderSlug.WITHINGS,
+        tokens=HealthOAuthTokens(
+            access_token="live-access-token",
+            refresh_token="stored-refresh-token",
+            expires_at=datetime(2026, 7, 20, 15, 0, tzinfo=UTC),
+            external_user_id="420001",
+            granted_scopes=frozenset({"user.metrics"}),
+        ),
+        resource_types=[HealthResourceType.MEASUREMENT],
+        now=datetime(2026, 7, 20, 7, 0, tzinfo=UTC),
+    )
+
+    summary = await reconcile_connections(
+        pool=pool,
+        repository=repository,
+        provider=provider,
+        claimed_by="health-reconcile-norefresh",
+        connection_limit=10,
+        dirty_limit=0,
+        now=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+    )
+
+    assert provider.refreshed_with == []
+    assert provider.fetched_with == ["live-access-token"]
+    assert summary.scanned_connection_count == 1
+    assert len(summary.outcomes) == 1
+    assert summary.outcomes[0].status is HealthSyncStatus.COMPLETED

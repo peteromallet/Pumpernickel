@@ -23,7 +23,11 @@ from app.services.health_sync.sync import (
     sync_connection_resource_safely,
     sync_dirty_categories,
 )
-from app.services.health_sync.tokens import HealthTokenStoreError, load_connection_tokens
+from app.services.health_sync.tokens import (
+    HealthTokenStoreError,
+    load_connection_tokens,
+    refresh_connection_tokens,
+)
 
 
 DEFAULT_RECONCILIATION_BACKFILL_WINDOW = timedelta(days=30)
@@ -150,9 +154,33 @@ async def reconcile_connections(
         except HealthTokenStoreError:
             skipped_connection_ids.append(connection.connection_id)
             continue
-        if tokens.status != "active" or not tokens.access_token:
+        if tokens.status != "active":
             skipped_connection_ids.append(connection.connection_id)
             continue
+        # Refresh short-lived Withings access tokens before syncing.  Without
+        # this, the periodic reconciliation path fetches with the expired
+        # stored token and fails authentication — the failure that left recent
+        # nights unsynced once the access token aged out and no webhook had
+        # created dirty work for the worker's refresh-aware dirty path.
+        access_token = tokens.access_token
+        if not access_token or (
+            tokens.access_token_expires_at is not None
+            and tokens.access_token_expires_at <= timestamp
+        ):
+            try:
+                refreshed = await refresh_connection_tokens(
+                    pool,
+                    connection_id=connection.connection_id,
+                    provider=provider,
+                    now=timestamp,
+                )
+            except HealthTokenStoreError:
+                skipped_connection_ids.append(connection.connection_id)
+                continue
+            if refreshed.status != "active" or not refreshed.access_token:
+                skipped_connection_ids.append(connection.connection_id)
+                continue
+            access_token = refreshed.access_token
         for resource_type in _eligible_resource_types(
             provider=provider,
             granted_scopes=tokens.granted_scopes,
@@ -174,7 +202,7 @@ async def reconcile_connections(
                     provider=provider,
                     connection_id=connection.connection_id,
                     user_id=connection.user_id,
-                    access_token=tokens.access_token,
+                    access_token=access_token,
                     resource_type=resource_type,
                     cursor_seed=cursor_seed,
                     max_attempts=max_attempts,
